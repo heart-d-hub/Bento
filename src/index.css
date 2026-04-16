@@ -1,0 +1,187 @@
+@import 'tailwindcss';
+@variant dark (&:where(.dark, .dark *));
+
+/* Sarabun (OFL) — ฝังในแอป ไม่พึ่งฟอนต์ในเครื่อง */
+@import '@fontsource/sarabun/thai-400.css';
+@import '@fontsource/sarabun/latin-400.css';
+@import '@fontsource/sarabun/thai-500.css';
+@import '@fontsource/sarabun/latin-500.css';
+@import '@fontsource/sarabun/thai-600.css';
+@import '@fontsource/sarabun/latin-600.css';
+@import '@fontsource/sarabun/thai-700.css';
+@import '@fontsource/sarabun/latin-700.css';
+
+@theme {
+  --font-sans:
+    'Sarabun', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol';
+}
+
+/* จอ POS / ~720p — ลดช่องว่างและความสูงของบล็อกหลัก */
+@custom-variant pos-compact (@media (max-height: 840px));
+/*
+ * จอ ~1280×720 (Tauri exe บ่อย) — ลดช่องว่างแนวตั้ง แถบชำระเงินแคบลงเล็กน้อย
+ * ใช้ร่วมกับ pos-compact (max-height: 840px) เมื่อหน้าต่างสูงไม่เกิน ~720
+ */
+/* 1280×720 และจอเตี้ยใกล้เคียง (รวมแถบชื่อเรื่อง/ทาสก์บาร์) */
+@custom-variant pos-720p (@media (min-width: 1100px) and (max-height: 800px));
+/* ความกว้าง ~1280 และลงมา — แถบด้านข้างและคอลัมน์ POS แคบลงเล็กน้อย */
+@custom-variant pos-narrow (@media (max-width: 1320px));
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+/* พิมพ์ป้าย: พอร์ทัล #label-print-surface ที่ document.body
+   อย่าใช้ visibility:hidden กับแอปหลัก — ยังกินที่ใน flow → หน้าพิมพ์แรกว่าง ป้ายถูกดันลง
+   ขนาด @page ฉีดจาก JS ตอนพิมพ์ป้ายเท่านั้น */
+@media print {
+  html,
+  body {
+    height: auto !important;
+    min-height: 0 !important;
+    margin: 0;
+    padding: 0;
+  }
+
+  body:has(#label-print-surface) > *:not(#label-print-surface) {
+    display: none !important;
+  }
+
+  #label-print-surface {
+    position: static !important;
+    left: auto !important;
+    top: auto !important;
+    width: 104mm !important;
+    max-width: 104mm !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    text-align: left !important;
+    box-sizing: border-box !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* ป้าย/บาร์โค้ด: ตัวอักษรดำคมตอนพิมพ์ */
+  #label-print-surface,
+  #label-print-surface * {
+    -webkit-font-smoothing: auto !important;
+    -moz-osx-font-smoothing: auto !important;
+    text-rendering: geometricPrecision !important;
+    color: #000 !important;
+  }
+
+  /* อย่าทับ min-height มม. จาก LabelDesignerPrintPage — ไม่งั้นขนาดกับ @page ไม่ตรงและถูกย่อแปลก */
+  #label-print-surface .label-print-page {
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+    break-inside: avoid;
+    page-break-inside: avoid;
+    page-break-after: always;
+  }
+
+  #label-print-surface .label-print-page:last-child {
+    page-break-after: auto !important;
+    break-after: auto !important;
+  }
+
+  /* ใบเสร็จ: พอร์ทัล #receipt-print-surface — ความกว้างตั้งจาก JS ตามม้วน */
+  body:has(#receipt-print-surface) > *:not(#receipt-print-surface) {
+    display: none !important;
+  }
+
+  #receipt-print-surface {
+    position: static !important;
+    left: auto !important;
+    top: auto !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    text-align: left !important;
+    box-sizing: border-box !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* ใบเสร็จ POS: ตัวอักษรดำคมตอนพิมพ์ */
+  #receipt-print-surface,
+  #receipt-print-surface * {
+    -webkit-font-smoothing: auto !important;
+    -moz-osx-font-smoothing: auto !important;
+    text-rendering: geometricPrecision !important;
+    color: #000 !important;
+  }
+
+  /* ใบกำกับภาษี: แสดงเฉพาะพอร์ทัลพิมพ์ — ใช้กับ WebView2 ShowPrintUI(System) */
+  body:has(#tax-invoice-print-surface) > *:not(#tax-invoice-print-surface) {
+    display: none !important;
+  }
+
+  #tax-invoice-print-surface {
+    position: static !important;
+    left: auto !important;
+    top: auto !important;
+    width: auto !important;
+    height: auto !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+    opacity: 1 !important;
+    z-index: auto !important;
+    text-align: left !important;
+    box-sizing: border-box !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* ใบกำกับ: ตัด smoothing จาก body (antialiased) + บังคับดำ — ลดตัวอักษรหม่นตอนพิมพ์จากเว็บ */
+  #tax-invoice-print-surface,
+  #tax-invoice-print-surface * {
+    -webkit-font-smoothing: auto !important;
+    -moz-osx-font-smoothing: auto !important;
+    text-rendering: geometricPrecision !important;
+    color: #000 !important;
+  }
+
+}
+
+body {
+  margin: 0;
+  -webkit-tap-highlight-color: transparent;
+  font-family: 'Sarabun', ui-sans-serif, system-ui, sans-serif;
+  font-size: 0.875rem;
+  line-height: 1.45;
+  color: rgb(15 23 42);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background-color: rgb(191 219 254 / 0.85);
+  color: rgb(15 23 42);
+}
+
+/* เลื่อนรายการยาว — บางลง ไม่แย่งสายตา */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(203 213 225) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: rgb(203 213 225);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgb(148 163 184);
+  background-clip: padding-box;
+}

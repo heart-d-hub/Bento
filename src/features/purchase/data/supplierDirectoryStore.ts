@@ -1,0 +1,233 @@
+import { MOCK_SUPPLIERS } from '@/features/purchase/data/mockSuppliers'
+
+const LS_KEY = 'bento.purchase.supplierDirectory.v1'
+
+export const SUPPLIER_DIRECTORY_CHANGED_EVENT = 'bento-supplier-directory-changed'
+
+/** บัญชีรับโอนหนึ่งบัญชี — ผู้จำหน่ายหนึ่งรายมีได้หลายบัญชี */
+export type SupplierBankAccount = {
+  bankName?: string
+  accountNo?: string
+  accountName?: string
+}
+
+export type SupplierProfile = {
+  id: string
+  /** รหัสย่อผู้จำหน่าย */
+  supplierCode: string
+  name: string
+  taxId?: string
+  phone?: string
+  address?: string
+  notes?: string
+  /** รับชำระเงินสด */
+  acceptsCash?: boolean
+  /** รับชำระโอนธนาคาร */
+  acceptsTransfer?: boolean
+  /** ช่องทางชำระอื่นๆ (เช็ค, บัตรเครดิต, พร้อมเพย์ ฯลฯ) — หลายรายการได้ */
+  otherPaymentMethods?: string[]
+  /** บัญชีรับโอน (หลายบัญชีได้) */
+  bankAccounts?: SupplierBankAccount[]
+}
+
+function newSupplierId(): string {
+  return `sup-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+}
+
+function seedProfiles(): SupplierProfile[] {
+  return MOCK_SUPPLIERS.map((s) => ({
+    id: s.id,
+    supplierCode: s.id.replace(/^sup-/, '').replace(/-/g, '').toUpperCase().slice(0, 10),
+    name: s.name,
+    taxId: s.taxId,
+    phone: s.phone,
+    address: '',
+    notes: '',
+    acceptsCash: true,
+    acceptsTransfer: true,
+  }))
+}
+
+export function loadSupplierDirectory(): SupplierProfile[] {
+  try {
+    const raw = localStorage.getItem(LS_KEY)
+    if (!raw) {
+      const seed = seedProfiles()
+      localStorage.setItem(LS_KEY, JSON.stringify(seed))
+      return seed
+    }
+    const list = JSON.parse(raw) as unknown
+    if (!Array.isArray(list) || list.length === 0) {
+      const seed = seedProfiles()
+      localStorage.setItem(LS_KEY, JSON.stringify(seed))
+      return seed
+    }
+    return list
+      .map(normalizeProfile)
+      .filter((x): x is SupplierProfile => x !== null)
+  } catch {
+    return seedProfiles()
+  }
+}
+
+function optTrim(v: unknown): string | undefined {
+  if (typeof v !== 'string') return undefined
+  const t = v.trim()
+  return t || undefined
+}
+
+function normalizeBankAccountEntry(v: unknown): SupplierBankAccount | null {
+  if (!v || typeof v !== 'object') return null
+  const r = v as Record<string, unknown>
+  const bankName = optTrim(r.bankName)
+  const accountNo = optTrim(r.accountNo ?? r.bankAccountNo)
+  const accountName = optTrim(r.accountName ?? r.bankAccountName)
+  if (!bankName && !accountNo && !accountName) return null
+  return { bankName, accountNo, accountName }
+}
+
+function normalizeOtherPaymentMethods(o: Record<string, unknown>): string[] | undefined {
+  const raw = o.otherPaymentMethods
+  if (!Array.isArray(raw)) return undefined
+  const list = raw
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter((s) => s.length > 0)
+  return list.length ? list : undefined
+}
+
+function normalizeBankAccountsFromRecord(o: Record<string, unknown>): SupplierBankAccount[] | undefined {
+  const raw = o.bankAccounts
+  if (Array.isArray(raw)) {
+    const list = raw.map(normalizeBankAccountEntry).filter((x): x is SupplierBankAccount => x !== null)
+    if (list.length) return list
+  }
+  const legacyName = optTrim(o.bankName)
+  const legacyNo = optTrim(o.bankAccountNo)
+  const legacyAccName = optTrim(o.bankAccountName)
+  if (legacyName || legacyNo || legacyAccName) {
+    return [{ bankName: legacyName, accountNo: legacyNo, accountName: legacyAccName }]
+  }
+  return undefined
+}
+
+function normalizeProfile(v: unknown): SupplierProfile | null {
+  if (!v || typeof v !== 'object') return null
+  const o = v as Record<string, unknown>
+  const id = typeof o.id === 'string' && o.id.trim() ? o.id.trim() : ''
+  const name = typeof o.name === 'string' ? o.name.trim() : ''
+  if (!id || !name) return null
+  const supplierCode =
+    typeof o.supplierCode === 'string' && o.supplierCode.trim()
+      ? o.supplierCode.trim()
+      : id.replace(/^sup-/, '').slice(0, 12).toUpperCase()
+  const bool = (k: string): boolean | undefined => {
+    if (typeof o[k] === 'boolean') return o[k] as boolean
+    return undefined
+  }
+  let acceptsCash = bool('acceptsCash')
+  let acceptsTransfer = bool('acceptsTransfer')
+  if (acceptsCash === undefined && acceptsTransfer === undefined) {
+    acceptsCash = true
+    acceptsTransfer = true
+  }
+  const bankAccounts = normalizeBankAccountsFromRecord(o)
+  const otherPaymentMethods = normalizeOtherPaymentMethods(o)
+  return {
+    id,
+    supplierCode,
+    name,
+    taxId: optTrim(o.taxId),
+    phone: optTrim(o.phone),
+    address: optTrim(o.address),
+    notes: optTrim(o.notes),
+    acceptsCash,
+    acceptsTransfer,
+    otherPaymentMethods,
+    bankAccounts,
+  }
+}
+
+function saveList(list: SupplierProfile[]): void {
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify(list))
+    window.dispatchEvent(new CustomEvent(SUPPLIER_DIRECTORY_CHANGED_EVENT))
+  } catch {
+    /* ignore */
+  }
+}
+
+export function getSupplierProfile(supplierId: string): SupplierProfile | undefined {
+  return loadSupplierDirectory().find((s) => s.id === supplierId)
+}
+
+export function upsertSupplierProfile(profile: SupplierProfile): void {
+  const list = loadSupplierDirectory()
+  const idx = list.findIndex((s) => s.id === profile.id)
+  if (idx >= 0) {
+    list[idx] = profile
+  } else {
+    list.push(profile)
+  }
+  saveList(list)
+}
+
+function trimOpt(s: string | undefined): string | undefined {
+  const t = s?.trim()
+  return t ? t : undefined
+}
+
+function cleanOtherPaymentMethods(list: string[] | undefined): string[] | undefined {
+  if (!list?.length) return undefined
+  const cleaned = list.map((s) => s.trim()).filter((s) => s.length > 0)
+  return cleaned.length ? cleaned : undefined
+}
+
+function cleanBankAccounts(list: SupplierBankAccount[] | undefined): SupplierBankAccount[] | undefined {
+  if (!list?.length) return undefined
+  const cleaned = list
+    .map((a) => ({
+      bankName: trimOpt(a.bankName),
+      accountNo: trimOpt(a.accountNo),
+      accountName: trimOpt(a.accountName),
+    }))
+    .filter((a) => a.bankName || a.accountNo || a.accountName)
+  return cleaned.length ? cleaned : undefined
+}
+
+export function createSupplierProfile(partial: Omit<SupplierProfile, 'id'> & { id?: string }): SupplierProfile {
+  const id = partial.id?.trim() || newSupplierId()
+  const profile: SupplierProfile = {
+    id,
+    supplierCode: partial.supplierCode.trim() || id.slice(0, 10),
+    name: partial.name.trim(),
+    taxId: trimOpt(partial.taxId),
+    phone: trimOpt(partial.phone),
+    address: trimOpt(partial.address),
+    notes: trimOpt(partial.notes),
+    acceptsCash: partial.acceptsCash,
+    acceptsTransfer: partial.acceptsTransfer,
+    otherPaymentMethods: cleanOtherPaymentMethods(partial.otherPaymentMethods),
+    bankAccounts: cleanBankAccounts(partial.bankAccounts),
+  }
+  upsertSupplierProfile(profile)
+  return profile
+}
+
+/** แสดงช่องทางชำระที่ตั้งไว้ (รวมช่องทางอื่นที่กำหนดเอง) */
+export function supplierPaymentMethodsLabel(p: SupplierProfile): string {
+  const bits: string[] = []
+  if (p.acceptsCash) bits.push('เงินสด')
+  if (p.acceptsTransfer) bits.push('เงินโอน')
+  for (const s of p.otherPaymentMethods ?? []) {
+    const t = s.trim()
+    if (t) bits.push(t)
+  }
+  return bits.length ? bits.join(' · ') : 'ยังไม่ระบุ'
+}
+
+/** รวมข้อความบัญชีสำหรับค้นหา */
+export function supplierBankAccountsSearchText(p: SupplierProfile): string {
+  return (p.bankAccounts ?? [])
+    .flatMap((a) => [a.bankName ?? '', a.accountNo ?? '', a.accountName ?? ''])
+    .join(' ')
+}

@@ -1,0 +1,875 @@
+/* eslint-disable react-hooks/set-state-in-effect -- combobox: sync ข้อความช่องค้นหากับ id + clamp highlight */
+import { useVehicleCatalog } from '@/features/vehicle/context/VehicleCatalogContext'
+import {
+  findEngineDefForVariant,
+  flattenVariantOptions,
+  formatVariantFitPickerCompact,
+} from '@/features/vehicle/data/vehicleCatalogUtils'
+import { powertrainLabel } from '@/features/vehicle/data/powertrainOptions'
+import { clsx } from 'clsx'
+import { Plus, X } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+
+export type VehicleFitRow = {
+  id: string
+  categoryId: string
+  categoryLabel: string
+  brandId: string
+  brandName: string
+  modelId: string
+  modelName: string
+  engineId: string
+  engineLabel: string
+  engineCode?: string
+  /** เว้นว่าง = ไม่ระบุ (กรอง/ของทั่วไป) — ใช้กับผ้าเบรก/ดิสก์ */
+  brakePosition?: '' | 'front' | 'rear'
+}
+
+const inputCls =
+  'w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-[13px] text-slate-900 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-sky-400/70 focus:ring-1 focus:ring-sky-100 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400'
+
+const dropdownPanelClass =
+  'absolute z-[60] mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-slate-200 bg-white p-1 shadow-lg'
+
+/** กว้างอย่างน้อยเท่าช่อง input แต่ขยายตามข้อความยาวสุด — ไม่ตัด ... ในบรรทัดเดียว */
+const variantDropdownPanelClass =
+  'absolute left-0 z-[60] mt-1 max-h-56 min-w-full w-max max-w-[min(36rem,calc(100vw-1.5rem))] overflow-x-auto overflow-y-auto rounded-md border border-slate-200 bg-white p-1 shadow-lg'
+
+const alignedLabelCls = 'mb-0.5 flex min-h-[1.75rem] items-end text-[10px] font-medium leading-snug text-slate-600'
+
+type SearchBrandOption = { id: string; name: string; categoryId: string; categoryLabel: string }
+type SearchModelOption = {
+  id: string
+  name: string
+  brandId: string
+  brandName: string
+  categoryId: string
+  categoryLabel: string
+}
+type SearchVariantOption = ReturnType<typeof flattenVariantOptions>[number] & {
+  /** แสดงในช่องค้นหา เช่น 1.6FD(2000-2012) — `label` ยังเป็นข้อความเต็มสำหรับ tooltip / บันทึก */
+  inputCompact: string
+  brandId: string
+  brandName: string
+  modelId: string
+  modelName: string
+  categoryId: string
+  categoryLabel: string
+}
+
+type Props = {
+  rows: VehicleFitRow[]
+  onAdd: (row: VehicleFitRow) => void
+  onRemove: (id: string) => void
+  labelClass: string
+  sectionClass: string
+  sectionTitleClass: string
+  /** แสดงทางขวาของหัวข้อ เช่น ปุ่มเปิดจัดการรุ่นรถ */
+  titleAction?: ReactNode
+  /** true = ไม่แสดงแถบหัวข้อ (ใช้เมื่อห่อด้วย summary ภายนอก) */
+  hideSectionTitle?: boolean
+}
+
+function newRowId() {
+  return `vf-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+}
+
+function moveHighlightIndex(current: number, length: number, direction: -1 | 1): number {
+  if (length <= 0) return -1
+  if (current < 0) return direction === 1 ? 0 : length - 1
+  return (current + direction + length) % length
+}
+
+function compactEngineLabel(label: string): string {
+  const parts = label
+    .split(' · ')
+    .map((part) => part.trim())
+    .filter(Boolean)
+  if (parts.length <= 1) return label
+  const yearPart = parts.pop()
+  if (!yearPart) return label
+  return `${parts.join(' · ')} · (${yearPart})`
+}
+
+export function VehicleFitPicker({
+  rows,
+  onAdd,
+  onRemove,
+  labelClass,
+  sectionClass,
+  sectionTitleClass,
+  titleAction,
+  hideSectionTitle = false,
+}: Props) {
+  const { catalog, visibleCategoryIds } = useVehicleCatalog()
+  const [catId, setCatId] = useState('')
+  const [brandId, setBrandId] = useState('')
+  const [modelId, setModelId] = useState('')
+  const [engineId, setEngineId] = useState('')
+  const [brakePos, setBrakePos] = useState<'' | 'front' | 'rear'>('')
+
+  const [categoryQuery, setCategoryQuery] = useState('')
+  const [categoryDropdownOpen, setCategoryDropdownOpen] = useState(false)
+  const [categoryHighlightedIndex, setCategoryHighlightedIndex] = useState(-1)
+
+  const [brandQuery, setBrandQuery] = useState('')
+  const [brandDropdownOpen, setBrandDropdownOpen] = useState(false)
+  const [brandHighlightedIndex, setBrandHighlightedIndex] = useState(-1)
+
+  const [modelQuery, setModelQuery] = useState('')
+  const [modelDropdownOpen, setModelDropdownOpen] = useState(false)
+  const [modelHighlightedIndex, setModelHighlightedIndex] = useState(-1)
+
+  const [variantQuery, setVariantQuery] = useState('')
+  const [variantDropdownOpen, setVariantDropdownOpen] = useState(false)
+  const [variantHighlightedIndex, setVariantHighlightedIndex] = useState(-1)
+
+  const categoryDropdownRef = useRef<HTMLDivElement | null>(null)
+  const brandDropdownRef = useRef<HTMLDivElement | null>(null)
+  const modelDropdownRef = useRef<HTMLDivElement | null>(null)
+  const variantDropdownRef = useRef<HTMLDivElement | null>(null)
+
+  const visibleCategories = useMemo(
+    () =>
+      [...catalog.categories]
+        .filter((c) => visibleCategoryIds.has(c.id))
+        .sort((a, b) => a.sortOrder - b.sortOrder),
+    [catalog.categories, visibleCategoryIds],
+  )
+
+  const aggregated = useMemo(() => {
+    const brands: SearchBrandOption[] = []
+    const models: SearchModelOption[] = []
+    const variants: SearchVariantOption[] = []
+    for (const vc of visibleCategories) {
+      const catData = catalog.byCategory[vc.id]
+      if (!catData) continue
+      for (const brand of catData.brands) {
+        brands.push({
+          id: brand.id,
+          name: brand.name,
+          categoryId: vc.id,
+          categoryLabel: vc.label,
+        })
+        for (const model of catData.modelsByBrandId[brand.id] ?? []) {
+          models.push({
+            id: model.id,
+            name: model.name,
+            brandId: brand.id,
+            brandName: brand.name,
+            categoryId: vc.id,
+            categoryLabel: vc.label,
+          })
+          const engines = catData.enginesByModelId[model.id] ?? []
+          for (const v of flattenVariantOptions(engines)) {
+            const found = findEngineDefForVariant(engines, v.id)
+            const inputCompact = found
+              ? formatVariantFitPickerCompact(found.engine, found.variant)
+              : v.label
+            variants.push({
+              ...v,
+              inputCompact,
+              brandId: brand.id,
+              brandName: brand.name,
+              modelId: model.id,
+              modelName: model.name,
+              categoryId: vc.id,
+              categoryLabel: vc.label,
+            })
+          }
+        }
+      }
+    }
+    brands.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+    models.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+    return { brands, models, variants }
+  }, [visibleCategories, catalog])
+
+  const allBrands = aggregated.brands
+  const allModels = aggregated.models
+  const allVariants = aggregated.variants
+
+  const selectedBrand = allBrands.find((b) => b.id === brandId && b.categoryId === catId)
+  const selectedModel = allModels.find((m) => m.id === modelId && m.categoryId === catId)
+  const selectedEngine = allVariants.find((v) => v.id === engineId)
+
+  const filteredCategories = useMemo(() => {
+    const q = categoryQuery.trim().toLocaleLowerCase()
+    const base = visibleCategories
+    if (!q) return base
+    return base.filter((c) => c.label.toLocaleLowerCase().includes(q))
+  }, [visibleCategories, categoryQuery])
+
+  const filteredBrands = useMemo(() => {
+    const q = brandQuery.trim().toLocaleLowerCase()
+    const base = allBrands.filter(
+      (b) =>
+        (!catId || b.categoryId === catId) &&
+        (!selectedModel || (b.id === selectedModel.brandId && b.categoryId === selectedModel.categoryId)) &&
+        (!selectedEngine || (b.id === selectedEngine.brandId && b.categoryId === selectedEngine.categoryId)),
+    )
+    if (!q) return base
+    return base.filter((b) => b.name.toLocaleLowerCase().includes(q))
+  }, [allBrands, brandQuery, catId, selectedEngine, selectedModel])
+
+  const filteredModels = useMemo(() => {
+    const q = modelQuery.trim().toLocaleLowerCase()
+    const base = allModels.filter(
+      (m) =>
+        (!catId || m.categoryId === catId) &&
+        (!brandId || (m.brandId === brandId && m.categoryId === catId)) &&
+        (!selectedEngine || m.id === selectedEngine.modelId),
+    )
+    if (!q) return base
+    return base.filter((m) => m.name.toLocaleLowerCase().includes(q))
+  }, [allModels, brandId, catId, modelQuery, selectedEngine])
+
+  const filteredVariants = useMemo(() => {
+    const q = variantQuery.trim().toLocaleLowerCase()
+    const base = allVariants.filter(
+      (v) =>
+        (!catId || v.categoryId === catId) &&
+        (!brandId || (v.brandId === brandId && v.categoryId === catId)) &&
+        (!modelId || (v.modelId === modelId && v.categoryId === catId)),
+    )
+    if (!q) return base
+    return base.filter((v) =>
+      `${v.label} ${v.inputCompact} ${v.engineSummary} ${v.searchText} ${powertrainLabel(v.powertrain_type)}`
+        .toLocaleLowerCase()
+        .includes(q),
+    )
+  }, [allVariants, brandId, catId, modelId, variantQuery])
+
+  const categoryLabel = visibleCategories.find((c) => c.id === catId)?.label ?? ''
+  const brandName = selectedBrand?.name ?? selectedModel?.brandName ?? selectedEngine?.brandName ?? ''
+  const modelName = selectedModel?.name ?? selectedEngine?.modelName ?? ''
+  const engineLabel = selectedEngine?.label ?? allVariants.find((v) => v.id === engineId)?.label ?? ''
+
+  const canAdd = Boolean(catId && brandId && modelId && engineId)
+
+  function clearCategorySelection() {
+    setCatId('')
+    setBrandId('')
+    setBrandQuery('')
+    setModelId('')
+    setModelQuery('')
+    setEngineId('')
+    setVariantQuery('')
+    setBrakePos('')
+  }
+
+  function onSelectCategory(id: string) {
+    setCatId(id)
+    const lab = visibleCategories.find((c) => c.id === id)?.label ?? ''
+    setCategoryQuery(lab)
+    setBrandId('')
+    setBrandQuery('')
+    setModelId('')
+    setModelQuery('')
+    setEngineId('')
+    setVariantQuery('')
+    setBrakePos('')
+    setCategoryDropdownOpen(false)
+  }
+
+  function onBrandPick(b: SearchBrandOption) {
+    setCatId(b.categoryId)
+    setCategoryQuery(b.categoryLabel)
+    setBrandId(b.id)
+    setBrandQuery(b.name)
+    setModelId('')
+    setModelQuery('')
+    setEngineId('')
+    setVariantQuery('')
+    setBrakePos('')
+  }
+
+  function onModelPick(m: SearchModelOption) {
+    setCatId(m.categoryId)
+    setCategoryQuery(m.categoryLabel)
+    setBrandId(m.brandId)
+    setBrandQuery(m.brandName)
+    setModelId(m.id)
+    setModelQuery(m.name)
+    setEngineId('')
+    setVariantQuery('')
+    setBrakePos('')
+  }
+
+  function onVariantPick(v: SearchVariantOption) {
+    setCatId(v.categoryId)
+    setCategoryQuery(v.categoryLabel)
+    setBrandId(v.brandId)
+    setBrandQuery(v.brandName)
+    setModelId(v.modelId)
+    setModelQuery(v.modelName)
+    setEngineId(v.id)
+    setVariantQuery(v.inputCompact)
+    setBrakePos('')
+  }
+
+  function clearBrandSelection() {
+    setBrandId('')
+    setBrandQuery('')
+    setModelId('')
+    setModelQuery('')
+    setEngineId('')
+    setVariantQuery('')
+    setBrakePos('')
+  }
+
+  function clearModelSelection() {
+    setModelId('')
+    setModelQuery('')
+    setEngineId('')
+    setVariantQuery('')
+    setBrakePos('')
+  }
+
+  function clearVariantSelection() {
+    setEngineId('')
+    setVariantQuery('')
+    setBrakePos('')
+  }
+
+  useEffect(() => {
+    if (!catId) return
+    setCategoryQuery(visibleCategories.find((c) => c.id === catId)?.label ?? '')
+  }, [catId, visibleCategories])
+
+  useEffect(() => {
+    if (!brandId || !catId) {
+      setBrandQuery('')
+      return
+    }
+    setBrandQuery(selectedBrand?.name ?? '')
+  }, [brandId, catId, selectedBrand])
+
+  useEffect(() => {
+    if (!modelId || !catId) {
+      setModelQuery('')
+      return
+    }
+    setModelQuery(selectedModel?.name ?? '')
+  }, [modelId, catId, selectedModel])
+
+  useEffect(() => {
+    if (!engineId) {
+      setVariantQuery('')
+      return
+    }
+    setVariantQuery(selectedEngine?.inputCompact ?? '')
+  }, [engineId, selectedEngine])
+
+  useEffect(() => {
+    setCategoryHighlightedIndex((prev) => {
+      if (filteredCategories.length === 0) return -1
+      if (prev < 0) return 0
+      return Math.min(prev, filteredCategories.length - 1)
+    })
+  }, [filteredCategories])
+
+  useEffect(() => {
+    setBrandHighlightedIndex((prev) => {
+      if (filteredBrands.length === 0) return -1
+      if (prev < 0) return 0
+      return Math.min(prev, filteredBrands.length - 1)
+    })
+  }, [filteredBrands])
+
+  useEffect(() => {
+    setModelHighlightedIndex((prev) => {
+      if (filteredModels.length === 0) return -1
+      if (prev < 0) return 0
+      return Math.min(prev, filteredModels.length - 1)
+    })
+  }, [filteredModels])
+
+  useEffect(() => {
+    setVariantHighlightedIndex((prev) => {
+      if (filteredVariants.length === 0) return -1
+      if (prev < 0) return 0
+      return Math.min(prev, filteredVariants.length - 1)
+    })
+  }, [filteredVariants])
+
+  useEffect(() => {
+    if (!categoryDropdownOpen || categoryHighlightedIndex < 0) return
+    const el = categoryDropdownRef.current?.querySelector<HTMLElement>(
+      `[data-cat-index="${categoryHighlightedIndex}"]`,
+    )
+    el?.scrollIntoView({ block: 'nearest' })
+  }, [categoryDropdownOpen, categoryHighlightedIndex])
+
+  useEffect(() => {
+    if (!brandDropdownOpen || brandHighlightedIndex < 0) return
+    const el = brandDropdownRef.current?.querySelector<HTMLElement>(`[data-brand-index="${brandHighlightedIndex}"]`)
+    el?.scrollIntoView({ block: 'nearest' })
+  }, [brandDropdownOpen, brandHighlightedIndex])
+
+  useEffect(() => {
+    if (!modelDropdownOpen || modelHighlightedIndex < 0) return
+    const el = modelDropdownRef.current?.querySelector<HTMLElement>(`[data-model-index="${modelHighlightedIndex}"]`)
+    el?.scrollIntoView({ block: 'nearest' })
+  }, [modelDropdownOpen, modelHighlightedIndex])
+
+  useEffect(() => {
+    if (!variantDropdownOpen || variantHighlightedIndex < 0) return
+    const el = variantDropdownRef.current?.querySelector<HTMLElement>(
+      `[data-variant-index="${variantHighlightedIndex}"]`,
+    )
+    el?.scrollIntoView({ block: 'nearest' })
+  }, [variantDropdownOpen, variantHighlightedIndex])
+
+  function handleAdd() {
+    if (!canAdd) return
+    const bp = brakePos || ''
+    const dup = rows.some(
+      (r) =>
+        r.categoryId === catId &&
+        r.brandId === brandId &&
+        r.modelId === modelId &&
+        r.engineId === engineId &&
+        (r.brakePosition ?? '') === bp,
+    )
+    if (dup) return
+    onAdd({
+      id: newRowId(),
+      categoryId: catId,
+      categoryLabel,
+      brandId,
+      brandName,
+      modelId,
+      modelName,
+      engineId,
+      engineLabel,
+      ...(selectedEngine?.engineCode ? { engineCode: selectedEngine.engineCode } : {}),
+      brakePosition: brakePos || undefined,
+    })
+    setEngineId('')
+    setVariantQuery('')
+    setBrakePos('')
+  }
+
+  return (
+    <div className={sectionClass}>
+      {!hideSectionTitle ? (
+        <div className="mb-1 flex min-w-0 items-center justify-between gap-2">
+          <p
+            className={clsx(
+              'min-w-0 flex-1',
+              sectionTitleClass.replace(/\bmb-1\b/g, '').trim(),
+            )}
+          >
+            รถ / รุ่น / เครื่อง-ปี (ผูกสินค้า)
+          </p>
+          {titleAction ? <div className="shrink-0">{titleAction}</div> : null}
+        </div>
+      ) : null}
+
+      <div className="grid gap-1.5 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
+        <label className="block min-w-0">
+          <span className={clsx(labelClass, alignedLabelCls)}>ประเภท</span>
+          <div className="relative">
+            <input
+              className={inputCls}
+              value={categoryQuery}
+              onFocus={() => {
+                setCategoryDropdownOpen(true)
+                const idx = filteredCategories.findIndex((c) => c.id === catId)
+                setCategoryHighlightedIndex(idx >= 0 ? idx : 0)
+              }}
+              onBlur={() => {
+                window.setTimeout(() => setCategoryDropdownOpen(false), 120)
+              }}
+              onChange={(e) => {
+                setCategoryDropdownOpen(true)
+                setCategoryQuery(e.target.value)
+                setCategoryHighlightedIndex(0)
+                if (catId) clearCategorySelection()
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowDown') {
+                  e.preventDefault()
+                  setCategoryDropdownOpen(true)
+                  setCategoryHighlightedIndex((prev) => moveHighlightIndex(prev, filteredCategories.length, 1))
+                  return
+                }
+                if (e.key === 'ArrowUp') {
+                  e.preventDefault()
+                  setCategoryDropdownOpen(true)
+                  setCategoryHighlightedIndex((prev) => moveHighlightIndex(prev, filteredCategories.length, -1))
+                  return
+                }
+                if (e.key === 'Escape') setCategoryDropdownOpen(false)
+                if (e.key === 'Enter' && filteredCategories.length > 0) {
+                  e.preventDefault()
+                  const pickIndex = categoryHighlightedIndex >= 0 ? categoryHighlightedIndex : 0
+                  const picked = filteredCategories[pickIndex]
+                  onSelectCategory(picked.id)
+                }
+              }}
+              disabled={visibleCategories.length === 0}
+              placeholder={visibleCategories.length ? '...' : 'ไม่มีประเภทที่แสดง'}
+            />
+            {categoryDropdownOpen && visibleCategories.length > 0 ? (
+              <div ref={categoryDropdownRef} className={dropdownPanelClass}>
+                {filteredCategories.length === 0 ? (
+                  <p className="px-1.5 py-1 text-[11px] text-slate-500">ไม่พบประเภท</p>
+                ) : (
+                  filteredCategories.map((c, idx) => (
+                    <button
+                      key={c.id}
+                      type="button"
+                      data-cat-index={idx}
+                      onMouseDown={(ev) => ev.preventDefault()}
+                      onMouseEnter={() => setCategoryHighlightedIndex(idx)}
+                      onClick={() => onSelectCategory(c.id)}
+                      className={clsx(
+                        'flex w-full rounded px-1.5 py-1 text-left text-[11px] transition',
+                        catId === c.id
+                          ? 'bg-slate-900 text-white'
+                          : idx === categoryHighlightedIndex
+                            ? 'bg-slate-100 text-slate-800'
+                            : 'text-slate-700 hover:bg-slate-100',
+                      )}
+                    >
+                      {c.label}
+                    </button>
+                  ))
+                )}
+              </div>
+            ) : null}
+          </div>
+        </label>
+
+        <label className="block min-w-0">
+          <span className={clsx(labelClass, alignedLabelCls)}>ยี่ห้อ</span>
+          <div className="relative">
+            <input
+              className={inputCls}
+              value={brandQuery}
+              onFocus={() => {
+                setBrandDropdownOpen(true)
+                const idx = filteredBrands.findIndex((b) => b.id === brandId && b.categoryId === catId)
+                setBrandHighlightedIndex(idx >= 0 ? idx : 0)
+              }}
+              onBlur={() => window.setTimeout(() => setBrandDropdownOpen(false), 120)}
+              onChange={(e) => {
+                setBrandDropdownOpen(true)
+                setBrandQuery(e.target.value)
+                setBrandHighlightedIndex(0)
+                if (brandId) clearBrandSelection()
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowDown') {
+                  e.preventDefault()
+                  setBrandDropdownOpen(true)
+                  setBrandHighlightedIndex((prev) => moveHighlightIndex(prev, filteredBrands.length, 1))
+                  return
+                }
+                if (e.key === 'ArrowUp') {
+                  e.preventDefault()
+                  setBrandDropdownOpen(true)
+                  setBrandHighlightedIndex((prev) => moveHighlightIndex(prev, filteredBrands.length, -1))
+                  return
+                }
+                if (e.key === 'Escape') setBrandDropdownOpen(false)
+                if (e.key === 'Enter' && filteredBrands.length > 0) {
+                  e.preventDefault()
+                  const pickIndex = brandHighlightedIndex >= 0 ? brandHighlightedIndex : 0
+                  onBrandPick(filteredBrands[pickIndex])
+                  setBrandDropdownOpen(false)
+                }
+              }}
+              disabled={!visibleCategories.length || !allBrands.length}
+              placeholder={visibleCategories.length ? '...' : '—'}
+            />
+            {brandDropdownOpen && visibleCategories.length > 0 && allBrands.length > 0 ? (
+              <div ref={brandDropdownRef} className={dropdownPanelClass}>
+                {filteredBrands.length === 0 ? (
+                  <p className="px-1.5 py-1 text-[11px] text-slate-500">ไม่พบยี่ห้อ</p>
+                ) : (
+                  filteredBrands.map((b, idx) => (
+                    <button
+                      key={`${b.categoryId}-${b.id}`}
+                      type="button"
+                      data-brand-index={idx}
+                      onMouseDown={(ev) => ev.preventDefault()}
+                      onMouseEnter={() => setBrandHighlightedIndex(idx)}
+                      onClick={() => {
+                        onBrandPick(b)
+                        setBrandDropdownOpen(false)
+                      }}
+                      className={clsx(
+                        'flex w-full items-center justify-between gap-1 rounded px-1.5 py-1 text-left text-[11px] transition',
+                        brandId === b.id && catId === b.categoryId
+                          ? 'bg-slate-900 text-white'
+                          : idx === brandHighlightedIndex
+                            ? 'bg-slate-100 text-slate-800'
+                            : 'text-slate-700 hover:bg-slate-100',
+                      )}
+                    >
+                      <span className="truncate">{b.name}</span>
+                      {!catId ? (
+                        <span
+                          className={clsx(
+                            'shrink-0 text-[10px]',
+                            brandId === b.id && catId === b.categoryId ? 'text-slate-200' : 'text-slate-500',
+                          )}
+                        >
+                          {b.categoryLabel}
+                        </span>
+                      ) : null}
+                    </button>
+                  ))
+                )}
+              </div>
+            ) : null}
+          </div>
+        </label>
+
+        <label className="block min-w-0">
+          <span className={clsx(labelClass, alignedLabelCls)}>รุ่น</span>
+          <div className="relative">
+            <input
+              className={inputCls}
+              value={modelQuery}
+              onFocus={() => {
+                setModelDropdownOpen(true)
+                const idx = filteredModels.findIndex((m) => m.id === modelId && m.categoryId === catId)
+                setModelHighlightedIndex(idx >= 0 ? idx : 0)
+              }}
+              onBlur={() => window.setTimeout(() => setModelDropdownOpen(false), 120)}
+              onChange={(e) => {
+                setModelDropdownOpen(true)
+                setModelQuery(e.target.value)
+                setModelHighlightedIndex(0)
+                if (modelId) clearModelSelection()
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowDown') {
+                  e.preventDefault()
+                  setModelDropdownOpen(true)
+                  setModelHighlightedIndex((prev) => moveHighlightIndex(prev, filteredModels.length, 1))
+                  return
+                }
+                if (e.key === 'ArrowUp') {
+                  e.preventDefault()
+                  setModelDropdownOpen(true)
+                  setModelHighlightedIndex((prev) => moveHighlightIndex(prev, filteredModels.length, -1))
+                  return
+                }
+                if (e.key === 'Escape') setModelDropdownOpen(false)
+                if (e.key === 'Enter' && filteredModels.length > 0) {
+                  e.preventDefault()
+                  const pickIndex = modelHighlightedIndex >= 0 ? modelHighlightedIndex : 0
+                  onModelPick(filteredModels[pickIndex])
+                  setModelDropdownOpen(false)
+                }
+              }}
+              disabled={!visibleCategories.length || !allModels.length}
+              placeholder="..."
+            />
+            {modelDropdownOpen && visibleCategories.length > 0 && allModels.length > 0 ? (
+              <div ref={modelDropdownRef} className={dropdownPanelClass}>
+                {filteredModels.length === 0 ? (
+                  <p className="px-1.5 py-1 text-[11px] text-slate-500">ไม่พบรุ่น</p>
+                ) : (
+                  filteredModels.map((m, idx) => (
+                    <button
+                      key={`${m.categoryId}-${m.id}`}
+                      type="button"
+                      data-model-index={idx}
+                      onMouseDown={(ev) => ev.preventDefault()}
+                      onMouseEnter={() => setModelHighlightedIndex(idx)}
+                      onClick={() => {
+                        onModelPick(m)
+                        setModelDropdownOpen(false)
+                      }}
+                      className={clsx(
+                        'flex w-full items-center justify-between gap-1 rounded px-1.5 py-1 text-left text-[11px] transition',
+                        modelId === m.id && catId === m.categoryId
+                          ? 'bg-slate-900 text-white'
+                          : idx === modelHighlightedIndex
+                            ? 'bg-slate-100 text-slate-800'
+                            : 'text-slate-700 hover:bg-slate-100',
+                      )}
+                    >
+                      <span className="truncate">{m.name}</span>
+                      <span
+                        className={clsx(
+                          'shrink-0 text-[10px]',
+                          modelId === m.id && catId === m.categoryId ? 'text-slate-200' : 'text-slate-500',
+                        )}
+                      >
+                        {m.brandName}
+                        {!catId ? ` · ${m.categoryLabel}` : ''}
+                      </span>
+                    </button>
+                  ))
+                )}
+              </div>
+            ) : null}
+          </div>
+        </label>
+
+        <label className="block min-w-0 max-w-[min(26rem,100%)] justify-self-start">
+          <span className={clsx(labelClass, alignedLabelCls)}>เครื่อง · โฉม · ช่วงปี</span>
+          <div className="relative w-full">
+            <input
+              className={inputCls}
+              value={variantQuery}
+              title={
+                selectedEngine
+                  ? `${selectedEngine.categoryLabel} · ${selectedEngine.brandName} ${selectedEngine.modelName} — ${selectedEngine.label}`
+                  : undefined
+              }
+              onFocus={() => {
+                setVariantDropdownOpen(true)
+                const idx = filteredVariants.findIndex((v) => v.id === engineId)
+                setVariantHighlightedIndex(idx >= 0 ? idx : 0)
+              }}
+              onBlur={() => window.setTimeout(() => setVariantDropdownOpen(false), 120)}
+              onChange={(e) => {
+                setVariantDropdownOpen(true)
+                setVariantQuery(e.target.value)
+                setVariantHighlightedIndex(0)
+                if (engineId) clearVariantSelection()
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowDown') {
+                  e.preventDefault()
+                  setVariantDropdownOpen(true)
+                  setVariantHighlightedIndex((prev) => moveHighlightIndex(prev, filteredVariants.length, 1))
+                  return
+                }
+                if (e.key === 'ArrowUp') {
+                  e.preventDefault()
+                  setVariantDropdownOpen(true)
+                  setVariantHighlightedIndex((prev) => moveHighlightIndex(prev, filteredVariants.length, -1))
+                  return
+                }
+                if (e.key === 'Escape') setVariantDropdownOpen(false)
+                if (e.key === 'Enter' && filteredVariants.length > 0) {
+                  e.preventDefault()
+                  const pickIndex = variantHighlightedIndex >= 0 ? variantHighlightedIndex : 0
+                  onVariantPick(filteredVariants[pickIndex])
+                  setVariantDropdownOpen(false)
+                }
+              }}
+              disabled={!visibleCategories.length || !allVariants.length}
+              placeholder="..."
+            />
+            {variantDropdownOpen && visibleCategories.length > 0 && allVariants.length > 0 ? (
+              <div ref={variantDropdownRef} className={variantDropdownPanelClass}>
+                {filteredVariants.length === 0 ? (
+                  <p className="px-1.5 py-1 text-[11px] text-slate-500">ไม่พบรายการ</p>
+                ) : (
+                  filteredVariants.map((v, idx) => (
+                    <button
+                      key={`${v.categoryId}-${v.id}`}
+                      type="button"
+                      data-variant-index={idx}
+                      title={`${v.brandName} ${v.modelName} — ${v.label}`}
+                      onMouseDown={(ev) => ev.preventDefault()}
+                      onMouseEnter={() => setVariantHighlightedIndex(idx)}
+                      onClick={() => {
+                        onVariantPick(v)
+                        setVariantDropdownOpen(false)
+                      }}
+                      className={clsx(
+                        'block w-full min-w-max whitespace-nowrap rounded px-1.5 py-1 text-left text-[11px] font-medium transition',
+                        engineId === v.id
+                          ? 'bg-slate-900 text-white'
+                          : idx === variantHighlightedIndex
+                            ? 'bg-slate-100 text-slate-800'
+                            : 'text-slate-700 hover:bg-slate-100',
+                      )}
+                    >
+                      <span className="flex items-center gap-1.5">
+                        <span>{v.inputCompact}</span>
+                        {v.engineCode ? (
+                          <span
+                            className={clsx(
+                              'rounded border px-1 py-0.5 font-mono text-[9px]',
+                              engineId === v.id
+                                ? 'border-white/30 bg-white/10 text-slate-100'
+                                : 'border-sky-200 bg-sky-50 text-sky-900',
+                            )}
+                          >
+                            {v.engineCode}
+                          </span>
+                        ) : null}
+                      </span>
+                    </button>
+                  ))
+                )}
+              </div>
+            ) : null}
+          </div>
+        </label>
+
+        <label className="block min-w-0 sm:col-span-2 xl:col-span-1">
+          <span className={clsx(labelClass, alignedLabelCls)}>เบรก หน้า/หลัง (ไม่บังคับ)</span>
+          <select
+            className={inputCls}
+            value={brakePos}
+            disabled={!engineId}
+            onChange={(e) => setBrakePos(e.target.value as '' | 'front' | 'rear')}
+          >
+            <option value="">—</option>
+            <option value="front">หน้า</option>
+            <option value="rear">หลัง</option>
+          </select>
+        </label>
+      </div>
+
+      <button
+        type="button"
+        disabled={!canAdd}
+        onClick={handleAdd}
+        className={clsx(
+          'mt-1.5 inline-flex w-full items-center justify-center gap-1.5 rounded-md border px-2 py-1 text-[11px] font-medium transition sm:w-auto',
+          canAdd
+            ? 'border-sky-300 bg-sky-50 text-sky-900 hover:bg-sky-100'
+            : 'cursor-not-allowed border-slate-200 bg-slate-50 text-slate-400',
+        )}
+      >
+        <Plus className="size-3.5" />
+        เพิ่มชุดนี้
+      </button>
+
+      {rows.length > 0 ? (
+        <ul className="mt-1.5 max-h-20 overflow-y-auto rounded-md border border-slate-200 bg-white p-1.5">
+          {rows.map((r) => (
+            <li
+              key={r.id}
+              className="mb-1 inline-flex max-w-full items-center gap-1 rounded-md border border-slate-200 bg-slate-50 py-0.5 pl-2 pr-1 text-[11px] text-slate-800 last:mb-0"
+            >
+              <span className="truncate">
+                {r.modelName} {compactEngineLabel(r.engineLabel)}
+                {r.engineCode ? ` [${r.engineCode}]` : ''}
+                {r.brakePosition === 'front'
+                  ? ' · เบรกหน้า'
+                  : r.brakePosition === 'rear'
+                    ? ' · เบรกหลัง'
+                    : ''}
+              </span>
+              <button
+                type="button"
+                onClick={() => onRemove(r.id)}
+                className="shrink-0 rounded p-0.5 text-slate-400 hover:bg-rose-50 hover:text-rose-700"
+                aria-label="ลบรายการ"
+              >
+                <X className="size-3.5" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-1.5 text-[10px] text-slate-400">ยังไม่ได้เพิ่มรุ่นรถ</p>
+      )}
+    </div>
+  )
+}

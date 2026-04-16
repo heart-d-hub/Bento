@@ -1,0 +1,2429 @@
+import { AddProductModal, type AddProductBrowseNav } from '@/features/inventory/components/AddProductModal'
+import { CrossBranchStockSortModal } from '@/features/inventory/components/CrossBranchStockSortModal'
+import { canViewCost } from '@/features/auth/authSession'
+import { useWorkspaceTabs } from '@/features/main/context/WorkspaceTabsContext'
+import {
+  loadCrossBranchSortRules,
+  saveCrossBranchSortRules,
+  sortCrossBranchRows,
+  toggleCrossBranchHeaderSort,
+  CROSS_BRANCH_SORT_LABELS,
+  CROSS_BRANCH_SORT_KEYS,
+  type CrossBranchSortKey,
+  type CrossBranchSortRule,
+} from '@/features/inventory/data/crossBranchStockSort'
+import {
+  INVENTORY_CATEGORIES_UPDATED_EVENT,
+  loadCategoryTree,
+  type MainCategory,
+  type SubCategory,
+} from '@/features/inventory/data/inventoryCategories'
+import { dimLayoutFromPaperFields, type PaperDimLayout } from '@/features/inventory/data/paperDimensionLayout'
+import { appendLabelPrintQueue } from '@/features/inventory/data/labelPrintQueueStore'
+import { getBranchById } from '@/features/auth/branches'
+import { normalizeCrossBranchRows } from '@/features/inventory/data/branchInventoryModel'
+import {
+  collectInventoryCarFilterOptions,
+  effectiveSellPriceTier,
+  formatMmWithHunApprox,
+  generateNextTenDigitSku,
+  getProductMasterList,
+  mmToHun,
+  normalizeSalesUnits,
+  PRODUCT_MASTER_LIST_CHANGED_EVENT,
+  productMatchesInventoryCarFilters,
+  saveProductMasterList,
+  sellPriceAtUnitIndex,
+  sellPriceTierContextFromProduct,
+  type CrossBranchStockRow,
+  type PhysicalDimensions,
+  type ProductMasterDetail,
+} from '@/features/inventory/data/productMasterData'
+import { loadProductTagsRegistry } from '@/features/inventory/data/productTagsRegistry'
+import { clsx } from 'clsx'
+import {
+  ArrowDown,
+  ArrowLeft,
+  ArrowUp,
+  ChevronDown,
+  ChevronRight,
+  ChevronUp,
+  ClipboardCopy,
+  ExternalLink,
+  FlipHorizontal2,
+  LayoutGrid,
+  LayoutList,
+  ListOrdered,
+  Package,
+  Pencil,
+  Plus,
+  Printer,
+  Ruler,
+  Search,
+  Store,
+  Trash2,
+} from 'lucide-react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+
+function formatBaht(n: number) {
+  return n.toLocaleString('th-TH', { maximumFractionDigits: 0 })
+}
+
+function norm(s: string) {
+  return s.trim().toLowerCase()
+}
+
+function enqueueProductLabelPrintFromMaster(p: ProductMasterDetail) {
+  const barcode = (p.boxBarcode?.trim() || p.sku.trim())
+  if (!barcode) {
+    window.alert('ไม่มีบาร์โค้ดหรือ SKU สำหรับสินค้านี้')
+    return
+  }
+  const rawQty = window.prompt('พิมพ์กี่แผ่น', '1')
+  if (rawQty == null) return
+  const qty = Math.max(1, Math.floor(Number(rawQty) || 0))
+  if (!Number.isFinite(qty) || qty <= 0) {
+    window.alert('จำนวนไม่ถูกต้อง')
+    return
+  }
+  appendLabelPrintQueue({
+    name: p.name,
+    barcode,
+    sku: p.sku,
+    oemNo: p.oemTags[0],
+    factoryNo: p.factoryNo,
+    price: p.sellPrice,
+    qty,
+    template: 'medium',
+  })
+}
+
+function filterProductsBySearch(products: ProductMasterDetail[], q: string): ProductMasterDetail[] {
+  const t = q.trim().toLowerCase()
+  if (!t) return products
+  return products.filter((p) => {
+    const oem = p.oemTags.join(' ').toLowerCase()
+    const factory = (p.factoryNo ?? '').toLowerCase()
+    const xref = (p.crossReferenceTags ?? []).join(' ').toLowerCase()
+    const notes = (p.notes ?? '').toLowerCase()
+    const posNote = (p.posDisplayNote ?? '').toLowerCase()
+    const boxBar = (p.boxBarcode ?? '').toLowerCase()
+    const fitText = (p.vehicleFitments ?? [])
+      .map(
+        (f) =>
+          `${f.categoryLabel} ${f.brandName} ${f.modelName} ${f.engineLabel} ${
+            f.brakePosition === 'front' ? 'เบรกหน้า' : f.brakePosition === 'rear' ? 'เบรกหลัง' : ''
+          }`,
+      )
+      .join(' ')
+      .toLowerCase()
+    return (
+      p.name.toLowerCase().includes(t) ||
+      p.sku.toLowerCase().includes(t) ||
+      boxBar.includes(t) ||
+      p.brand.toLowerCase().includes(t) ||
+      (p.subCategory?.toLowerCase().includes(t) ?? false) ||
+      (p.subSubCategory?.toLowerCase().includes(t) ?? false) ||
+      p.category.toLowerCase().includes(t) ||
+      p.carBrand.toLowerCase().includes(t) ||
+      p.carModelLabel.toLowerCase().includes(t) ||
+      oem.includes(t) ||
+      factory.includes(t) ||
+      xref.includes(t) ||
+      notes.includes(t) ||
+      posNote.includes(t) ||
+      fitText.includes(t)
+    )
+  })
+}
+
+function productsInMain(products: ProductMasterDetail[], main: MainCategory) {
+  return products.filter((p) => norm(p.category) === norm(main.name))
+}
+
+function productsInSub(mainProducts: ProductMasterDetail[], sub: SubCategory) {
+  return mainProducts.filter((p) => norm(p.subCategory ?? '') === norm(sub.name))
+}
+
+type CategoryNavSelection = AddProductBrowseNav
+
+const FILTER_ALL = 'ทั้งหมด'
+
+function productsForNavSelection(
+  selection: CategoryNavSelection,
+  tree: MainCategory[],
+  products: ProductMasterDetail[],
+): ProductMasterDetail[] {
+  const mainById = new Map(tree.map((m) => [m.id, m]))
+  const mainNames = new Set(tree.map((m) => norm(m.name)))
+
+  switch (selection.type) {
+    case 'all':
+      return products
+    case 'orphan':
+      return products.filter((p) => !mainNames.has(norm(p.category)))
+    case 'main': {
+      const main = mainById.get(selection.mainId)
+      if (!main) return products
+      return productsInMain(products, main)
+    }
+    case 'sub': {
+      const main = mainById.get(selection.mainId)
+      if (!main) return []
+      const sub = main.subcategories.find((s) => s.id === selection.subId)
+      if (!sub) return []
+      const mp = productsInMain(products, main)
+      return productsInSub(mp, sub)
+    }
+    case 'subsub': {
+      const main = mainById.get(selection.mainId)
+      if (!main) return []
+      const sub = main.subcategories.find((s) => s.id === selection.subId)
+      if (!sub) return []
+      const subSub = sub.subSubcategories.find((ss) => ss.id === selection.subSubId)
+      if (!subSub) return []
+      const mp = productsInMain(products, main)
+      const inSub = productsInSub(mp, sub)
+      return inSub.filter((p) => norm(p.subSubCategory ?? '') === norm(subSub.name))
+    }
+    default:
+      return products
+  }
+}
+
+function applyProductFilters(
+  products: ProductMasterDetail[],
+  brand: string,
+  carBrand: string,
+  carModel: string,
+  year: string,
+): ProductMasterDetail[] {
+  return products.filter((p) =>
+    productMatchesInventoryCarFilters(p, { brand, carBrand, carModel, year }, FILTER_ALL),
+  )
+}
+
+/** เรียงแฟ้มมาสเตอร์ — คลิกหัวตารางเหมือนหน้าคลังสินค้า */
+type MasterCatalogSortKey = 'name' | 'sku' | 'sellPrice'
+
+type MasterCatalogSort = {
+  key: MasterCatalogSortKey
+  dir: 'asc' | 'desc'
+}
+
+function toggleMasterCatalogSort(prev: MasterCatalogSort, key: MasterCatalogSortKey): MasterCatalogSort {
+  if (prev.key === key) {
+    return { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+  }
+  return { key, dir: 'asc' }
+}
+
+function sortMasterCatalogList(list: ProductMasterDetail[], sort: MasterCatalogSort): ProductMasterDetail[] {
+  const arr = [...list]
+  const mul = sort.dir === 'desc' ? -1 : 1
+  if (sort.key === 'name') {
+    arr.sort((a, b) => a.name.localeCompare(b.name, 'th', { sensitivity: 'base' }) * mul)
+  } else if (sort.key === 'sku') {
+    arr.sort(
+      (a, b) => a.sku.localeCompare(b.sku, 'th', { sensitivity: 'base', numeric: true }) * mul,
+    )
+  } else {
+    arr.sort((a, b) => (a.sellPrice - b.sellPrice) * mul)
+  }
+  return arr
+}
+
+function MasterCatalogSortTh({
+  sortKey,
+  sort,
+  label,
+  onSort,
+  alignRight,
+  className,
+}: {
+  sortKey: MasterCatalogSortKey
+  sort: MasterCatalogSort
+  label: string
+  onSort: (k: MasterCatalogSortKey) => void
+  alignRight?: boolean
+  className?: string
+}) {
+  const active = sort.key === sortKey
+  return (
+    <th className={clsx(className, alignRight && 'text-right')}>
+      <button
+        type="button"
+        onClick={() => onSort(sortKey)}
+        title={`เรียงตาม${label}`}
+        aria-label={`เรียงตาม${label}${active ? (sort.dir === 'asc' ? ' จากน้อยไปมาก' : ' จากมากไปน้อย') : ''}`}
+        className={clsx(
+          'inline-flex w-full max-w-full items-center gap-1.5 py-0.5 text-sm font-medium text-slate-600 transition hover:text-slate-900',
+          alignRight ? 'ml-auto w-full justify-end text-right' : 'text-left',
+        )}
+      >
+        <span className="min-w-0 truncate">{label}</span>
+        {active &&
+          (sort.dir === 'asc' ? (
+            <ArrowUp className="size-3.5 shrink-0 text-slate-700" aria-hidden />
+          ) : (
+            <ArrowDown className="size-3.5 shrink-0 text-slate-700" aria-hidden />
+          ))}
+      </button>
+    </th>
+  )
+}
+
+/** ค่าที่วัด A/A₂/B/C ตรงกับ inner / innerSecondary / outer / height ในแฟ้ม */
+type MeasureInput = { h: number; od: number; id?: number; id2?: number }
+
+function paperFieldsForNav(tree: MainCategory[], sel: CategoryNavSelection) {
+  if (sel.type === 'main') return tree.find((m) => m.id === sel.mainId)?.paperFields
+  if (sel.type === 'sub') {
+    const main = tree.find((m) => m.id === sel.mainId)
+    const sub = main?.subcategories.find((s) => s.id === sel.subId)
+    return sub?.paperFields ?? main?.paperFields
+  }
+  if (sel.type === 'subsub') {
+    const main = tree.find((m) => m.id === sel.mainId)
+    const sub = main?.subcategories.find((s) => s.id === sel.subId)
+    const ss = sub?.subSubcategories.find((x) => x.id === sel.subSubId)
+    return ss?.paperFields ?? sub?.paperFields ?? main?.paperFields
+  }
+  return undefined
+}
+
+function physicalInnerPair(d: { innerDiameterMm?: number; innerDiameterSecondaryMm?: number }): [number, number] | null {
+  if (d.innerDiameterMm === undefined || d.innerDiameterSecondaryMm === undefined) return null
+  return [Math.min(d.innerDiameterMm, d.innerDiameterSecondaryMm), Math.max(d.innerDiameterMm, d.innerDiameterSecondaryMm)]
+}
+
+/** บรรทัดเดียวสำหรับแถวรายการตอนเปิดค้นหามิติ — มม. + เทียบหุน (เดียวกับตอนลงสินค้าเป็นหุน) */
+function formatPhysicalDimensionsSearchRow(d: PhysicalDimensions): string {
+  const line = (mm: number) => `${mm} mm (~${mmToHun(mm).toFixed(1)} หุน)`
+  const parts: string[] = []
+  const pair = physicalInnerPair(d)
+  if (pair) {
+    parts.push(`A ${line(pair[0])} / ${line(pair[1])}`)
+  } else if (d.innerDiameterMm !== undefined) {
+    parts.push(`A ${line(d.innerDiameterMm)}`)
+  }
+  if (d.outerDiameterMm !== undefined) parts.push(`B ${line(d.outerDiameterMm)}`)
+  if (d.heightMm !== undefined) parts.push(`C ${line(d.heightMm)}`)
+  return parts.join(' · ')
+}
+
+function parseMeasureMm(s: string): number | undefined {
+  const t = s.trim().replace(',', '.')
+  if (!t) return undefined
+  const n = Number(t)
+  return Number.isFinite(n) && n >= 0 ? n : undefined
+}
+
+function dimensionStrictMatch(p: ProductMasterDetail, input: MeasureInput, tol: number): boolean {
+  const d = p.physicalDimensions
+  if (!d) return false
+  if (d.outerDiameterMm !== undefined && Math.abs(d.outerDiameterMm - input.od) > tol) return false
+  if (d.heightMm !== undefined && Math.abs(d.heightMm - input.h) > tol) return false
+
+  const pair = physicalInnerPair(d)
+  if (pair) {
+    if (input.id === undefined || input.id2 === undefined) return false
+    const u: [number, number] = [Math.min(input.id, input.id2), Math.max(input.id, input.id2)]
+    return Math.abs(pair[0] - u[0]) <= tol && Math.abs(pair[1] - u[1]) <= tol
+  }
+
+  if (d.innerDiameterMm !== undefined && input.id !== undefined) {
+    if (Math.abs(d.innerDiameterMm - input.id) > tol) return false
+  }
+  return true
+}
+
+function dimensionScore(p: ProductMasterDetail, input: MeasureInput): number | null {
+  const d = p.physicalDimensions
+  if (!d) return null
+  let s = 0
+  if (d.outerDiameterMm !== undefined) s += Math.abs(d.outerDiameterMm - input.od)
+  if (d.heightMm !== undefined) s += Math.abs(d.heightMm - input.h)
+
+  const pair = physicalInnerPair(d)
+  if (pair) {
+    if (input.id !== undefined && input.id2 !== undefined) {
+      const u: [number, number] = [Math.min(input.id, input.id2), Math.max(input.id, input.id2)]
+      s += Math.abs(pair[0] - u[0]) + Math.abs(pair[1] - u[1])
+    } else if (input.id !== undefined) {
+      s += Math.min(Math.abs(pair[0] - input.id), Math.abs(pair[1] - input.id)) + 80
+    } else if (input.id2 !== undefined) {
+      s += Math.min(Math.abs(pair[0] - input.id2), Math.abs(pair[1] - input.id2)) + 80
+    } else {
+      s += 120
+    }
+    return s
+  }
+
+  if (input.id !== undefined && d.innerDiameterMm !== undefined) {
+    s += Math.abs(d.innerDiameterMm - input.id)
+  }
+  return s
+}
+
+function SectionTitle({ children }: { children: React.ReactNode }) {
+  return (
+    <h4 className="border-b border-slate-200 pb-2 text-sm font-semibold text-slate-900">{children}</h4>
+  )
+}
+
+function FieldLine({
+  label,
+  children,
+  valueClassName,
+}: {
+  /** ถ้าไม่ส่ง label จะเว้นช่องซ้ายให้ตรงกับแถวอื่น แล้วแสดง children เป็นค่าหลัก */
+  label?: string
+  children: React.ReactNode
+  valueClassName?: string
+}) {
+  return (
+    <div className="flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:gap-4">
+      {label !== undefined ? (
+        <span className="min-w-[11rem] shrink-0 text-sm text-slate-600">{label}</span>
+      ) : (
+        <span className="hidden min-w-[11rem] sm:block" aria-hidden />
+      )}
+      <div className={clsx('min-w-0 text-sm text-slate-900', valueClassName)}>{children}</div>
+    </div>
+  )
+}
+
+function SortableCrossTh({
+  colKey,
+  label,
+  sortRules,
+  onSort,
+  alignRight,
+}: {
+  colKey: CrossBranchSortKey
+  label: string
+  sortRules: CrossBranchSortRule[]
+  onSort: (k: CrossBranchSortKey) => void
+  alignRight?: boolean
+}) {
+  const idx = sortRules.findIndex((r) => r.key === colKey)
+  const active = idx >= 0
+  const dir = active ? sortRules[idx].dir : null
+
+  return (
+    <th className={clsx('px-3 py-2.5 text-xs font-medium text-slate-600', alignRight && 'text-right')}>
+      <button
+        type="button"
+        onClick={() => onSort(colKey)}
+        className={clsx(
+          'inline-flex max-w-full items-center gap-1 text-xs font-medium text-slate-600 transition hover:text-slate-900',
+          alignRight ? 'ml-auto w-full justify-end text-right' : 'text-left',
+        )}
+      >
+        <span className="min-w-0 truncate">{label}</span>
+        {active && (
+          <>
+            <span
+              className="flex size-5 shrink-0 items-center justify-center rounded-full bg-slate-200 text-[10px] font-bold tabular-nums text-slate-700"
+              title={`ลำดับการเรียง ${idx + 1}`}
+            >
+              {idx + 1}
+            </span>
+            {dir === 'asc' ? (
+              <ArrowUp className="size-3.5 shrink-0 text-slate-700" aria-hidden />
+            ) : (
+              <ArrowDown className="size-3.5 shrink-0 text-slate-700" aria-hidden />
+            )}
+          </>
+        )}
+      </button>
+    </th>
+  )
+}
+
+function CrossBranchStockSection({ detail }: { detail: ProductMasterDetail }) {
+  const [sortModalOpen, setSortModalOpen] = useState(false)
+  const [sortRules, setSortRules] = useState<CrossBranchSortRule[]>(loadCrossBranchSortRules)
+
+  useEffect(() => {
+    saveCrossBranchSortRules(sortRules)
+  }, [sortRules])
+
+  const normalizedCross = useMemo(
+    () => normalizeCrossBranchRows(detail.crossBranch ?? []),
+    [detail.crossBranch],
+  )
+
+  const rows = useMemo(
+    () => sortCrossBranchRows(normalizedCross, sortRules),
+    [normalizedCross, sortRules],
+  )
+
+  const totalStock = useMemo(() => normalizedCross.reduce((s, r) => s + r.stock, 0), [normalizedCross])
+
+  function handleHeaderSort(key: CrossBranchSortKey) {
+    setSortRules((prev) => toggleCrossBranchHeaderSort(prev, key))
+  }
+
+  return (
+    <section className="rounded-2xl border-2 border-amber-200/90 bg-amber-50/30">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-100/80 px-4 py-3">
+        <h3 className="text-sm font-semibold text-amber-950">สถานะสต็อกทุกคลัง (Cross-Branch Stock)</h3>
+        <button
+          type="button"
+          onClick={() => setSortModalOpen(true)}
+          className="inline-flex size-9 shrink-0 items-center justify-center rounded-xl border border-amber-300/80 bg-white text-amber-900 shadow-sm transition hover:bg-amber-50"
+          title="จัดเรียงแบบลำดับ 1–3"
+          aria-label="จัดเรียงแบบลำดับ 1–3"
+        >
+          <ListOrdered className="size-4" strokeWidth={1.75} />
+        </button>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[28rem] border-collapse text-left text-sm">
+          <thead>
+            <tr className="border-b border-amber-100/90 bg-white/60">
+              {CROSS_BRANCH_SORT_KEYS.map((key) => (
+                <SortableCrossTh
+                  key={key}
+                  colKey={key}
+                  label={CROSS_BRANCH_SORT_LABELS[key]}
+                  sortRules={sortRules}
+                  onSort={handleHeaderSort}
+                  alignRight={key === 'stock'}
+                />
+              ))}
+              <th className="px-3 py-2.5 text-right text-xs font-medium text-slate-500"> </th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <CrossBranchRow key={row.id} row={row} />
+            ))}
+            <tr className="border-t-2 border-amber-200/80 bg-white/80 font-medium">
+              <td className="px-3 py-2.5 text-slate-800">รวมทั้งหมด</td>
+              <td className="px-3 py-2.5 text-right tabular-nums text-slate-900">{totalStock}</td>
+              <td colSpan={3} className="px-3 py-2.5 text-slate-500" />
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <CrossBranchStockSortModal
+        open={sortModalOpen}
+        onClose={() => setSortModalOpen(false)}
+        rules={sortRules}
+        onSave={(next) => setSortRules(next)}
+      />
+    </section>
+  )
+}
+
+function CrossBranchRow({ row }: { row: CrossBranchStockRow }) {
+  const low = row.status === 'low'
+  return (
+    <tr className="border-b border-amber-100/60 last:border-0">
+      <td className="px-3 py-2.5 text-slate-800">{row.locationLabel}</td>
+      <td className="px-3 py-2.5 text-right tabular-nums text-slate-900">{row.stock}</td>
+      <td className="px-3 py-2.5 font-mono text-xs text-slate-600">{row.position}</td>
+      <td className="px-3 py-2.5">
+        <span
+          className={clsx(
+            'inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium',
+            low ? 'bg-rose-100 text-rose-800' : 'bg-emerald-100 text-emerald-800',
+          )}
+        >
+          {low ? 'สต็อกต่ำ' : 'ปกติ'}
+        </span>
+      </td>
+      <td className="px-3 py-2 text-right">
+        {row.showTransfer && (
+          <button
+            type="button"
+            className="rounded-lg border border-amber-300 bg-white px-2 py-1 text-xs font-medium text-amber-900 hover:bg-amber-50"
+          >
+            ขอโอนจากคลังกลาง
+          </button>
+        )}
+      </td>
+    </tr>
+  )
+}
+
+type CatalogViewMode = 'list' | 'grid-5' | 'flip-card'
+
+function ProductThumb({ className }: { className?: string }) {
+  return (
+    <div
+      className={clsx(
+        'flex aspect-[4/3] w-full items-center justify-center rounded-xl bg-slate-100',
+        className,
+      )}
+    >
+      <Package className="size-10 text-slate-400" strokeWidth={1.25} />
+    </div>
+  )
+}
+
+/** บรรทัดรายละเอียดใต้ชื่อสินค้า (กริด) */
+function ProductPortfolioBadges({ product }: { product: ProductMasterDetail }) {
+  const tags: { key: string; cls: string; text: string }[] = []
+  if (product.inStoreCatalog === false) {
+    tags.push({ key: 'ref', cls: 'border-slate-200 bg-slate-100 text-slate-700', text: 'อ้างอิง' })
+  }
+  const st = product.salesStatus ?? 'active'
+  if (st === 'paused') tags.push({ key: 'pause', cls: 'border-amber-200 bg-amber-50 text-amber-950', text: 'หยุดขาย' })
+  if (st === 'discontinued') tags.push({ key: 'disc', cls: 'border-rose-200 bg-rose-50 text-rose-950', text: 'เลิกขาย' })
+  if (tags.length === 0) return null
+  return (
+    <span className="mt-1 flex flex-wrap gap-1">
+      {tags.map((t) => (
+        <span
+          key={t.key}
+          className={clsx('inline-block rounded border px-1.5 py-0.5 text-[10px] font-medium', t.cls)}
+        >
+          {t.text}
+        </span>
+      ))}
+    </span>
+  )
+}
+
+function ProductCardMeta({ product }: { product: ProductMasterDetail }) {
+  return (
+    <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-slate-500">
+      {product.brand} · {product.carBrand} {product.carModelLabel} · ปี {product.yearLabel}
+    </p>
+  )
+}
+
+function ProductMasterGridCard({
+  product,
+  onOpen,
+  onSelect,
+  selected,
+  onContextMenu,
+  dimensionSearchActive,
+}: {
+  product: ProductMasterDetail
+  onOpen: () => void
+  onSelect: () => void
+  selected: boolean
+  onContextMenu: (e: React.MouseEvent) => void
+  dimensionSearchActive?: boolean
+}) {
+  return (
+    <div className="relative w-full">
+      <button
+        type="button"
+        onClick={onSelect}
+        onDoubleClick={onOpen}
+        onContextMenu={onContextMenu}
+        className={clsx(
+          'flex w-full flex-col rounded-2xl border bg-white p-3 text-left shadow-sm transition hover:shadow-md pos-compact:rounded-xl pos-compact:p-2.5',
+          selected ? 'border-violet-300 ring-2 ring-violet-200/70' : 'border-slate-200 hover:border-slate-300',
+        )}
+      >
+        <ProductThumb className="mb-2" />
+        <p className="line-clamp-2 text-sm font-semibold leading-snug text-slate-900 pos-compact:text-[13px]">
+          {product.name}
+        </p>
+        <ProductPortfolioBadges product={product} />
+        <ProductCardMeta product={product} />
+        {dimensionSearchActive && product.physicalDimensions ? (
+          <p className="mt-1.5 line-clamp-3 text-[11px] leading-snug text-violet-900/95 tabular-nums">
+            <span className="font-medium text-violet-950">ในระบบ:</span> {formatPhysicalDimensionsSearchRow(product.physicalDimensions)}
+          </p>
+        ) : null}
+        <p className="mt-1.5 font-mono text-[11px] text-slate-400">{product.sku}</p>
+        <p className="mt-2 text-base font-semibold tabular-nums text-rose-600 pos-compact:mt-1.5 pos-compact:text-sm">
+          ฿{product.sellPrice.toLocaleString('th-TH')}
+        </p>
+      </button>
+    </div>
+  )
+}
+
+function ProductMasterListRow({
+  product,
+  onOpen,
+  onSelect,
+  selected,
+  onContextMenu,
+  dimensionSearchActive,
+}: {
+  product: ProductMasterDetail
+  onOpen: () => void
+  onSelect: () => void
+  selected: boolean
+  onContextMenu: (e: React.MouseEvent) => void
+  dimensionSearchActive?: boolean
+}) {
+  return (
+    <tr
+      role="button"
+      tabIndex={0}
+      onClick={onSelect}
+      onDoubleClick={onOpen}
+      onContextMenu={onContextMenu}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') onOpen()
+        if (e.key === ' ') {
+          e.preventDefault()
+          onSelect()
+        }
+      }}
+      className={clsx(
+        'cursor-pointer border-b border-slate-100 transition',
+        selected ? 'bg-violet-50/70 ring-1 ring-inset ring-violet-200' : 'hover:bg-slate-50/80',
+      )}
+    >
+      <td className="w-20 py-2 pl-2.5 pr-2 pos-compact:w-[4.25rem] pos-compact:py-1.5 pos-compact:pl-2">
+        <div className="flex size-14 items-center justify-center overflow-hidden rounded-lg bg-slate-100 pos-compact:size-12">
+          <Package className="size-7 text-slate-400 pos-compact:size-6" strokeWidth={1.25} />
+        </div>
+      </td>
+      <td className="min-w-0 py-2 pr-2 pos-compact:py-1.5">
+        <p className="font-medium text-slate-900 pos-compact:text-sm">{product.name}</p>
+        <ProductPortfolioBadges product={product} />
+        <ProductCardMeta product={product} />
+        {dimensionSearchActive && product.physicalDimensions ? (
+          <p className="mt-1 line-clamp-2 text-[11px] leading-snug text-violet-900/95 tabular-nums">
+            <span className="font-medium text-violet-950">ในระบบ:</span> {formatPhysicalDimensionsSearchRow(product.physicalDimensions)}
+          </p>
+        ) : null}
+      </td>
+      <td className="hidden py-2 font-mono text-xs text-slate-500 pos-compact:py-1.5 sm:table-cell">{product.sku}</td>
+      <td className="hidden border-l border-slate-100/90 py-2 pl-4 pr-3 text-right text-sm tabular-nums text-slate-700 pos-compact:py-1.5 pos-compact:pl-3 pos-compact:text-xs lg:table-cell">
+        ฿{product.sellPrice.toLocaleString('th-TH')}
+      </td>
+      <td className="py-2 pr-3 text-right pos-compact:py-1.5 pos-compact:pr-2">
+        <ChevronRight className="inline size-4 text-slate-300 pos-compact:size-3.5" aria-hidden />
+      </td>
+    </tr>
+  )
+}
+
+function breadcrumbLabel(
+  tree: MainCategory[],
+  sel: CategoryNavSelection,
+): string {
+  if (sel.type === 'all') return 'ทั้งหมด'
+  if (sel.type === 'orphan') return 'ไม่ตรงหมวดในระบบ'
+  const main = tree.find((m) => m.id === sel.mainId)
+  if (!main) return '—'
+  if (sel.type === 'main') return main.name
+  const sub = main.subcategories.find((s) => s.id === sel.subId)
+  if (!sub) return main.name
+  if (sel.type === 'sub') return `${main.name} / ${sub.name}`
+  if (sel.type === 'subsub') {
+    const ss = sub.subSubcategories.find((x) => x.id === sel.subSubId)
+    return ss ? `${main.name} / ${sub.name} / ${ss.name}` : `${main.name} / ${sub.name}`
+  }
+  return `${main.name} / ${sub.name}`
+}
+
+function ProductMasterDetailContent({
+  selected,
+  onEdit,
+  onOpenVehicleManage,
+}: {
+  selected: ProductMasterDetail
+  onEdit?: () => void
+  onOpenVehicleManage?: () => void
+}) {
+  const allowCost = canViewCost()
+  const tierPriceCtx = useMemo(() => sellPriceTierContextFromProduct(selected), [
+    selected.supplierListPrice,
+    selected.sellTierPercentBasis,
+    selected.scheme,
+  ])
+  const sellTierListBasis = selected.sellTierPercentBasis === 'list_discount'
+  return (
+    <>
+      <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <SectionTitle>ข้อมูลพื้นฐาน</SectionTitle>
+        <div className="mt-4 flex flex-col gap-4 sm:flex-row sm:items-start">
+          <div className="flex size-28 shrink-0 flex-col items-center justify-center gap-1 overflow-hidden rounded-2xl border border-slate-200 bg-slate-100">
+            <Package className="size-14 text-slate-400" strokeWidth={1.25} />
+            <span className="px-1 text-center text-[9px] leading-tight text-slate-400">
+              รูปสินค้า — โครงรองรับภายหลัง
+            </span>
+          </div>
+              <div className="min-w-0 flex-1 space-y-3">
+            <div>
+              <p className="text-base font-semibold leading-snug text-slate-900">{selected.name}</p>
+              <ProductPortfolioBadges product={selected} />
+              <FieldLine label="รหัสสินค้า(SKU)">
+                <span className="font-mono tabular-nums">{selected.sku}</span>
+              </FieldLine>
+              {selected.boxBarcode ? (
+                <div className="mt-2">
+                  <FieldLine label="บาร์โค้ดบนกล่อง">
+                    <span className="font-mono tabular-nums">{selected.boxBarcode}</span>
+                  </FieldLine>
+                </div>
+              ) : null}
+              {selected.masterRevision != null && selected.masterRevision > 0 ? (
+                <p className="mt-2 rounded-md border border-slate-100 bg-slate-50/80 px-2 py-1.5 text-[10px] leading-snug text-slate-600">
+                  <span className="font-medium text-slate-700">แฟ้มมาสเตอร์:</span> รอบ {selected.masterRevision}
+                  {selected.lastMasterEditBranchId ? (
+                    <>
+                      {' '}
+                      · แก้ล่าสุดจากสาขา{' '}
+                      {getBranchById(selected.lastMasterEditBranchId)?.name ?? selected.lastMasterEditBranchId}
+                    </>
+                  ) : null}
+                  {selected.lastMasterEditBy ? <> · {selected.lastMasterEditBy}</> : null}
+                  {selected.lastMasterEditAt ? (
+                    <> · {new Date(selected.lastMasterEditAt).toLocaleString('th-TH')}</>
+                  ) : null}
+                </p>
+              ) : null}
+              <div className="mt-2 space-y-1">
+                <FieldLine label="บริษัท / แบรนด์ชิ้นงาน">{selected.brand}</FieldLine>
+                <FieldLine label="ยี่ห้อรถ">{selected.carBrand}</FieldLine>
+                <FieldLine label="รุ่น">{selected.carModelLabel}</FieldLine>
+                <FieldLine label="รุ่นปี">{selected.yearLabel}</FieldLine>
+              </div>
+              <div className="mt-2 space-y-1">
+                <FieldLine label="หมวดหมู่หลัก">{selected.category}</FieldLine>
+                {selected.subCategory ? (
+                  <FieldLine label="หมวดหมู่ย่อย 1">{selected.subCategory}</FieldLine>
+                ) : null}
+                {selected.subSubCategory ? (
+                  <FieldLine label="หมวดหมู่ย่อย 2">{selected.subSubCategory}</FieldLine>
+                ) : null}
+              </div>
+              {selected.physicalDimensions ? (
+                <div className="mt-3 rounded-xl border border-violet-100 bg-violet-50/50 px-3 py-2">
+                  <p className="mb-2 text-xs font-medium text-violet-900">
+                    มิติอ้างอิง — เก็บเป็นมม. (ถ้าลงเป็นหุนตอนบันทึก ระบบแปลงเป็นมม. อัตโนมัติ) · A/B/C ใช้ได้ทั้งไส้กรอง ลูกหมาก และชิ้นอื่น
+                    {selected.physicalDimensions.innerDiameterSecondaryMm !== undefined ? (
+                      <span className="mt-1 block font-normal text-violet-800/90">
+                        กรณีสองรูไม่เท่ากัน — ลง Ø รูเล็ก / รูใหญ่ ในแฟ้ม แล้ววัดทั้งสองรูตอนค้นหา
+                      </span>
+                    ) : null}
+                  </p>
+                  {selected.physicalDimensions.innerDiameterSecondaryMm !== undefined &&
+                  selected.physicalDimensions.innerDiameterMm !== undefined ? (
+                    <>
+                      <FieldLine label="A₁">
+                        <span className="tabular-nums">{formatMmWithHunApprox(selected.physicalDimensions.innerDiameterMm)}</span>
+                      </FieldLine>
+                      <FieldLine label="A₂">
+                        <span className="tabular-nums">{formatMmWithHunApprox(selected.physicalDimensions.innerDiameterSecondaryMm)}</span>
+                      </FieldLine>
+                    </>
+                  ) : (
+                    <FieldLine label="A">
+                      {selected.physicalDimensions.innerDiameterMm !== undefined ? (
+                        <span className="tabular-nums">{formatMmWithHunApprox(selected.physicalDimensions.innerDiameterMm)}</span>
+                      ) : (
+                        <span className="text-slate-500">—</span>
+                      )}
+                    </FieldLine>
+                  )}
+                  <FieldLine label="B">
+                    {selected.physicalDimensions.outerDiameterMm !== undefined ? (
+                      <span className="tabular-nums">{formatMmWithHunApprox(selected.physicalDimensions.outerDiameterMm)}</span>
+                    ) : (
+                      <span className="text-slate-500">—</span>
+                    )}
+                  </FieldLine>
+                  <FieldLine label="C">
+                    {selected.physicalDimensions.heightMm !== undefined ? (
+                      <span className="tabular-nums">{formatMmWithHunApprox(selected.physicalDimensions.heightMm)}</span>
+                    ) : (
+                      <span className="text-slate-500">—</span>
+                    )}
+                  </FieldLine>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="border-t border-slate-100 pt-3">
+              <p className="mb-0.5 text-xs font-medium text-slate-500">เบอร์แท้ (OEM)</p>
+              <p className="mb-2 text-[10px] leading-snug text-slate-400">
+                ลงเบอร์แท้ / เทียบ / โรงงานให้ครบ — ช่วยค้นหาและลดความสับสนหน้าร้าน
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {selected.oemTags.length ? (
+                  selected.oemTags.map((tag) => (
+                    <span
+                      key={tag}
+                      className="inline-flex rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1 font-mono text-xs text-slate-800"
+                    >
+                      {tag}
+                    </span>
+                  ))
+                ) : (
+                  <span className="text-sm text-slate-400">—</span>
+                )}
+              </div>
+            </div>
+
+            <div className="border-t border-slate-100 pt-3">
+              <p className="mb-2 text-xs font-medium text-slate-500">เบอร์โรงงาน</p>
+              {selected.factoryNo ? (
+                <span className="inline-flex rounded-lg border border-sky-100 bg-sky-50/80 px-2.5 py-1 font-mono text-xs text-sky-950">
+                  {selected.factoryNo}
+                </span>
+              ) : (
+                <span className="text-sm text-slate-400">—</span>
+              )}
+            </div>
+
+            {selected.crossReferenceTags && selected.crossReferenceTags.length > 0 ? (
+              <div className="border-t border-slate-100 pt-3">
+                <p className="mb-2 text-xs font-medium text-slate-500">เบอร์เทียบ (Cross reference)</p>
+                <div className="flex flex-wrap gap-2">
+                  {selected.crossReferenceTags.map((tag) => (
+                    <span
+                      key={tag}
+                      className="inline-flex rounded-lg border border-amber-100 bg-amber-50/80 px-2.5 py-1 font-mono text-xs text-amber-950"
+                    >
+                      {tag}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            <div className="border-t border-slate-100 pt-3">
+              <FieldLine label="แท้ (OEM)">
+                {selected.isGenuine ? (
+                  <span className="text-emerald-700">ใช่</span>
+                ) : (
+                  <span className="text-slate-500">ไม่ระบุ / ไม่ใช่</span>
+                )}
+              </FieldLine>
+              {normalizeSalesUnits(selected).length > 0 ? (
+                <div className="mt-2 space-y-1.5">
+                  <p className="text-xs font-medium text-slate-500">หน่วยขาย</p>
+                  <ul className="space-y-1 text-sm text-slate-800">
+                    {normalizeSalesUnits(selected).map((u, idx) => (
+                      <li key={u.id} className="flex flex-wrap gap-x-2 gap-y-0.5">
+                        <span className="font-medium">{u.label}</span>
+                        {idx > 0 && u.baseUnits > 1 ? (
+                          <span className="text-xs text-slate-500">(เทียบฐาน ×{u.baseUnits})</span>
+                        ) : idx === 0 ? (
+                          <span className="text-xs text-slate-500">(หน่วยฐาน)</span>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {selected.packaging ? (
+                <div className="mt-2">
+                  <FieldLine label="บรรจุ">{selected.packaging}</FieldLine>
+                </div>
+              ) : null}
+              {selected.storageLocation ? (
+                <div className="mt-2">
+                  <FieldLine label="ที่เก็บ">{selected.storageLocation}</FieldLine>
+                </div>
+              ) : null}
+              {selected.notes ? (
+                <div className="mt-2">
+                  <FieldLine label="หมายเหตุ">
+                    <span className="whitespace-pre-wrap">{selected.notes}</span>
+                  </FieldLine>
+                </div>
+              ) : null}
+              {selected.posDisplayNote ? (
+                <div className="mt-2">
+                  <FieldLine label="หมายเหตุแสดง POS">
+                    <span className="whitespace-pre-wrap text-sky-900">{selected.posDisplayNote}</span>
+                  </FieldLine>
+                </div>
+              ) : null}
+              {selected.productTagIds && selected.productTagIds.length > 0 ? (
+                <div className="mt-2">
+                  <p className="mb-1 text-xs font-medium text-slate-500">แท็กสินค้า</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {selected.productTagIds.map((id) => {
+                      const label = loadProductTagsRegistry().find((t) => t.id === id)?.label ?? id
+                      return (
+                        <span
+                          key={id}
+                          className="inline-flex rounded-lg border border-violet-200 bg-violet-50/90 px-2 py-0.5 text-[11px] text-violet-950"
+                        >
+                          {label}
+                        </span>
+                      )
+                    })}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="border-t border-slate-100 pt-3">
+              <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="mb-0.5 text-xs font-medium text-slate-500">รุ่นรถที่ใช้ได้</p>
+                  <p className="text-[10px] leading-snug text-slate-400">
+                    รหัส <span className="font-mono text-slate-600">engineId</span> = variant แต่ละช่วงปี — ใส่ใน CSV คอลัมน์{' '}
+                    <span className="font-mono">engineIds</span> คั่นด้วย |
+                  </p>
+                </div>
+                {onOpenVehicleManage ? (
+                  <button
+                    type="button"
+                    onClick={onOpenVehicleManage}
+                    className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-emerald-200 bg-white px-2 py-1 text-[10px] font-medium text-emerald-900 shadow-sm hover:bg-emerald-50"
+                  >
+                    <ExternalLink className="size-3.5" aria-hidden />
+                    จัดการรุ่นรถ
+                  </button>
+                ) : null}
+              </div>
+              {selected.vehicleFitments && selected.vehicleFitments.length > 0 ? (
+                <ul className="mb-2 space-y-1.5 text-xs text-slate-800">
+                  {selected.vehicleFitments.map((f) => (
+                    <li
+                      key={f.id}
+                      className="rounded-lg border border-emerald-100 bg-emerald-50/80 px-2.5 py-1.5 leading-snug"
+                    >
+                      <span className="font-medium text-emerald-950">{f.categoryLabel}</span>
+                      {' · '}
+                      {f.brandName} {f.modelName} — {f.engineLabel}
+                      {f.engineCode ? (
+                        <span className="ml-1 rounded border border-emerald-200 bg-white px-1 py-0.5 font-mono text-[10px] text-emerald-900">
+                          {f.engineCode}
+                        </span>
+                      ) : null}
+                      {f.brakePosition === 'front'
+                        ? ' · เบรกหน้า'
+                        : f.brakePosition === 'rear'
+                          ? ' · เบรกหลัง'
+                          : ''}
+                      <span className="mt-1 flex flex-wrap items-center gap-2 font-mono text-[10px] text-emerald-800/90">
+                        <span>
+                          engineId: <span className="select-all">{f.engineId}</span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void navigator.clipboard?.writeText(f.engineId)
+                          }}
+                          className="inline-flex items-center gap-0.5 rounded border border-emerald-200/80 bg-white px-1.5 py-0.5 text-[9px] font-medium text-emerald-900 hover:bg-emerald-100/80"
+                        >
+                          <ClipboardCopy className="size-3" aria-hidden />
+                          คัดลอก
+                        </button>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              <p className="mb-1 text-[10px] text-slate-500">
+                สรุป (POS / ตัวกรอง): {selected.carBrand} · {selected.carModelLabel} · {selected.yearLabel}
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {selected.carModels.length > 0 ? (
+                  selected.carModels.map((m) => (
+                    <span
+                      key={m}
+                      className="inline-flex rounded-lg border border-sky-100 bg-sky-50 px-2.5 py-1 text-xs text-sky-900"
+                    >
+                      {m}
+                    </span>
+                  ))
+                ) : (
+                  <span className="text-xs text-slate-400">—</span>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <SectionTitle>ข้อมูลจัดซื้อ/ขาย</SectionTitle>
+        <div className="mt-4 space-y-3">
+          {allowCost && selected.supplierListPrice !== undefined && selected.supplierListPrice > 0 ? (
+            <FieldLine label="ราคาตั้ง (ซัพพลายเออร์)">
+              <span className="tabular-nums">฿{formatBaht(selected.supplierListPrice)}</span>
+            </FieldLine>
+          ) : null}
+          {allowCost && sellTierListBasis ? (
+            <FieldLine label="ระดับราคา (%)">
+              <span className="text-sky-900">
+                จากราคาตั้งต่อชิ้น (ราคาตั้ง ÷ Scheme): ค่าบวก = แพงกว่าราคาตั้ง, ค่าลบ = ลด
+              </span>
+            </FieldLine>
+          ) : null}
+          {allowCost && selected.purchaseDiscountPcts?.some((p) => p > 0) ? (
+            <FieldLine label="ส่วนลดซื้อ (%)">
+              <span className="tabular-nums">
+                {selected.purchaseDiscountPcts
+                  .filter((p) => p > 0)
+                  .map((p) => `${p}%`)
+                  .join(' → ') || '—'}
+              </span>
+            </FieldLine>
+          ) : null}
+          {allowCost && selected.costEnteredManually ? (
+            <FieldLine label="ทุน">
+              <span className="text-emerald-800">ระบุเอง</span>
+            </FieldLine>
+          ) : null}
+          {allowCost ? (
+            <>
+              <FieldLine label="ราคาทุน(ต่อชิ้น):">
+                <span className="tabular-nums">฿{formatBaht(selected.costPrice)}</span>
+              </FieldLine>
+              <FieldLine>
+                <span className="font-medium tabular-nums">Scheme({selected.scheme})</span>
+              </FieldLine>
+              <FieldLine label="ราคาทุนเฉลี่ย:">
+                <span className="tabular-nums">฿{formatBaht(selected.avgCost)}</span>
+              </FieldLine>
+            </>
+          ) : (
+            <FieldLine>
+              <span className="font-medium tabular-nums">Scheme({selected.scheme})</span>
+            </FieldLine>
+          )}
+          {selected.sellPriceTiers &&
+          selected.sellPriceTiers.some(
+            (t) =>
+              (t.markupFromCostPercent ?? 0) !== 0 ||
+              (t.supplierListSignedPercent ?? 0) !== 0 ||
+              (t.discountFromSupplierListPercent ?? 0) > 0 ||
+              (t.explicitSmallUnitPrice ?? 0) > 0 ||
+              (t.explicitLargeUnitPrice ?? 0) > 0 ||
+              (t.explicitUnitPrices?.some((p) => p > 0) ?? false),
+          ) ? (
+            <div className="overflow-x-auto rounded-xl border border-emerald-100 bg-emerald-50/40">
+              <table className="w-full min-w-[28rem] border-collapse text-sm">
+                <thead>
+                  <tr className="border-b border-emerald-100 text-left text-xs text-slate-600">
+                    <th className="p-2 font-medium">ระดับ</th>
+                    {allowCost ? (
+                      <th className="p-2 font-medium">
+                        {sellTierListBasis ? '±% จากราคาตั้ง' : '±% จากทุน'}
+                      </th>
+                    ) : null}
+                    {normalizeSalesUnits(selected).map((u) => (
+                      <th key={u.id} className="p-2 font-medium">
+                        ราคา ({u.label})
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {selected.sellPriceTiers.map((t, i) => {
+                    const m = t.markupFromCostPercent ?? 0
+                    const dList = t.discountFromSupplierListPercent ?? 0
+                    const sList = t.supplierListSignedPercent
+                    /** บรรจุใช้แสดงผลเท่านั้น */
+                    const pieces = 1
+                    const units = normalizeSalesUnits(selected)
+                    const hasAny =
+                      m !== 0 ||
+                      (sList !== undefined && sList !== 0) ||
+                      dList > 0 ||
+                      (t.explicitSmallUnitPrice ?? 0) > 0 ||
+                      (t.explicitLargeUnitPrice ?? 0) > 0 ||
+                      (t.explicitUnitPrices?.some((p) => p > 0) ?? false)
+                    if (!hasAny) return null
+                    return (
+                      <tr key={i} className="border-b border-emerald-50/80">
+                        <td className="p-2 text-slate-600">{i + 1}</td>
+                        {allowCost ? (
+                          <td className="p-2 tabular-nums">
+                            {sellTierListBasis
+                              ? sList !== undefined && sList !== 0
+                                ? `${sList > 0 ? '+' : ''}${sList}%`
+                                : dList > 0
+                                  ? `ลด ${dList}%`
+                                  : '—'
+                              : m !== 0
+                                ? `${m > 0 ? '+' : ''}${m}%`
+                                : '—'}
+                          </td>
+                        ) : null}
+                        {units.map((u, ui) => {
+                          const px = sellPriceAtUnitIndex(
+                            t,
+                            selected.costPrice,
+                            pieces,
+                            units,
+                            ui,
+                            tierPriceCtx,
+                          )
+                          return (
+                            <td
+                              key={u.id}
+                              className={clsx(
+                                'p-2 tabular-nums',
+                                ui === 0 ? 'font-medium text-emerald-800' : 'text-emerald-900',
+                              )}
+                            >
+                              {px !== null
+                                ? `฿${px.toLocaleString('th-TH', { maximumFractionDigits: 2 })}`
+                                : '—'}
+                            </td>
+                          )
+                        })}
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : selected.sellPriceTiers && selected.sellPriceTiers.some((t) => t.price > 0) ? (
+            <div className="overflow-x-auto rounded-xl border border-emerald-100 bg-emerald-50/40">
+              <table className="w-full min-w-[20rem] border-collapse text-sm">
+                <thead>
+                  <tr className="border-b border-emerald-100 text-left text-xs text-slate-600">
+                    <th className="p-2 font-medium">ระดับ</th>
+                    <th className="p-2 font-medium">ราคา</th>
+                    <th className="p-2 font-medium">ลด%</th>
+                    <th className="p-2 font-medium">หลังลด</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {selected.sellPriceTiers.map((t, i) =>
+                    t.price > 0 ? (
+                      <tr key={i} className="border-b border-emerald-50/80">
+                        <td className="p-2 text-slate-600">{i + 1}</td>
+                        <td className="p-2 tabular-nums">฿{formatBaht(t.price)}</td>
+                        <td className="p-2 tabular-nums">{t.discountPercent}%</td>
+                        <td className="p-2 font-medium tabular-nums text-emerald-800">
+                          ฿{effectiveSellPriceTier(t).toLocaleString('th-TH', { maximumFractionDigits: 2 })}
+                        </td>
+                      </tr>
+                    ) : null,
+                  )}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+          <FieldLine label="ราคาขาย (หลักในรายการ):" valueClassName="text-base font-semibold text-emerald-800">
+            <span className="tabular-nums">฿{formatBaht(selected.sellPrice)}</span>
+          </FieldLine>
+          {!allowCost ? (
+            <p className="text-xs text-slate-500">
+              หมายเหตุ: ซ่อนข้อมูลทุน/กำไรสำหรับพนักงาน (แสดงเฉพาะผู้มีสิทธิ์)
+            </p>
+          ) : null}
+        </div>
+      </section>
+
+      <div className="flex flex-wrap gap-2 border-t border-slate-100 pt-4">
+        <button
+          type="button"
+          onClick={onEdit}
+          disabled={!onEdit}
+          className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <Pencil className="size-4" />
+          แก้ไขสินค้า
+        </button>
+        <button
+          type="button"
+          className="inline-flex items-center gap-1.5 rounded-xl border border-rose-200 bg-white px-3 py-2 text-sm font-medium text-rose-700 hover:bg-rose-50"
+        >
+          <Trash2 className="size-4" />
+          ลบสินค้า
+        </button>
+        <button
+          type="button"
+          onClick={() => enqueueProductLabelPrintFromMaster(selected)}
+          className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50"
+        >
+          <Printer className="size-4" />
+          พิมพ์บาร์โค้ด
+          <span className="text-xs font-normal text-slate-400">F8</span>
+        </button>
+      </div>
+
+      <CrossBranchStockSection detail={selected} />
+    </>
+  )
+}
+
+export function ProductDataFileView() {
+  const allowCost = canViewCost()
+  const { openTab } = useWorkspaceTabs()
+  const [page, setPage] = useState<'browse' | 'detail'>('browse')
+  const [detailProductId, setDetailProductId] = useState<string | null>(null)
+  const [catalogViewMode, setCatalogViewMode] = useState<CatalogViewMode>('list')
+
+  const [categoryTree, setCategoryTree] = useState<MainCategory[]>(() => loadCategoryTree())
+  const [expandedMain, setExpandedMain] = useState<Set<string>>(() => new Set())
+  const [expandedSub, setExpandedSub] = useState<Set<string>>(() => new Set())
+  const [navSelection, setNavSelection] = useState<CategoryNavSelection>({ type: 'all' })
+  const [q, setQ] = useState('')
+  const [filterBrand, setFilterBrand] = useState(FILTER_ALL)
+  const [filterCarBrand, setFilterCarBrand] = useState(FILTER_ALL)
+  const [filterCarModel, setFilterCarModel] = useState(FILTER_ALL)
+  const [filterYear, setFilterYear] = useState(FILTER_ALL)
+  const [catalogSort, setCatalogSort] = useState<MasterCatalogSort>({ key: 'name', dir: 'asc' })
+  /** A=ใน/กว้าง → inner, B=นอก/ยาว → outer, C=หนา/สูง → height */
+  const [measA, setMeasA] = useState('')
+  const [measA2, setMeasA2] = useState('')
+  const [measB, setMeasB] = useState('')
+  const [measC, setMeasC] = useState('')
+  const [measTol, setMeasTol] = useState(3)
+  const [measActive, setMeasActive] = useState(false)
+  /** แถบค้นหามิติ — ย่อเป็นไอคอนไว้กดขยาย */
+  const [measPanelOpen, setMeasPanelOpen] = useState(false)
+  /** เปิด = แสดงเฉพาะสินค้าในพอร์ตร้าน (ซ่อนรายการอ้างอิง) */
+  const [filterInStoreOnly, setFilterInStoreOnly] = useState(true)
+  const [products, setProducts] = useState<ProductMasterDetail[]>(() => [...getProductMasterList()])
+  const [productModalOpen, setProductModalOpen] = useState(false)
+  const [modalEditProduct, setModalEditProduct] = useState<ProductMasterDetail | null>(null)
+  const [addProductCopySource, setAddProductCopySource] = useState<ProductMasterDetail | null>(null)
+  const [copySuggestedSku, setCopySuggestedSku] = useState<string | undefined>(undefined)
+  const [selectedProductId, setSelectedProductId] = useState<string | null>(null)
+  const [ctx, setCtx] = useState<null | { x: number; y: number; productId: string }>(null)
+  const ctxMenuRef = useRef<HTMLDivElement>(null)
+  const [ctxMenuPos, setCtxMenuPos] = useState<{ left: number; top: number } | null>(null)
+
+  const existingSkus = useMemo(() => {
+    const s = new Set(products.map((p) => p.sku.toLowerCase()))
+    if (modalEditProduct) s.delete(modalEditProduct.sku.toLowerCase())
+    return s
+  }, [products, modalEditProduct])
+
+  const checkBarcodeConflicts = useCallback(
+    (trimmed: string) => {
+      const t = trimmed.trim().toLowerCase()
+      if (!t) return false
+      return products.some((p) => {
+        if (modalEditProduct && p.id === modalEditProduct.id) return false
+        if (p.sku.toLowerCase() === t) return true
+        if (p.boxBarcode?.trim().toLowerCase() === t) return true
+        return false
+      })
+    },
+    [products, modalEditProduct],
+  )
+
+  const openVehicleManage = useCallback(() => {
+    openTab('car-model', 'รถ', { vehicleWorkspacePanel: 'manage' })
+  }, [openTab])
+
+  useEffect(() => {
+    const onUpdate = () => setCategoryTree(loadCategoryTree())
+    window.addEventListener(INVENTORY_CATEGORIES_UPDATED_EVENT, onUpdate)
+    return () => window.removeEventListener(INVENTORY_CATEGORIES_UPDATED_EVENT, onUpdate)
+  }, [])
+
+  useEffect(() => {
+    saveProductMasterList(products, { notify: false })
+  }, [products])
+
+  useEffect(() => {
+    const onMaster = () => setProducts([...getProductMasterList()])
+    window.addEventListener(PRODUCT_MASTER_LIST_CHANGED_EVENT, onMaster)
+    return () => window.removeEventListener(PRODUCT_MASTER_LIST_CHANGED_EVENT, onMaster)
+  }, [])
+
+  useEffect(() => {
+    setExpandedMain(new Set())
+    setExpandedSub(new Set())
+  }, [categoryTree])
+
+  const fromNav = useMemo(
+    () => productsForNavSelection(navSelection, categoryTree, products),
+    [navSelection, categoryTree, products],
+  )
+
+  const dimLayout: PaperDimLayout = useMemo(() => {
+    if (navSelection.type === 'all') {
+      return dimLayoutFromPaperFields(undefined)
+    }
+    return dimLayoutFromPaperFields(paperFieldsForNav(categoryTree, navSelection))
+  }, [categoryTree, navSelection])
+
+  useEffect(() => {
+    if (dimLayout.slotCount === 2) {
+      setMeasA('')
+      setMeasA2('')
+    } else if (dimLayout.slotCount === 3) {
+      setMeasA2('')
+    }
+  }, [dimLayout.slotCount])
+
+  const fromNavCatalog = useMemo(
+    () =>
+      filterInStoreOnly ? fromNav.filter((p) => p.inStoreCatalog !== false) : fromNav,
+    [fromNav, filterInStoreOnly],
+  )
+
+  /** มีสินค้าในมุมมองหมวด แต่ทุกรายการถูกซ่อนเพราะโหมดเฉพาะในร้าน */
+  const catalogFilterHidesAllInNav = useMemo(
+    () => filterInStoreOnly && fromNav.length > 0 && fromNavCatalog.length === 0,
+    [filterInStoreOnly, fromNav, fromNavCatalog],
+  )
+
+  const afterSearch = useMemo(() => filterProductsBySearch(fromNavCatalog, q), [fromNavCatalog, q])
+
+  const filtered = useMemo(
+    () => applyProductFilters(afterSearch, filterBrand, filterCarBrand, filterCarModel, filterYear),
+    [afterSearch, filterBrand, filterCarBrand, filterCarModel, filterYear],
+  )
+
+  const measureInput = useMemo(() => {
+    const id = parseMeasureMm(measA)
+    const id2 = parseMeasureMm(measA2)
+    const od = parseMeasureMm(measB)
+    const h = parseMeasureMm(measC)
+    if (h === undefined || od === undefined) return null
+    const input: MeasureInput = { h, od }
+    if (id !== undefined) input.id = id
+    if (id2 !== undefined) input.id2 = id2
+    return input
+  }, [measA, measA2, measB, measC])
+
+  const dimensionMatch = useMemo(() => {
+    if (!measActive) {
+      return { list: filtered, kind: 'none' as const }
+    }
+    if (!measureInput) {
+      return { list: filtered, kind: 'invalid' as const }
+    }
+    const withDim = filtered.filter((p) => p.physicalDimensions)
+    if (withDim.length === 0) {
+      return { list: [], kind: 'no_dim_in_filter' as const }
+    }
+    const strict = withDim.filter((p) => dimensionStrictMatch(p, measureInput, measTol))
+    if (strict.length > 0) {
+      return { list: strict, kind: 'strict' as const }
+    }
+    const nearest = [...withDim]
+      .map((p) => ({ p, score: dimensionScore(p, measureInput) ?? Infinity }))
+      .sort((a, b) => a.score - b.score)
+      .slice(0, 8)
+      .map((x) => x.p)
+    return { list: nearest, kind: 'nearest' as const }
+  }, [filtered, measActive, measureInput, measTol])
+
+  const sortedList = useMemo(
+    () => sortMasterCatalogList(dimensionMatch.list, catalogSort),
+    [dimensionMatch.list, catalogSort],
+  )
+
+  function handleCatalogHeaderSort(key: MasterCatalogSortKey) {
+    setCatalogSort((prev) => toggleMasterCatalogSort(prev, key))
+  }
+
+  const filterOptions = useMemo(() => {
+    const base = products
+    const brands = [...new Set(base.map((p) => p.brand))].sort((a, b) => a.localeCompare(b, 'th'))
+    const { carBrands, models, years } = collectInventoryCarFilterOptions(base)
+    return { brands, carBrands, models, years }
+  }, [products])
+
+  const hasOrphans = useMemo(() => {
+    const names = new Set(categoryTree.map((m) => norm(m.name)))
+    return products.some((p) => !names.has(norm(p.category)))
+  }, [categoryTree, products])
+
+  const detailProduct = useMemo(
+    () => (detailProductId ? products.find((p) => p.id === detailProductId) : undefined),
+    [detailProductId, products],
+  )
+
+  const selectedProduct = useMemo(
+    () => (selectedProductId ? products.find((p) => p.id === selectedProductId) ?? null : null),
+    [products, selectedProductId],
+  )
+
+  function openProductDetail(id: string) {
+    setDetailProductId(id)
+    setPage('detail')
+    setSelectedProductId(id)
+  }
+
+  function backToCatalog() {
+    setPage('browse')
+    setDetailProductId(null)
+  }
+
+  function openCopyFromProduct(p: ProductMasterDetail) {
+    setModalEditProduct(null)
+    setAddProductCopySource(p)
+    setCopySuggestedSku(generateNextTenDigitSku(products))
+    setProductModalOpen(true)
+  }
+
+  const openProductContextMenu = useCallback((e: React.MouseEvent, productId: string) => {
+    e.preventDefault()
+    setSelectedProductId(productId)
+    setCtxMenuPos(null)
+    setCtx({ x: e.clientX, y: e.clientY, productId })
+  }, [])
+
+  useEffect(() => {
+    if (productModalOpen) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return
+      if (e.key === 'F2') {
+        if (page !== 'browse' || !selectedProduct) return
+        e.preventDefault()
+        setCtx(null)
+        openCopyFromProduct(selectedProduct)
+        return
+      }
+      if (e.key === 'F8') {
+        if (e.ctrlKey || e.metaKey || e.altKey) return
+        const target = e.target as HTMLElement | null
+        if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return
+        const id = page === 'detail' ? detailProductId : selectedProductId
+        if (!id) return
+        const p = products.find((x) => x.id === id)
+        if (!p) return
+        e.preventDefault()
+        setCtx(null)
+        enqueueProductLabelPrintFromMaster(p)
+        return
+      }
+      if (page !== 'browse') return
+      if (e.key === 'Escape') {
+        setCtx(null)
+      } else if (e.key === 'ContextMenu') {
+        if (!selectedProduct) return
+        const anchor = document.activeElement?.getBoundingClientRect()
+        if (!anchor) return
+        setCtxMenuPos(null)
+        setCtx({
+          x: Math.round(anchor.left + Math.min(40, anchor.width - 10)),
+          y: Math.round(anchor.top + Math.min(16, anchor.height - 10)),
+          productId: selectedProduct.id,
+        })
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [page, productModalOpen, selectedProduct, selectedProductId, detailProductId, products])
+
+  function toggleMain(mainId: string) {
+    setExpandedMain((prev) => (prev.has(mainId) ? new Set() : new Set([mainId])))
+    setExpandedSub(new Set())
+  }
+
+  function toggleSub(mainId: string, subId: string) {
+    const key = `${mainId}::${subId}`
+    setExpandedSub((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  const selectClass =
+    'w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-900 outline-none focus:border-slate-400 focus:ring-1 focus:ring-slate-200'
+
+  const viewToggleBtn = (mode: CatalogViewMode, label: ReactNode, icon: ReactNode) => (
+    <button
+      type="button"
+      onClick={() => setCatalogViewMode(mode)}
+      aria-pressed={catalogViewMode === mode}
+      className={clsx(
+        'inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium transition',
+        catalogViewMode === mode
+          ? 'bg-white text-slate-900 shadow-sm ring-1 ring-slate-200/80'
+          : 'text-slate-600 hover:bg-white/80',
+      )}
+    >
+      {icon}
+      {label}
+    </button>
+  )
+
+  useLayoutEffect(() => {
+    if (!ctx) {
+      setCtxMenuPos(null)
+      return
+    }
+    const el = ctxMenuRef.current
+    if (!el) return
+    const pad = 6
+    const vw = window.innerWidth
+    const vh = window.innerHeight
+    const rect = el.getBoundingClientRect()
+    let left = ctx.x
+    let top = ctx.y
+
+    if (top + rect.height > vh - pad) {
+      const above = ctx.y - rect.height
+      if (above >= pad) top = above
+      else top = Math.max(pad, vh - rect.height - pad)
+    }
+
+    if (left + rect.width > vw - pad) {
+      left = Math.max(pad, vw - rect.width - pad)
+    }
+    if (left < pad) left = pad
+    if (top < pad) top = pad
+
+    setCtxMenuPos((prev) => (prev && prev.left === left && prev.top === top ? prev : { left, top }))
+  }, [ctx])
+
+  if (page === 'detail') {
+    if (!detailProduct) {
+      return (
+        <div className="rounded-2xl border border-amber-200 bg-amber-50/80 px-4 py-10 text-center">
+          <p className="text-sm text-amber-900">ไม่พบข้อมูลสินค้า</p>
+          <button
+            type="button"
+            onClick={backToCatalog}
+            className="mt-4 inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50"
+          >
+            <ArrowLeft className="size-4" />
+            กลับรายการสินค้า
+          </button>
+        </div>
+      )
+    }
+
+    return (
+      <div className="min-w-0 flex-1 space-y-4 pos-compact:space-y-3">
+        <button
+          type="button"
+          onClick={backToCatalog}
+          className="inline-flex items-center gap-2 rounded-xl px-2 py-1.5 text-sm font-medium text-slate-700 transition hover:bg-slate-100 hover:text-slate-900"
+        >
+          <ArrowLeft className="size-4" />
+          กลับรายการสินค้า
+        </button>
+        <nav className="text-xs text-slate-500" aria-label="Breadcrumb">
+          <span className="text-slate-400">หน้าแรก</span>
+          <span className="mx-1 text-slate-300">/</span>
+          <span className="text-slate-400">แฟ้มข้อมูลสินค้า</span>
+          <span className="mx-1 text-slate-300">/</span>
+          <span className="font-medium text-slate-800">{detailProduct.name}</span>
+        </nav>
+        <h2 className="text-lg font-semibold tracking-tight text-slate-900">ข้อมูลสินค้า</h2>
+        <ProductMasterDetailContent
+          selected={detailProduct}
+          onEdit={
+            allowCost
+              ? () => {
+                  setModalEditProduct(detailProduct)
+                  setAddProductCopySource(null)
+                  setCopySuggestedSku(undefined)
+                  setProductModalOpen(true)
+                }
+              : undefined
+          }
+          onOpenVehicleManage={openVehicleManage}
+        />
+        <AddProductModal
+          open={productModalOpen}
+          onClose={() => {
+            setProductModalOpen(false)
+            setModalEditProduct(null)
+            setAddProductCopySource(null)
+            setCopySuggestedSku(undefined)
+          }}
+          onCreate={(p) => setProducts((prev) => [p, ...prev])}
+          onUpdate={(p) =>
+            setProducts((prev) => {
+              const next = prev.map((x) => (x.id === p.id ? p : x))
+              return next
+            })
+          }
+          editingProduct={modalEditProduct}
+          categoryTree={categoryTree}
+          existingSkus={existingSkus}
+          checkBarcodeConflicts={checkBarcodeConflicts}
+          onOpenVehicleManage={openVehicleManage}
+          copySource={addProductCopySource}
+          suggestedSku={copySuggestedSku}
+          browseNav={navSelection}
+        />
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-3 pos-compact:gap-2 lg:flex-row lg:gap-3 pos-compact:lg:gap-2">
+      <aside
+        className="flex w-full shrink-0 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-slate-50/80 shadow-sm pos-compact:rounded-xl lg:w-[13.5rem] lg:max-w-[13.5rem] pos-compact:lg:w-[11.5rem]"
+        aria-label="เลือกหมวดหมู่สินค้า"
+      >
+        <div className="border-b border-slate-200/90 bg-white/90 px-2.5 py-2 pos-compact:px-2 pos-compact:py-1.5">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 pos-compact:text-[10px]">
+            หมวดหมู่สินค้า
+          </p>
+        </div>
+        <nav className="min-h-0 max-h-[min(70vh,36rem)] flex-1 overflow-y-auto overflow-x-hidden px-1.5 py-2 pos-compact:max-h-[min(65vh,28rem)] pos-compact:py-1.5">
+          <button
+            type="button"
+            onClick={() => setNavSelection({ type: 'all' })}
+            className={clsx(
+              'mb-1 w-full rounded-lg px-2 py-1.5 text-left text-sm font-medium pos-compact:py-1 pos-compact:text-[13px]',
+              navSelection.type === 'all'
+                ? 'bg-teal-100 text-teal-900 ring-1 ring-teal-200/80'
+                : 'text-slate-800 hover:bg-white',
+            )}
+          >
+            ทั้งหมด
+          </button>
+          {categoryTree.length === 0 ? (
+            <p className="rounded-lg border border-amber-200/80 bg-amber-50/90 px-2 py-2.5 text-center text-[11px] leading-snug text-amber-900 pos-compact:text-[10px]">
+              ยังไม่มีหมวดหมู่ — ไปที่ «จัดการหมวดหมู่»
+            </p>
+          ) : (
+            categoryTree.map((main) => {
+              const subs = main.subcategories
+              const open = expandedMain.has(main.id)
+              const mainSelected =
+                navSelection.type === 'main' && navSelection.mainId === main.id
+
+              return (
+                <div key={main.id} className="mb-0.5">
+                  {subs.length === 0 ? (
+                    <button
+                      type="button"
+                      onClick={() => setNavSelection({ type: 'main', mainId: main.id })}
+                      className={clsx(
+                        'w-full rounded-lg px-2 py-1.5 text-left text-sm pos-compact:py-1 pos-compact:text-[13px]',
+                        mainSelected
+                          ? 'bg-teal-100 font-medium text-teal-900 ring-1 ring-teal-200/80'
+                          : 'font-medium text-slate-800 hover:bg-white',
+                      )}
+                    >
+                      <span className="line-clamp-2">{main.name}</span>
+                    </button>
+                  ) : (
+                    <>
+                      <div className="flex min-w-0 items-stretch gap-0.5">
+                        <button
+                          type="button"
+                          onClick={() => toggleMain(main.id)}
+                          className="flex shrink-0 items-center justify-center rounded-lg px-0.5 text-slate-500 hover:bg-white hover:text-slate-800"
+                          aria-expanded={open}
+                          aria-label={open ? 'ยุบหมวดย่อย' : 'ขยายหมวดย่อย'}
+                        >
+                          {open ? (
+                            <ChevronDown className="size-4 pos-compact:size-3.5" aria-hidden />
+                          ) : (
+                            <ChevronRight className="size-4 pos-compact:size-3.5" aria-hidden />
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setNavSelection({ type: 'main', mainId: main.id })
+                            setExpandedMain(new Set([main.id]))
+                            setExpandedSub(new Set())
+                          }}
+                          className={clsx(
+                            'min-w-0 flex-1 rounded-lg px-2 py-1.5 text-left text-sm pos-compact:py-1 pos-compact:text-[13px]',
+                            mainSelected
+                              ? 'bg-teal-100 font-medium text-teal-900 ring-1 ring-teal-200/80'
+                              : 'font-medium text-slate-800 hover:bg-white',
+                          )}
+                        >
+                          <span className="line-clamp-2">{main.name}</span>
+                        </button>
+                      </div>
+                      {open && (
+                        <div className="ml-4 space-y-1 border-l border-slate-200/90 py-0.5 pl-2">
+                          {subs.map((sub) => {
+                            const subSel =
+                              (navSelection.type === 'sub' &&
+                                navSelection.mainId === main.id &&
+                                navSelection.subId === sub.id) ||
+                              (navSelection.type === 'subsub' &&
+                                navSelection.mainId === main.id &&
+                                navSelection.subId === sub.id)
+                            const subSubs = sub.subSubcategories
+                            const subKey = `${main.id}::${sub.id}`
+                            const subOpen = expandedSub.has(subKey)
+                            return (
+                              <div key={sub.id} className="space-y-0.5">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setNavSelection({ type: 'sub', mainId: main.id, subId: sub.id })
+                                    if (subSubs.length > 0) toggleSub(main.id, sub.id)
+                                  }}
+                                  className={clsx(
+                                    'w-full rounded-md px-2 py-1 text-left text-[13px] pos-compact:text-[12px]',
+                                    subSel
+                                      ? 'bg-teal-100 font-medium text-teal-900 ring-1 ring-teal-200/80'
+                                      : 'text-slate-700 hover:bg-white',
+                                  )}
+                                >
+                                  <span className="line-clamp-2">{sub.name}</span>
+                                </button>
+                                {subSubs.length > 0 && subOpen ? (
+                                  <div className="ml-0 space-y-0.5 border-l border-slate-200/70 py-0.5 pl-2">
+                                    {subSubs.map((ss) => {
+                                      const ssSel =
+                                        navSelection.type === 'subsub' &&
+                                        navSelection.mainId === main.id &&
+                                        navSelection.subId === sub.id &&
+                                        navSelection.subSubId === ss.id
+                                      return (
+                                        <button
+                                          key={ss.id}
+                                          type="button"
+                                          onClick={() =>
+                                            setNavSelection({
+                                              type: 'subsub',
+                                              mainId: main.id,
+                                              subId: sub.id,
+                                              subSubId: ss.id,
+                                            })
+                                          }
+                                          className={clsx(
+                                            'w-full rounded-md py-1 pl-3 pr-2 text-left text-[12px] leading-snug text-slate-600 pos-compact:text-[11px]',
+                                            ssSel
+                                              ? 'bg-teal-100 font-medium text-teal-900 ring-1 ring-teal-200/80'
+                                              : 'hover:bg-white',
+                                          )}
+                                        >
+                                          <span className="line-clamp-2">{ss.name}</span>
+                                        </button>
+                                      )
+                                    })}
+                                  </div>
+                                ) : null}
+                              </div>
+                            )
+                          })}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )
+            })
+          )}
+          {hasOrphans && (
+            <button
+              type="button"
+              onClick={() => setNavSelection({ type: 'orphan' })}
+              className={clsx(
+                'mt-2 w-full rounded-lg border border-amber-200/80 px-2 py-2 text-left text-[11px] font-medium leading-snug pos-compact:text-[10px]',
+                navSelection.type === 'orphan'
+                  ? 'bg-amber-100 text-amber-950 ring-1 ring-amber-200/90'
+                  : 'bg-amber-50/80 text-amber-900 hover:bg-amber-100/90',
+              )}
+            >
+              สินค้าไม่ตรงหมวดในระบบ
+            </button>
+          )}
+        </nav>
+      </aside>
+
+      <div className="min-w-0 flex-1 space-y-3 pos-compact:space-y-2">
+        <nav className="text-[11px] text-slate-500 pos-compact:text-[10px]" aria-label="Breadcrumb">
+          <span className="text-slate-400">หน้าแรก</span>
+          <span className="mx-1 text-slate-300">/</span>
+          <span className="font-medium text-slate-700">{breadcrumbLabel(categoryTree, navSelection)}</span>
+        </nav>
+
+        <div className="flex flex-col gap-2 pos-compact:gap-1.5 sm:flex-row sm:items-stretch sm:gap-2">
+          <div className="relative min-w-0 flex-1">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-slate-400" />
+            <input
+              type="search"
+              placeholder="ค้นหาสินค้า (ชื่อ, SKU, OEM, Cross ref, หมวด...)"
+              className="w-full rounded-lg border border-slate-200 py-2 pl-9 pr-2.5 text-sm shadow-sm outline-none focus:border-slate-400 focus:ring-1 focus:ring-slate-200"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+            />
+          </div>
+          {allowCost ? (
+            <button
+              type="button"
+              disabled={categoryTree.length === 0}
+              title={categoryTree.length === 0 ? 'เพิ่มหมวดหมู่ก่อน (จัดการหมวดหมู่)' : undefined}
+              onClick={() => {
+                setModalEditProduct(null)
+                setAddProductCopySource(null)
+                setCopySuggestedSku(undefined)
+                setProductModalOpen(true)
+              }}
+              className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg border border-emerald-600 bg-emerald-600 px-3 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-200 disabled:text-slate-500"
+            >
+              <Plus className="size-3.5" strokeWidth={2} />
+              เพิ่มสินค้า
+            </button>
+          ) : null}
+        </div>
+
+        <AddProductModal
+          open={productModalOpen}
+          onClose={() => {
+            setProductModalOpen(false)
+            setModalEditProduct(null)
+            setAddProductCopySource(null)
+            setCopySuggestedSku(undefined)
+          }}
+          onCreate={(p) => setProducts((prev) => [p, ...prev])}
+          onUpdate={(p) => setProducts((prev) => prev.map((x) => (x.id === p.id ? p : x)))}
+          editingProduct={modalEditProduct}
+          categoryTree={categoryTree}
+          existingSkus={existingSkus}
+          checkBarcodeConflicts={checkBarcodeConflicts}
+          onOpenVehicleManage={openVehicleManage}
+          copySource={addProductCopySource}
+          suggestedSku={copySuggestedSku}
+          browseNav={navSelection}
+        />
+
+        <div className="grid w-full gap-1.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          <label className="block min-w-0">
+            <span className="mb-0.5 block text-[11px] text-slate-500">แบรนด์</span>
+            <select className={selectClass} value={filterBrand} onChange={(e) => setFilterBrand(e.target.value)}>
+              <option value={FILTER_ALL}>{FILTER_ALL}</option>
+              {filterOptions.brands.map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block min-w-0">
+            <span className="mb-0.5 block text-[11px] text-slate-500">ยี่ห้อรถ</span>
+            <select className={selectClass} value={filterCarBrand} onChange={(e) => setFilterCarBrand(e.target.value)}>
+              <option value={FILTER_ALL}>{FILTER_ALL}</option>
+              {filterOptions.carBrands.map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block min-w-0">
+            <span className="mb-0.5 block text-[11px] text-slate-500">รุ่นรถ</span>
+            <select className={selectClass} value={filterCarModel} onChange={(e) => setFilterCarModel(e.target.value)}>
+              <option value={FILTER_ALL}>{FILTER_ALL}</option>
+              {filterOptions.models.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block min-w-0">
+            <span className="mb-0.5 block text-[11px] text-slate-500">รุ่นปี</span>
+            <div className="flex min-w-0 items-stretch gap-1.5">
+              <select
+                className={clsx(selectClass, 'min-w-0 flex-1')}
+                value={filterYear}
+                onChange={(e) => setFilterYear(e.target.value)}
+                aria-label="รุ่นปี"
+              >
+                <option value={FILTER_ALL}>{FILTER_ALL}</option>
+                {filterOptions.years.map((y) => (
+                  <option key={y} value={y}>
+                    {y}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                aria-expanded={measPanelOpen}
+                aria-controls="catalog-meas-dimension-panel"
+                title="ค้นหาตามมิติ (กรณีไม่เห็นเบอร์ OEM)"
+                onClick={() => setMeasPanelOpen((open) => !open)}
+                className={clsx(
+                  'relative inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-violet-200/90 bg-gradient-to-br from-violet-50 to-white text-violet-800 shadow-sm outline-none ring-violet-300/40 transition hover:border-violet-300 hover:bg-violet-100/80 focus-visible:ring-2',
+                  measPanelOpen && 'border-violet-400 bg-violet-100/80',
+                )}
+              >
+                <Ruler className="size-4" strokeWidth={1.75} aria-hidden />
+                <span className="sr-only">เปิดหรือย่อค้นหาตามมิติ</span>
+                {measActive ? (
+                  <span
+                    className="absolute right-1.5 top-1.5 size-2 rounded-full bg-emerald-500 ring-2 ring-white"
+                    aria-hidden
+                  />
+                ) : null}
+              </button>
+            </div>
+          </label>
+        </div>
+
+        {measPanelOpen ? (
+        <section
+          id="catalog-meas-dimension-panel"
+          className="rounded-xl border border-violet-200/80 bg-gradient-to-br from-violet-50/90 to-white p-3 shadow-sm pos-compact:p-2.5 pos-compact:rounded-lg"
+        >
+          <div className="flex flex-wrap items-start gap-2">
+            <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-violet-100 text-violet-800">
+              <Ruler className="size-4" strokeWidth={1.75} aria-hidden />
+            </div>
+            <div className="min-w-0 flex-1 space-y-2">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <h3 className="text-sm font-semibold text-violet-950">ค้นหาตามมิติ (กรณีไม่เห็นเบอร์ OEM)</h3>
+                  <p className="mt-0.5 text-[11px] leading-snug text-violet-900/90">ใช้หน่วยเป็น มิลลิเมตร(mm)</p>
+                </div>
+                <button
+                  type="button"
+                  aria-expanded
+                  aria-controls="catalog-meas-dimension-panel"
+                  title="ย่อแถบค้นหามิติ"
+                  onClick={() => setMeasPanelOpen(false)}
+                  className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-violet-200 bg-white px-2 py-1 text-[11px] font-medium text-violet-900 hover:bg-violet-50"
+                >
+                  <ChevronUp className="size-3.5" aria-hidden />
+                  ย่อ
+                </button>
+              </div>
+              <div className="flex flex-col gap-2">
+                <div
+                  className={clsx(
+                    'grid w-full min-w-0 gap-2',
+                    dimLayout.slotCount === 2 && 'grid-cols-2 sm:grid-cols-3',
+                    dimLayout.slotCount === 3 && 'grid-cols-2 sm:grid-cols-4 lg:grid-cols-5',
+                    (dimLayout.slotCount === 0 ||
+                      dimLayout.slotCount === 1 ||
+                      dimLayout.slotCount === 4) &&
+                      'grid-cols-2 sm:grid-cols-3 lg:grid-cols-5',
+                  )}
+                >
+                  {dimLayout.slotCount === 2 ? (
+                    <>
+                      <label className="flex min-w-0 flex-col gap-0.5">
+                        <span className="text-[11px] font-medium leading-snug text-violet-900/90">{dimLayout.b}</span>
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          placeholder="เช่น 68"
+                          value={measB}
+                          onChange={(e) => setMeasB(e.target.value)}
+                          aria-label={dimLayout.b}
+                          className="w-full min-w-0 rounded-lg border border-violet-200 bg-white px-2 py-1.5 text-xs tabular-nums outline-none focus:border-violet-400 focus:ring-1 focus:ring-violet-200"
+                        />
+                      </label>
+                      <label className="flex min-w-0 flex-col gap-0.5">
+                        <span className="text-[11px] font-medium leading-snug text-violet-900/90">{dimLayout.c}</span>
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          placeholder="เช่น 85"
+                          value={measC}
+                          onChange={(e) => setMeasC(e.target.value)}
+                          aria-label={dimLayout.c}
+                          className="w-full min-w-0 rounded-lg border border-violet-200 bg-white px-2 py-1.5 text-xs tabular-nums outline-none focus:border-violet-400 focus:ring-1 focus:ring-violet-200"
+                        />
+                      </label>
+                    </>
+                  ) : dimLayout.slotCount === 3 ? (
+                    <>
+                      <label className="flex min-w-0 flex-col gap-0.5">
+                        <span className="text-[11px] font-medium leading-snug text-violet-900/90">{dimLayout.a}</span>
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          placeholder="ไม่บังคับ"
+                          value={measA}
+                          onChange={(e) => setMeasA(e.target.value)}
+                          aria-label={dimLayout.a}
+                          className="w-full min-w-0 rounded-lg border border-violet-200 bg-white px-2 py-1.5 text-xs tabular-nums outline-none focus:border-violet-400 focus:ring-1 focus:ring-violet-200"
+                        />
+                      </label>
+                      <label className="flex min-w-0 flex-col gap-0.5">
+                        <span className="text-[11px] font-medium leading-snug text-violet-900/90">{dimLayout.b}</span>
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          placeholder="เช่น 68"
+                          value={measB}
+                          onChange={(e) => setMeasB(e.target.value)}
+                          aria-label={dimLayout.b}
+                          className="w-full min-w-0 rounded-lg border border-violet-200 bg-white px-2 py-1.5 text-xs tabular-nums outline-none focus:border-violet-400 focus:ring-1 focus:ring-violet-200"
+                        />
+                      </label>
+                      <label className="flex min-w-0 flex-col gap-0.5">
+                        <span className="text-[11px] font-medium leading-snug text-violet-900/90">{dimLayout.c}</span>
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          placeholder="เช่น 85"
+                          value={measC}
+                          onChange={(e) => setMeasC(e.target.value)}
+                          aria-label={dimLayout.c}
+                          className="w-full min-w-0 rounded-lg border border-violet-200 bg-white px-2 py-1.5 text-xs tabular-nums outline-none focus:border-violet-400 focus:ring-1 focus:ring-violet-200"
+                        />
+                      </label>
+                    </>
+                  ) : (
+                    <>
+                      <label className="flex min-w-0 flex-col gap-0.5">
+                        <span className="text-[11px] font-medium leading-snug text-violet-900/90">{dimLayout.a}</span>
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          placeholder="ไม่บังคับ"
+                          value={measA}
+                          onChange={(e) => setMeasA(e.target.value)}
+                          aria-label={dimLayout.a}
+                          className="w-full min-w-0 rounded-lg border border-violet-200 bg-white px-2 py-1.5 text-xs tabular-nums outline-none focus:border-violet-400 focus:ring-1 focus:ring-violet-200"
+                        />
+                      </label>
+                      {dimLayout.showA2ByCategory || measA2.trim().length > 0 ? (
+                        <label className="flex min-w-0 flex-col gap-0.5">
+                          <span className="text-[11px] font-medium leading-snug text-violet-900/90">{dimLayout.a2}</span>
+                          <input
+                            type="text"
+                            inputMode="decimal"
+                            placeholder="ไม่บังคับ"
+                            value={measA2}
+                            onChange={(e) => setMeasA2(e.target.value)}
+                            aria-label={dimLayout.a2}
+                            className="w-full min-w-0 rounded-lg border border-violet-200 bg-white px-2 py-1.5 text-xs tabular-nums outline-none focus:border-violet-400 focus:ring-1 focus:ring-violet-200"
+                          />
+                        </label>
+                      ) : null}
+                      <label className="flex min-w-0 flex-col gap-0.5">
+                        <span className="text-[11px] font-medium leading-snug text-violet-900/90">{dimLayout.b}</span>
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          placeholder="เช่น 68"
+                          value={measB}
+                          onChange={(e) => setMeasB(e.target.value)}
+                          aria-label={dimLayout.b}
+                          className="w-full min-w-0 rounded-lg border border-violet-200 bg-white px-2 py-1.5 text-xs tabular-nums outline-none focus:border-violet-400 focus:ring-1 focus:ring-violet-200"
+                        />
+                      </label>
+                      <label className="flex min-w-0 flex-col gap-0.5">
+                        <span className="text-[11px] font-medium leading-snug text-violet-900/90">{dimLayout.c}</span>
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          placeholder="เช่น 85"
+                          value={measC}
+                          onChange={(e) => setMeasC(e.target.value)}
+                          aria-label={dimLayout.c}
+                          className="w-full min-w-0 rounded-lg border border-violet-200 bg-white px-2 py-1.5 text-xs tabular-nums outline-none focus:border-violet-400 focus:ring-1 focus:ring-violet-200"
+                        />
+                      </label>
+                    </>
+                  )}
+                  <label className="flex min-w-0 flex-col gap-0.5 sm:col-span-2 lg:col-span-1">
+                    <span className="text-[11px] font-medium text-violet-900/90">คลาดเคลื่อนได้±</span>
+                    <select
+                      aria-label="คลาดเคลื่อนได้ ±"
+                      className="w-full min-w-0 rounded-lg border border-violet-200 bg-white px-2 py-1.5 text-xs outline-none focus:border-violet-400 focus:ring-1 focus:ring-violet-200"
+                      value={measTol}
+                      onChange={(e) => setMeasTol(Number(e.target.value))}
+                    >
+                      {[1, 2, 3, 5, 8].map((n) => (
+                        <option key={n} value={n}>
+                          ± {n} mm
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setMeasActive(true)}
+                    className="rounded-lg border border-violet-700 bg-violet-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-900"
+                  >
+                    ใช้การค้นหามิติ
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMeasActive(false)
+                      setMeasA('')
+                      setMeasA2('')
+                      setMeasB('')
+                      setMeasC('')
+                    }}
+                    className="rounded-lg border border-violet-200 bg-white px-3 py-1.5 text-xs font-medium text-violet-900 hover:bg-violet-50"
+                  >
+                    ล้างมิติ
+                  </button>
+                </div>
+              </div>
+              {measActive && dimensionMatch.kind === 'invalid' && (
+                <p className="text-xs font-medium text-rose-700">
+                  กรุณากรอกมิติ B และ C (มม.) เป็นตัวเลขที่ถูกต้อง
+                </p>
+              )}
+              {measActive && measureInput && dimensionMatch.kind === 'strict' && (
+                <p className="text-xs font-medium text-emerald-800">
+                  พบสินค้าที่มิติตรงภายใน ±{measTol} mm ต่อมิติ
+                </p>
+              )}
+              {measActive && measureInput && dimensionMatch.kind === 'nearest' && (
+                <p className="text-xs font-medium text-amber-900">
+                  ไม่พบในช่วงที่กำหนด — แสดงสินค้าที่มิติใกล้เคียงที่สุด (เรียงจากใกล้ไปไกล)
+                </p>
+              )}
+              {measActive && dimensionMatch.kind === 'no_dim_in_filter' && (
+                <p className="text-xs font-medium text-amber-900">
+                  ในรายการที่กรองอยู่ไม่มีสินค้าที่ลงมิติไว้ — ลองขยายหมวดหรือปิดตัวกรอง
+                </p>
+              )}
+            </div>
+          </div>
+        </section>
+        ) : null}
+
+        <div className="flex flex-wrap items-end justify-between gap-x-3 gap-y-2 border-b border-slate-100 pb-2 pos-compact:gap-x-2 pos-compact:gap-y-1.5 pos-compact:pb-1.5">
+              <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1.5">
+                <span className="shrink-0 text-[11px] font-medium text-slate-500">มุมมอง</span>
+                <div
+                  role="group"
+                  aria-label="สลับมุมมองรายการสินค้า"
+                  className="inline-flex shrink-0 flex-wrap rounded-lg border border-slate-200 bg-slate-50 p-0.5"
+                >
+                  {viewToggleBtn('list', 'รายการ', <LayoutList className="size-3.5" strokeWidth={1.75} />)}
+                  {viewToggleBtn('grid-5', '5 คอล', <LayoutGrid className="size-3.5" strokeWidth={1.75} />)}
+                  {viewToggleBtn(
+                    'flip-card',
+                    'Flip card',
+                    <FlipHorizontal2 className="size-3.5" strokeWidth={1.75} />,
+                  )}
+                </div>
+              </div>
+              <div className="flex w-full min-w-0 flex-wrap items-end justify-end sm:ml-auto sm:w-auto">
+                <div className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2 py-1">
+                  <span className="text-[11px] font-medium text-slate-600">เฉพาะในร้าน</span>
+                  <div className="flex items-center gap-1">
+                    <Store
+                      className={clsx(
+                        'size-3.5 shrink-0',
+                        filterInStoreOnly ? 'text-emerald-600' : 'text-slate-400',
+                      )}
+                      strokeWidth={1.75}
+                      aria-hidden
+                    />
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={filterInStoreOnly}
+                      aria-label={
+                        filterInStoreOnly
+                          ? 'เฉพาะสินค้าในร้าน — กดเพื่อแสดงรายการอ้างอิงทั้งหมด'
+                          : 'แสดงทุกรายการ — กดเพื่อดูเฉพาะสินค้าในร้าน'
+                      }
+                      title={
+                        filterInStoreOnly
+                          ? 'เฉพาะสินค้าในร้าน — กดเพื่อแสดงรายการอ้างอิงทั้งหมด'
+                          : 'แสดงทุกรายการ — กดเพื่อดูเฉพาะสินค้าในร้าน'
+                      }
+                      onClick={() => setFilterInStoreOnly((v) => !v)}
+                      className={clsx(
+                        'relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-1',
+                        filterInStoreOnly
+                          ? 'border-emerald-600 bg-emerald-500'
+                          : 'border-slate-300 bg-slate-200',
+                      )}
+                    >
+                      <span
+                        className={clsx(
+                          'pointer-events-none absolute top-0.5 size-4 rounded-full bg-white shadow transition-transform duration-200',
+                          filterInStoreOnly ? 'translate-x-4' : 'translate-x-0.5',
+                        )}
+                      />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+        {sortedList.length === 0 ? (
+          <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50/50 px-4 py-12 text-center text-sm text-slate-500 pos-compact:rounded-xl pos-compact:py-6 pos-compact:px-3 pos-compact:text-xs">
+            {catalogFilterHidesAllInNav
+              ? 'ในมุมมองนี้มีเฉพาะสินค้าอ้างอิง — ปิดสวิตช์ «เฉพาะในร้าน» ด้านบนเพื่อดูในแฟ้มข้อมูล หรือเปลี่ยนหมวด'
+              : dimensionMatch.kind === 'no_dim_in_filter'
+                ? 'ไม่มีสินค้าที่มีมิติในระบบในรายการนี้ — ลองเปลี่ยนหมวดหรือตัวกรอง'
+                : 'ไม่พบสินค้าตามหมวดหมู่ คำค้นหา หรือตัวกรอง'}
+          </div>
+        ) : catalogViewMode === 'list' ? (
+              <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white shadow-sm pos-compact:rounded-xl">
+                <table className="w-full min-w-[560px] table-fixed border-collapse text-left text-sm pos-narrow:min-w-[520px] xl:min-w-[640px]">
+                  <thead>
+                    <tr className="border-b border-slate-100 bg-slate-50 text-xs font-medium text-slate-500 pos-compact:text-[10px]">
+                      <th className="w-[5.5rem] py-2.5 pl-3 pr-1 pos-compact:w-[4.5rem] pos-compact:py-2 pos-compact:pl-2">
+                        รูป
+                      </th>
+                      <MasterCatalogSortTh
+                        sortKey="name"
+                        sort={catalogSort}
+                        label="ชื่อสินค้า"
+                        onSort={handleCatalogHeaderSort}
+                        className="min-w-0 py-2.5 pr-2 pos-compact:py-2"
+                      />
+                      <MasterCatalogSortTh
+                        sortKey="sku"
+                        sort={catalogSort}
+                        label="SKU"
+                        onSort={handleCatalogHeaderSort}
+                        className="hidden w-[7.5rem] py-2.5 pos-compact:py-2 sm:table-cell"
+                      />
+                      <MasterCatalogSortTh
+                        sortKey="sellPrice"
+                        sort={catalogSort}
+                        label="ราคาขาย"
+                        onSort={handleCatalogHeaderSort}
+                        alignRight
+                        className="hidden w-[6.5rem] border-l border-slate-100/90 py-2.5 pl-4 pr-3 whitespace-nowrap pos-compact:py-2 pos-compact:pl-3 lg:table-cell"
+                      />
+                      <th className="w-9 py-2.5 pr-3 pos-compact:py-2 pos-compact:pr-2" aria-hidden />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedList.map((p) => (
+                      <ProductMasterListRow
+                        key={p.id}
+                        product={p}
+                        dimensionSearchActive={measActive}
+                        onOpen={() => openProductDetail(p.id)}
+                        onSelect={() => setSelectedProductId(p.id)}
+                        selected={selectedProductId === p.id}
+                        onContextMenu={(e) => openProductContextMenu(e, p.id)}
+                      />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="min-w-0 space-y-2">
+                {catalogViewMode === 'flip-card' ? (
+                  <p className="rounded-lg border border-amber-200/90 bg-amber-50/80 px-3 py-2 text-[11px] leading-snug text-amber-950 pos-compact:text-[10px]">
+                    มุมมอง Flip card — กำลังพัฒนา แสดงกริด 5 คอลัมน์ชั่วคราว
+                  </p>
+                ) : null}
+                <div
+                  className={clsx(
+                    'grid gap-3 pos-compact:gap-2',
+                    'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 pos-compact:md:grid-cols-3 pos-compact:xl:grid-cols-4',
+                  )}
+                >
+                  {sortedList.map((p) => (
+                    <ProductMasterGridCard
+                      key={p.id}
+                      product={p}
+                      dimensionSearchActive={measActive}
+                      onOpen={() => openProductDetail(p.id)}
+                      onSelect={() => setSelectedProductId(p.id)}
+                      selected={selectedProductId === p.id}
+                      onContextMenu={(e) => openProductContextMenu(e, p.id)}
+                    />
+                  ))}
+                </div>
+              </div>
+        )}
+
+        {ctx ? (
+          <div
+            className="fixed inset-0 z-50"
+            role="presentation"
+            onMouseDown={() => setCtx(null)}
+          >
+            <div
+              ref={ctxMenuRef}
+              className="fixed z-[140] min-w-[9.5rem] max-h-[min(72vh,20rem)] overflow-y-auto overflow-x-hidden rounded-lg border border-slate-200/90 bg-white p-0.5 text-xs shadow-lg ring-1 ring-slate-950/8 pos-compact:max-h-[min(52vh,14rem)]"
+              style={{
+                left: ctxMenuPos?.left ?? ctx.x,
+                top: ctxMenuPos?.top ?? ctx.y,
+              }}
+              role="menu"
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              {allowCost ? (
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-slate-800 hover:bg-slate-100"
+                  role="menuitem"
+                  onClick={() => {
+                    const p = products.find((x) => x.id === ctx.productId)
+                    setCtx(null)
+                    if (!p) return
+                    setModalEditProduct(p)
+                    setAddProductCopySource(null)
+                    setCopySuggestedSku(undefined)
+                    setProductModalOpen(true)
+                  }}
+                >
+                  <Pencil className="size-3.5 shrink-0 text-slate-500" aria-hidden />
+                  แก้ไขข้อมูล
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="block w-full rounded-md px-2 py-1.5 text-left text-xs text-slate-700 hover:bg-slate-100"
+                role="menuitem"
+                onClick={() => {
+                  const p = products.find((x) => x.id === ctx.productId)
+                  setCtx(null)
+                  if (!p) return
+                  openCopyFromProduct(p)
+                }}
+              >
+                คัดลอก
+                <span className="ml-1.5 text-[10px] tabular-nums text-slate-400">F2</span>
+              </button>
+              <button
+                type="button"
+                className="block w-full rounded-md px-2 py-1.5 text-left text-xs text-slate-700 hover:bg-slate-100"
+                role="menuitem"
+                onClick={() => {
+                  const p = products.find((x) => x.id === ctx.productId)
+                  setCtx(null)
+                  if (!p) return
+                  enqueueProductLabelPrintFromMaster(p)
+                }}
+              >
+                พิมพ์บาร์โค้ด
+                <span className="ml-1.5 text-[10px] tabular-nums text-slate-400">F8</span>
+              </button>
+              <button
+                type="button"
+                className="block w-full rounded-md px-2 py-1.5 text-left text-xs text-slate-700 hover:bg-slate-100"
+                role="menuitem"
+                onClick={() => {
+                  const id = ctx.productId
+                  setCtx(null)
+                  openProductDetail(id)
+                }}
+              >
+                เปิดรายละเอียด
+                <span className="ml-1.5 text-[10px] tabular-nums text-slate-400">Enter</span>
+              </button>
+              <div className="my-0.5 border-t border-slate-100" role="separator" />
+              <button
+                type="button"
+                className="block w-full rounded-md px-2 py-1.5 text-left text-xs text-red-700 hover:bg-red-50"
+                role="menuitem"
+                onClick={() => {
+                  const p = products.find((x) => x.id === ctx.productId)
+                  if (!p) return
+                  if (
+                    !window.confirm(
+                      `ลบสินค้า "${p.name}" (${p.sku}) ออกจากแฟ้มมาสเตอร์?\n\nการลบจะบันทึกทันทีและไม่สามารถกู้คืนได้`,
+                    )
+                  ) {
+                    return
+                  }
+                  setCtx(null)
+                  setProducts((prev) => prev.filter((x) => x.id !== p.id))
+                  setSelectedProductId((cur) => (cur === p.id ? null : cur))
+                }}
+              >
+                ลบรายการ
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  )
+}

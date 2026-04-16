@@ -1,0 +1,199 @@
+import { MOCK_PRODUCTS } from '@/features/inventory/data/mockInventory'
+import {
+  getProductMasterById,
+  getProductMasterBySku,
+  normalizeSalesUnits,
+  type ProductMasterDetail,
+  sellPriceAtUnitIndex,
+  sellPriceTierContextFromProduct,
+  tierHasExplicitUnitPrice,
+} from '@/features/inventory/data/productMasterData'
+import {
+  loadProductTagsRegistry,
+  PRODUCT_TAGS_CHANGED_EVENT,
+} from '@/features/inventory/data/productTagsRegistry'
+import { masterToInventoryProduct } from '@/features/pos/data/posCatalogMerge'
+import { getPosUnitPrice } from '@/features/pos/data/posProductPrices'
+
+let productTagsCache: ReturnType<typeof loadProductTagsRegistry> | null = null
+function getProductTagsCached() {
+  if (!productTagsCache) productTagsCache = loadProductTagsRegistry()
+  return productTagsCache
+}
+if (typeof window !== 'undefined') {
+  window.addEventListener(PRODUCT_TAGS_CHANGED_EVENT, () => {
+    productTagsCache = null
+  })
+}
+
+/** ราคาต่อหน่วยจากแฟ้มมาสเตอร์ (ก่อนลดแท็ก) — เทียบช่วงบาทแล้วใช้ % ลดสูงสุดที่เข้าเงื่อนไข */
+export function applyProductTagPriceBandDiscount(
+  master: ProductMasterDetail | undefined,
+  baseUnitPriceBaht: number,
+): number {
+  if (!master?.productTagIds?.length || baseUnitPriceBaht <= 0) return baseUnitPriceBaht
+  const tags = getProductTagsCached()
+  const byId = new Map(tags.map((t) => [t.id, t]))
+  let bestPct = 0
+  for (const tid of master.productTagIds) {
+    const def = byId.get(tid)
+    if (!def || def.discountPercent == null || def.discountPercent <= 0) continue
+    const min = def.priceMinBaht ?? 0
+    const max = def.priceMaxBaht ?? Number.POSITIVE_INFINITY
+    if (baseUnitPriceBaht >= min && baseUnitPriceBaht <= max) {
+      bestPct = Math.max(bestPct, Math.min(100, def.discountPercent))
+    }
+  }
+  if (bestPct <= 0) return baseUnitPriceBaht
+  return roundMoney(baseUnitPriceBaht * (1 - bestPct / 100))
+}
+
+export type PosSellUnitOption = {
+  index: number
+  label: string
+  baseUnits: number
+}
+
+export type PosSellPriceLevelOption = {
+  index: number
+  label: string
+}
+
+export type PosSellConfig = {
+  units: PosSellUnitOption[]
+  priceLevels: PosSellPriceLevelOption[]
+  /** ราคาตั้งต่อหน่วย (ก่อนลดแท็กช่วงราคา) */
+  getListUnitPrice: (unitIndex: number, priceLevelIndex: number) => number
+  getUnitPrice: (unitIndex: number, priceLevelIndex: number) => number
+  /**
+   * true เมื่อมาสเตอร์ระบุราคาหน่วยนี้ชัดเจน (explicitUnitPrices / explicitSmall·Large / sellPrice เมื่อไม่มีแถว tier)
+   * — ไม่นับราคาที่คำนวณจากทุน% หรือดึงมาจากหน่วยฐานโดยอ้อม
+   */
+  hasExplicitListPrice: (unitIndex: number, priceLevelIndex: number) => boolean
+}
+
+function roundMoney(n: number): number {
+  return Math.round(n * 100) / 100
+}
+
+export function getPosSellConfig(productId: string): PosSellConfig {
+  const fallbackBase = Math.max(0, getPosUnitPrice(productId))
+  const masterById = getProductMasterById(productId)
+  const mock = MOCK_PRODUCTS.find((p) => p.id === productId)
+  const product = mock ?? (masterById ? masterToInventoryProduct(masterById) : undefined)
+  const m = masterById ?? (product ? getProductMasterBySku(product.sku) : undefined)
+
+  if (!m) {
+    const one = () => roundMoney(fallbackBase)
+    return {
+      units: [{ index: 0, label: 'ชิ้น', baseUnits: 1 }],
+      priceLevels: [{ index: 0, label: 'ราคา 1' }],
+      getListUnitPrice: one,
+      getUnitPrice: one,
+      hasExplicitListPrice: (unitIndex: number) => unitIndex === 0 && fallbackBase > 0,
+    }
+  }
+
+  const normUnits = normalizeSalesUnits(m)
+  const units: PosSellUnitOption[] = normUnits.map((u, i) => ({
+    index: i,
+    label: u.label,
+    baseUnits: Math.max(1, u.baseUnits),
+  }))
+  const priceLevels: PosSellPriceLevelOption[] =
+    m.sellPriceTiers && m.sellPriceTiers.length > 0
+      ? m.sellPriceTiers.map((_, i) => ({ index: i, label: `ราคา ${i + 1}` }))
+      : [{ index: 0, label: 'ราคา 1' }]
+
+  /** บรรจุใช้แสดงผลเท่านั้น; คำนวณราคาจากหน่วยขาย/ราคาโดยตรง */
+  const pieces = 1
+  const cost = m.costPrice
+  const tierCtx = sellPriceTierContextFromProduct(m)
+
+  const priceFromMasterNoTier = (u: PosSellUnitOption): number => {
+    const fromPosTable = fallbackBase * u.baseUnits
+    if (fromPosTable > 0) return roundMoney(fromPosTable)
+    const sp = m.sellPrice
+    if (typeof sp === 'number' && sp > 0) return roundMoney(sp * u.baseUnits)
+    return roundMoney(fromPosTable)
+  }
+
+  const getListUnitPrice = (unitIndex: number, priceLevelIndex: number): number => {
+    const u = units[unitIndex] ?? units[0]
+    if (!m.sellPriceTiers || m.sellPriceTiers.length === 0) {
+      return priceFromMasterNoTier(u)
+    }
+    const tier = m.sellPriceTiers[priceLevelIndex] ?? m.sellPriceTiers[0]
+    const p = sellPriceAtUnitIndex(tier, cost, pieces, normUnits, u.index, tierCtx)
+    return p !== null && p > 0 ? roundMoney(p) : priceFromMasterNoTier(u)
+  }
+
+  const hasExplicitListPrice = (unitIndex: number, priceLevelIndex: number): boolean => {
+    if (!m.sellPriceTiers || m.sellPriceTiers.length === 0) {
+      if (unitIndex !== 0) return false
+      return typeof m.sellPrice === 'number' && m.sellPrice > 0
+    }
+    const tier = m.sellPriceTiers[priceLevelIndex] ?? m.sellPriceTiers[0]
+    if (!tier) return false
+    return tierHasExplicitUnitPrice(tier, unitIndex, normUnits)
+  }
+
+  return {
+    units,
+    priceLevels,
+    getListUnitPrice,
+    getUnitPrice: (unitIndex: number, priceLevelIndex: number) => {
+      const base = getListUnitPrice(unitIndex, priceLevelIndex)
+      return applyProductTagPriceBandDiscount(m, base)
+    },
+    hasExplicitListPrice,
+  }
+}
+
+/** ระดับราคาแรกที่มาสเตอร์ระบุราคาชัด + ราคาขายจริง > 0 */
+export function firstPosPriceLevelWithPrice(
+  cfg: PosSellConfig,
+  unitIndex: number,
+): PosSellPriceLevelOption | null {
+  for (const lv of cfg.priceLevels) {
+    if (
+      cfg.hasExplicitListPrice(unitIndex, lv.index) &&
+      cfg.getUnitPrice(unitIndex, lv.index) > 0
+    ) {
+      return lv
+    }
+  }
+  return null
+}
+
+/** เฉพาะระดับราคาที่มาสเตอร์ระบุชัด + ราคา > 0 */
+export function posPriceLevelsForUnit(cfg: PosSellConfig, unitIndex: number): PosSellPriceLevelOption[] {
+  return cfg.priceLevels.filter(
+    (lv) => cfg.hasExplicitListPrice(unitIndex, lv.index) && cfg.getUnitPrice(unitIndex, lv.index) > 0,
+  )
+}
+
+/** หน่วยขายที่มีอย่างน้อยหนึ่งระดับราคา > 0 */
+export function posUnitsWithSellPrice(cfg: PosSellConfig): PosSellUnitOption[] {
+  return cfg.units.filter((u) => firstPosPriceLevelWithPrice(cfg, u.index) != null)
+}
+
+/** หน่วย+ระดับราคาเริ่มต้นสำหรับเพิ่มบรรทัด POS — หน่วยแรกที่มีราคาตั้งแล้ว */
+export function pickDefaultPosUnitAndPrice(
+  cfg: PosSellConfig,
+): { unit: PosSellUnitOption; level: PosSellPriceLevelOption; price: number } | null {
+  for (const u of cfg.units) {
+    const level = firstPosPriceLevelWithPrice(cfg, u.index)
+    if (!level) continue
+    const price = cfg.getUnitPrice(u.index, level.index)
+    if (price > 0) return { unit: u, level, price }
+  }
+  return null
+}
+
+/**
+ * ราคาตั้งต่อหน่วย (ก่อนลดแท็กช่วงราคา) — ใช้คู่กับโปร STL ตามยอดราคาตั้งรวม
+ */
+export function getPosListUnitPrice(productId: string, unitIndex: number, priceLevelIndex: number): number {
+  return getPosSellConfig(productId).getListUnitPrice(unitIndex, priceLevelIndex)
+}

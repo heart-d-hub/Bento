@@ -1,0 +1,14 @@
+{
+  "name": "bento-hub",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "เซิร์ฟเวอร์กลางแบบง่ายสำหรับทดสอบ sync แฟ้มสินค้า + แคตตาล็อกรถ (ก่อนใช้ VPS จริง)",
+  "scripts": {
+    "start": "node src/index.mjs"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2"
+  }
+}

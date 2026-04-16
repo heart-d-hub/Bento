@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-show-system-print-dialog"
+description = "Opens the Windows system print dialog via WebView2 (ShowPrintUI System)."
+commands.allow = ["show_system_print_dialog"]
