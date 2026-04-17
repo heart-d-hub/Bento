@@ -6,8 +6,17 @@ import {
 } from '@/features/pos/data/posBillSequence'
 import { loadMembers, MEMBERS_CHANGED_EVENT } from '@/features/members/data/membersStore'
 import { getProductMasterBySku, masterSearchExtrasForSku } from '@/features/inventory/data/productMasterData'
+import { loadProductTagsRegistry } from '@/features/inventory/data/productTagsRegistry'
 import { getPosCatalogProducts } from '@/features/pos/data/posCatalogMerge'
 import { mergeInventoryProductsWithLiveStock } from '@/features/pos/data/posLiveStock'
+import {
+  getPosSellConfig,
+  pickDefaultPosUnitAndPrice,
+  posPriceLevelsForUnit,
+  posUnitsWithSellPrice,
+} from '@/features/pos/data/posUnitPricing'
+import { getStlBoltPairForMaleProduct } from '@/features/promotions/stlBoltPairRegistry'
+import { computeStlVolumePromo } from '@/features/promotions/stlVolumePromo'
 import { INITIAL_VEHICLE_CATALOG } from '@/features/vehicle/data/mockCatalog'
 import { normalizeCatalog } from '@/features/vehicle/data/normalizeCatalog'
 import { VEHICLE_CATALOG_STORAGE_KEY } from '@/features/vehicle/data/vehicleCatalogStorageKeys'
@@ -49,12 +58,19 @@ type CheckoutPaymentType = 'cash' | 'transfer' | 'account' | 'mixed'
 
 type CartLine = {
   id: number
+  productId?: string
   code: string
   name: string
   unit: string
+  unitIndex?: number
+  basePrice: number
   price: number
+  priceLevel: string
+  priceLevelIndex?: number
   discount: number
   qty: number
+  stlBoltRole?: 'nut' | 'washerGift'
+  stlBoltMaleCode?: string
 }
 
 type Customer = {
@@ -135,6 +151,23 @@ function tokenizeSearch(q: string): string[] {
     .filter(Boolean)
 }
 
+function displayPriceLevelLabel(levelIndex: number, fallbackLabel: string): string {
+  const byIndex = ['ปลีก', 'ช่าง', 'ส่ง', 'VIP', 'พิเศษ'][levelIndex]
+  return byIndex ?? fallbackLabel
+}
+
+function defaultLinePriceTypeLabel(line: CartLine): string {
+  if (line.stlBoltRole === 'washerGift') return 'แถม'
+  if (line.priceLevelIndex != null && Number.isFinite(line.priceLevelIndex) && line.priceLevelIndex >= 0) {
+    return displayPriceLevelLabel(line.priceLevelIndex, line.priceLevel)
+  }
+  return line.priceLevel || 'ราคา'
+}
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100
+}
+
 export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   const { theme, setTheme } = useThemePreference()
   const [mode, setMode] = useState<SaleMode>('retail')
@@ -211,9 +244,45 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   }))
 
   const [cart, setCart] = useState<CartLine[]>(() => [
-    { id: 1, code: 'BATT-LUG', name: 'หางปลา', unit: 'ชิ้น', price: 35, discount: 0, qty: 1 },
-    { id: 2, code: '90915-YZZD2', name: 'ไส้กรองน้ำมันเครื่อง TOYOTA', unit: 'ลูก', price: 250, discount: 10, qty: 2 },
-    { id: 3, code: '04465-0K120', name: 'ผ้าเบรกหน้า TOYOTA REVO', unit: 'ชุด', price: 1850, discount: 0, qty: 1 },
+    {
+      id: 1,
+      code: 'BATT-LUG',
+      name: 'หางปลา',
+      unit: 'ชิ้น',
+      unitIndex: 0,
+      basePrice: 35,
+      price: 35,
+      priceLevel: 'ราคา 1',
+      priceLevelIndex: 0,
+      discount: 0,
+      qty: 1,
+    },
+    {
+      id: 2,
+      code: '90915-YZZD2',
+      name: 'ไส้กรองน้ำมันเครื่อง TOYOTA',
+      unit: 'ลูก',
+      unitIndex: 0,
+      basePrice: 250,
+      price: 250,
+      priceLevel: 'ราคา 1',
+      priceLevelIndex: 0,
+      discount: 10,
+      qty: 2,
+    },
+    {
+      id: 3,
+      code: '04465-0K120',
+      name: 'ผ้าเบรกหน้า TOYOTA REVO',
+      unit: 'ชุด',
+      unitIndex: 0,
+      basePrice: 1850,
+      price: 1850,
+      priceLevel: 'ราคา 1',
+      priceLevelIndex: 0,
+      discount: 0,
+      qty: 1,
+    },
   ])
 
   const mockProducts: Product[] = useMemo(
@@ -233,6 +302,32 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
       })),
     [],
   )
+  const productTagRegistry = useMemo(() => loadProductTagsRegistry(), [])
+  const priceTypeLabelForLine = (line: CartLine): string => {
+    if (line.stlBoltRole === 'washerGift') return 'แถม'
+    if (line.productId && line.unitIndex != null && line.priceLevelIndex != null) {
+      const master = getProductMasterBySku(line.code)
+      const tagIds = master?.productTagIds ?? []
+      if (tagIds.length > 0) {
+        const cfg = getPosSellConfig(line.productId)
+        const listPrice = cfg.getListUnitPrice(line.unitIndex, line.priceLevelIndex)
+        let picked: { label: string; discount: number } | null = null
+        for (const id of tagIds) {
+          const tag = productTagRegistry.find((t) => t.id === id)
+          if (!tag || !tag.label.startsWith('Bolt:')) continue
+          if (!tag.discountPercent || tag.discountPercent <= 0) continue
+          const min = tag.priceMinBaht ?? 0
+          const max = tag.priceMaxBaht ?? Number.POSITIVE_INFINITY
+          if (listPrice < min || listPrice > max) continue
+          if (!picked || tag.discountPercent > picked.discount) {
+            picked = { label: tag.label, discount: tag.discountPercent }
+          }
+        }
+        if (picked) return picked.label
+      }
+    }
+    return defaultLinePriceTypeLabel(line)
+  }
   const vehicleCatalog = useMemo(() => {
     try {
       const raw = localStorage.getItem(VEHICLE_CATALOG_STORAGE_KEY)
@@ -565,8 +660,46 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     quickYearOptions,
   ])
 
+  const pricedCart = useMemo(() => {
+    const next = cart.map((l) => ({ ...l }))
+    const promoInputs: Array<{
+      idx: number
+      productId: string
+      qty: number
+      listPricePerUnit: number
+      master: NonNullable<ReturnType<typeof getProductMasterBySku>>
+    }> = []
+    next.forEach((l, idx) => {
+      if (l.stlBoltRole === 'washerGift') {
+        next[idx] = { ...next[idx], discount: 0 }
+        return
+      }
+      if (!l.productId || l.qty <= 0 || l.price <= 0) return
+      const master = getProductMasterBySku(l.code)
+      if (!master) return
+      promoInputs.push({ idx, productId: l.productId, qty: l.qty, listPricePerUnit: l.price, master })
+    })
+    if (!promoInputs.length) return next
+    const promo = computeStlVolumePromo({
+      lines: promoInputs.map((x) => ({
+        productId: x.productId,
+        qty: x.qty,
+        listPricePerUnit: x.listPricePerUnit,
+        master: x.master,
+      })),
+      mode: 'retail',
+    })
+    promo.lineResults.forEach((r, i) => {
+      const src = promoInputs[i]
+      if (!src) return
+      const discount = Math.max(0, round2(r.listSubtotal - r.sellSubtotal))
+      next[src.idx] = { ...next[src.idx], discount }
+    })
+    return next
+  }, [cart])
+
   const totals = useMemo(() => {
-    const subtotal = cart.reduce((sum, line) => sum + line.price * line.qty - line.discount, 0)
+    const subtotal = pricedCart.reduce((sum, line) => sum + line.price * line.qty - line.discount, 0)
     const discountAmt = Number.parseFloat(billDiscount || '0') || 0
     const subtotalAfterDiscount = Math.max(0, subtotal - discountAmt)
 
@@ -596,7 +729,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     const grandTotal = rawGrandTotal + roundingAdjustment
 
     return { subtotal, discountAmt, beforeVat, vatAmount, rawGrandTotal, roundingAdjustment, grandTotal }
-  }, [applyRounding, billDiscount, cart, docInfo.vatType, mode])
+  }, [applyRounding, billDiscount, pricedCart, docInfo.vatType, mode])
 
   const receivedAmount = useMemo(() => Number.parseFloat(cashReceived || '0') || 0, [cashReceived])
   const changeAmount = useMemo(() => receivedAmount - totals.grandTotal, [receivedAmount, totals.grandTotal])
@@ -606,20 +739,192 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   const mixedSum = useMemo(() => mixedCashNum + mixedTransferNum, [mixedCashNum, mixedTransferNum])
 
   const removeLine = (id: number) => {
-    setCart((prev) => prev.filter((l) => l.id !== id))
+    setCart((prev) => {
+      const target = prev.find((l) => l.id === id)
+      if (!target) return prev
+      let next = prev.filter((l) => l.id !== id)
+      if (!target.stlBoltRole) {
+        next = next.filter(
+          (l) => !(l.stlBoltMaleCode === target.code && (l.stlBoltRole === 'nut' || l.stlBoltRole === 'washerGift')),
+        )
+        return next
+      }
+      if (target.stlBoltMaleCode) {
+        next = syncStlGiftLineForMaleCode(next, target.stlBoltMaleCode)
+      }
+      return next
+    })
   }
 
   const addProductToCart = (p: Product) => {
     setCart((prev) => {
-      const idx = prev.findIndex((l) => l.code === p.code)
+      const idx = prev.findIndex((l) => l.code === p.code && !l.stlBoltRole)
       if (idx === -1) {
+        const cfg = getPosSellConfig(p.id)
+        const picked = pickDefaultPosUnitAndPrice(cfg)
         const nextId = (prev.at(-1)?.id ?? 0) + 1
-        return [...prev, { id: nextId, code: p.code, name: p.name, unit: p.unit, price: p.price, discount: 0, qty: 1 }]
+        return [
+          ...prev,
+          {
+            id: nextId,
+            productId: p.id,
+            code: p.code,
+            name: p.name,
+            unit: picked?.unit.label ?? p.unit,
+            unitIndex: picked?.unit.index ?? 0,
+            basePrice: picked?.price ?? p.price,
+            price: picked?.price ?? p.price,
+            priceLevel: picked?.level.label ?? 'ราคา 1',
+            priceLevelIndex: picked?.level.index ?? 0,
+            discount: 0,
+            qty: 1,
+          },
+        ]
       }
       const next = [...prev]
       next[idx] = { ...next[idx], qty: next[idx].qty + 1 }
       return next
     })
+  }
+
+  const syncStlGiftLineForMaleCode = (lines: CartLine[], maleCode: string): CartLine[] => {
+    const maleSeed = lines.find((l) => l.code === maleCode && !l.stlBoltRole)
+    if (!maleSeed) return lines
+    const maleProductId = maleSeed.productId ?? mockProducts.find((p) => p.code === maleCode)?.id
+    if (!maleProductId) return lines
+    const pair = getStlBoltPairForMaleProduct(maleProductId)
+    if (!pair) return lines
+    const washer = mockProducts.find((p) => p.id === pair.washerProductId)
+    if (!washer) return lines
+
+    const maleQty = lines.filter((l) => l.code === maleCode && !l.stlBoltRole).reduce((s, l) => s + l.qty, 0)
+    const nutQty = lines
+      .filter((l) => l.stlBoltRole === 'nut' && l.stlBoltMaleCode === maleCode)
+      .reduce((s, l) => s + l.qty, 0)
+    const giftQty = Math.max(0, Math.min(maleQty, nutQty))
+    const giftIdx = lines.findIndex((l) => l.stlBoltRole === 'washerGift' && l.stlBoltMaleCode === maleCode)
+
+    if (giftQty <= 0) return giftIdx >= 0 ? lines.filter((_, i) => i !== giftIdx) : lines
+    if (giftIdx >= 0) {
+      const next = [...lines]
+      next[giftIdx] = {
+        ...next[giftIdx],
+        qty: giftQty,
+        productId: washer.id,
+        code: washer.code,
+        name: `${washer.name} [แถมคู่น็อต STL]`,
+        basePrice: 0,
+        price: 0,
+        priceLevel: 'แถม',
+        priceLevelIndex: 0,
+      }
+      return next
+    }
+    const nextId = (lines.at(-1)?.id ?? 0) + 1
+    return [
+      ...lines,
+      {
+        id: nextId,
+        productId: washer.id,
+        code: washer.code,
+        name: `${washer.name} [แถมคู่น็อต STL]`,
+        unit: washer.unit,
+        unitIndex: 0,
+        basePrice: 0,
+        price: 0,
+        priceLevel: 'แถม',
+        priceLevelIndex: 0,
+        discount: 0,
+        qty: giftQty,
+        stlBoltRole: 'washerGift',
+        stlBoltMaleCode: maleCode,
+      },
+    ]
+  }
+
+  const addBoltNutForLine = (lineId: number) => {
+    setCart((prev) => {
+      const line = prev.find((l) => l.id === lineId)
+      if (!line || line.stlBoltRole) return prev
+      const maleProductId = line.productId ?? mockProducts.find((p) => p.code === line.code)?.id
+      if (!maleProductId) return prev
+      const pair = getStlBoltPairForMaleProduct(maleProductId)
+      if (!pair) return prev
+      const nut = mockProducts.find((p) => p.id === pair.nutProductId)
+      if (!nut) return prev
+
+      const cfg = getPosSellConfig(nut.id)
+      const picked = pickDefaultPosUnitAndPrice(cfg)
+      let next = [...prev]
+      const nutIdx = next.findIndex((l) => l.stlBoltRole === 'nut' && l.stlBoltMaleCode === line.code)
+      if (nutIdx >= 0) {
+        next[nutIdx] = { ...next[nutIdx], qty: next[nutIdx].qty + 1 }
+      } else {
+        const nextId = (next.at(-1)?.id ?? 0) + 1
+        next.push({
+          id: nextId,
+          productId: nut.id,
+          code: nut.code,
+          name: `${nut.name} [หัวน็อตคู่]`,
+          unit: picked?.unit.label ?? nut.unit,
+          unitIndex: picked?.unit.index ?? 0,
+          basePrice: picked?.price ?? nut.price,
+          price: picked?.price ?? nut.price,
+          priceLevel: picked?.level.label ?? 'ราคา 1',
+          priceLevelIndex: picked?.level.index ?? 0,
+          discount: 0,
+          qty: 1,
+          stlBoltRole: 'nut',
+          stlBoltMaleCode: line.code,
+        })
+      }
+      return syncStlGiftLineForMaleCode(next, line.code)
+    })
+  }
+
+  const updateLineQty = (id: number, qtyRaw: string) => {
+    const qty = Math.max(0, Number(qtyRaw) || 0)
+    setCart((prev) => prev.map((l) => (l.id === id ? { ...l, qty } : l)))
+  }
+
+  const updateLineUnit = (id: number, unitIndexRaw: string) => {
+    const unitIndex = Number(unitIndexRaw)
+    setCart((prev) =>
+      prev.map((l) => {
+        if (l.id !== id) return l
+        if (!l.productId || !Number.isFinite(unitIndex)) return l
+        const cfg = getPosSellConfig(l.productId)
+        const unit = cfg.units.find((u) => u.index === unitIndex)
+        if (!unit) return l
+        const levels = posPriceLevelsForUnit(cfg, unit.index)
+        const level = levels[0] ?? cfg.priceLevels[0]
+        const price = level ? cfg.getListUnitPrice(unit.index, level.index) : l.price
+        return {
+          ...l,
+          unit: unit.label,
+          unitIndex: unit.index,
+          priceLevel: level?.label ?? l.priceLevel,
+          priceLevelIndex: level?.index ?? l.priceLevelIndex,
+          basePrice: price,
+          price,
+        }
+      }),
+    )
+  }
+
+  const updateLinePriceLevel = (id: number, priceLevelIndexRaw: string) => {
+    const priceLevelIndex = Number(priceLevelIndexRaw)
+    setCart((prev) =>
+      prev.map((l) => {
+        if (l.id !== id) return l
+        if (!l.productId || l.unitIndex == null || !Number.isFinite(priceLevelIndex)) return l
+        const cfg = getPosSellConfig(l.productId)
+        const level = cfg.priceLevels.find((x) => x.index === priceLevelIndex)
+        if (!level) return l
+        const price = cfg.getListUnitPrice(l.unitIndex, level.index)
+        return { ...l, priceLevel: level.label, priceLevelIndex: level.index, basePrice: price, price }
+      }),
+    )
   }
 
   const handleBarcodeKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -1117,14 +1422,27 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                 <div className="col-span-4 pl-1">รายการสินค้า</div>
                 <div className="col-span-1 text-center">จำนวน</div>
                 <div className="col-span-1 text-center">หน่วย</div>
-                <div className="col-span-2 text-right">ราคา/หน่วย</div>
+                <div className="col-span-2 text-center">ราคา/หน่วย</div>
                 <div className="col-span-2 text-right">ส่วนลด</div>
                 <div className="col-span-2 pr-5 text-right">รวมสุทธิ</div>
               </div>
 
               <div className="min-h-0 flex-1 overflow-auto overscroll-contain">
-                {cart.map((item) => {
+                {pricedCart.map((item) => {
                   const total = item.price * item.qty - item.discount
+                  const itemProductId = item.productId ?? mockProducts.find((p) => p.code === item.code)?.id
+                  const canAddBoltNut = !item.stlBoltRole && Boolean(itemProductId && getStlBoltPairForMaleProduct(itemProductId))
+                  const sellCfg = item.productId ? getPosSellConfig(item.productId) : null
+                  const unitOptions = sellCfg ? posUnitsWithSellPrice(sellCfg) : []
+                  const currentUnitIndex = item.unitIndex ?? 0
+                  const levelOptions = sellCfg
+                    ? posPriceLevelsForUnit(sellCfg, currentUnitIndex).map((lv) => ({
+                        index: lv.index,
+                        label: displayPriceLevelLabel(lv.index, lv.label),
+                        price: sellCfg.getListUnitPrice(currentUnitIndex, lv.index),
+                      }))
+                    : []
+                  const selectedLevelLabel = priceTypeLabelForLine(item)
                   return (
                     <div
                       key={item.id}
@@ -1137,19 +1455,75 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                         <span className="truncate text-xs font-semibold text-slate-700 group-hover:text-slate-900 dark:text-slate-300 dark:group-hover:text-white">
                           {item.name}
                         </span>
+                        {canAddBoltNut ? (
+                          <div className="mt-1">
+                            <button
+                              type="button"
+                              onClick={() => addBoltNutForLine(item.id)}
+                              className="rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[9px] font-black text-amber-700 transition hover:bg-amber-100 dark:border-amber-700/70 dark:bg-amber-900/20 dark:text-amber-300 dark:hover:bg-amber-900/30"
+                            >
+                              +หัว
+                            </button>
+                          </div>
+                        ) : null}
                       </div>
                       <div className="col-span-1 flex justify-center">
                         <input
+                          type="number"
+                          min={0}
+                          step="1"
                           value={item.qty}
-                          readOnly
-                          className="w-10 rounded border border-emerald-200 bg-emerald-50 py-0.5 text-center text-[11px] font-black text-emerald-700 outline-none dark:border-[#0f4d5c] dark:bg-[#0d2127] dark:text-emerald-400"
+                          onChange={(e) => updateLineQty(item.id, e.target.value)}
+                          disabled={item.stlBoltRole === 'washerGift'}
+                          className="w-12 rounded border border-emerald-200 bg-emerald-50 py-0.5 text-center text-[11px] font-black text-emerald-700 outline-none dark:border-[#0f4d5c] dark:bg-[#0d2127] dark:text-emerald-400"
                         />
                       </div>
-                      <div className="col-span-1 text-center font-mono text-[11px] text-slate-500 dark:text-slate-500">
-                        {item.unit}
+                      <div className="col-span-1 flex justify-center text-center">
+                        <div className="w-[68px]">
+                        <select
+                          value={String(item.unitIndex ?? 0)}
+                          onChange={(e) => updateLineUnit(item.id, e.target.value)}
+                          disabled={Boolean(item.stlBoltRole)}
+                          className="w-full rounded border border-slate-200 bg-white px-1 py-0.5 text-center font-mono text-[12px] text-slate-600 outline-none dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-slate-300"
+                        >
+                          {(unitOptions.length
+                            ? unitOptions.map((u) => ({ value: String(u.index), label: u.label }))
+                            : [{ value: String(item.unitIndex ?? 0), label: item.unit }]).map((u) => (
+                            <option key={`${item.id}-unit-${u.value}`} value={u.value}>
+                              {u.label}
+                            </option>
+                          ))}
+                        </select>
+                        </div>
                       </div>
-                      <div className="col-span-2 text-right font-mono text-[11px] text-slate-700 dark:text-slate-300">
-                        {item.price.toLocaleString('th-TH', { minimumFractionDigits: 2 })}
+                      <div className="col-span-2 flex justify-center text-center">
+                        <div className="relative w-[96px]">
+                          <span className="pointer-events-none absolute right-1 -top-1 rounded bg-white px-0.5 text-[8px] font-bold leading-none text-blue-600 dark:bg-[#050508] dark:text-cyan-300">
+                            {selectedLevelLabel}
+                          </span>
+                          <select
+                            value={String(item.priceLevelIndex ?? -1)}
+                            onChange={(e) => updateLinePriceLevel(item.id, e.target.value)}
+                            disabled={item.stlBoltRole === 'washerGift'}
+                            className="h-6 w-full rounded border border-slate-200 bg-white py-0.5 pl-1 pr-3 text-right text-[11px] font-black tracking-wide text-slate-900 outline-none dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-slate-100"
+                          >
+                            {(levelOptions.length
+                              ? levelOptions.map((lv) => ({
+                                  value: String(lv.index),
+                                  label: lv.price.toLocaleString('th-TH', { minimumFractionDigits: 2 }),
+                                }))
+                              : [
+                                  {
+                                    value: String(item.priceLevelIndex ?? -1),
+                                    label: item.price.toLocaleString('th-TH', { minimumFractionDigits: 2 }),
+                                  },
+                                ]).map((lv) => (
+                              <option key={`${item.id}-lv-${lv.value}`} value={lv.value}>
+                                {lv.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
                       </div>
                       <div className="col-span-2 flex justify-end">
                         <input
@@ -1714,6 +2088,22 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                   </div>
                 </div>
 
+                <div className="max-h-36 space-y-1 overflow-auto rounded-xl border border-slate-200 bg-white p-2 dark:border-[#2a2d3e] dark:bg-[#12141c]">
+                  {pricedCart.map((l) => (
+                    <div key={`checkout-line-${l.id}`} className="flex items-center justify-between gap-2 rounded px-1 py-1 text-[11px]">
+                      <div className="min-w-0">
+                        <div className="truncate font-semibold text-slate-700 dark:text-slate-200">{l.name}</div>
+                        <div className="font-mono text-[10px] text-slate-500 dark:text-slate-400">
+                          {l.qty} {l.unit} | {priceTypeLabelForLine(l)}
+                        </div>
+                      </div>
+                      <div className="shrink-0 font-mono font-black text-slate-800 dark:text-slate-100">
+                        {(l.price * l.qty - l.discount).toLocaleString('th-TH', { minimumFractionDigits: 2 })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                   <button
                     type="button"
@@ -2018,7 +2408,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                     <span className="font-semibold normal-case tracking-normal">{customer.name}</span>
                   </div>
                   <div className="mt-2 max-h-60 overflow-auto rounded-md border border-slate-200 bg-white p-2 dark:border-[#2a2d3e] dark:bg-[#12141c]">
-                    {cart.map((l) => (
+                    {pricedCart.map((l) => (
                       <div key={l.id} className="flex items-center justify-between gap-3 py-1 text-[12px]">
                         <div className="min-w-0">
                           <div className="font-mono text-[10px] font-black text-blue-700 dark:text-cyan-300">{l.code}</div>
@@ -2095,7 +2485,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
               </div>
               <div className="space-y-3 p-4">
                 <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-slate-200">
-                  {cart.map((l) => (
+                  {pricedCart.map((l) => (
                     <div key={l.id} className="flex items-center justify-between gap-3 py-1 text-[12px]">
                       <div className="min-w-0">
                         <div className="font-mono text-[10px] font-black text-blue-700 dark:text-cyan-300">{l.code}</div>
@@ -2162,7 +2552,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                     ลูกค้า: <span className="font-semibold normal-case tracking-normal">{customer.name}</span>
                   </div>
                   <div className="mt-2 max-h-60 overflow-auto rounded-md border border-slate-200 bg-white p-2 dark:border-[#2a2d3e] dark:bg-[#12141c]">
-                    {cart.map((l) => (
+                    {pricedCart.map((l) => (
                       <div key={l.id} className="flex items-center justify-between gap-3 py-1 text-[12px]">
                         <div className="min-w-0">
                           <div className="font-mono text-[10px] font-black text-blue-700 dark:text-cyan-300">{l.code}</div>
