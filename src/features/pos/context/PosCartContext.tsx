@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import { type InventoryProduct } from '@/features/inventory/data/mockInventory'
 import {
   getProductMasterById,

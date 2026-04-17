@@ -283,7 +283,6 @@ export function TaxInvoiceFormDesignerView({ className }: TaxInvoiceFormDesigner
       baselineInitializedRef.current = true
       savedBaselineRef.current = structuredClone(state)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- snapshot ครั้งแรกเมื่อมีฟอร์ม; ไม่ผูก `state` ทั้งก้อน (จะถ่ายซ้ำทุกแก้ไข)
   }, [state.forms.length])
 
   const selected = activeForm.elements.find((e) => e.id === selectedId) ?? null
@@ -292,7 +291,6 @@ export function TaxInvoiceFormDesignerView({ className }: TaxInvoiceFormDesigner
     if (selected?.field === 'line_table' || selected?.field === 'line_column') {
       setLineImportDraft(lineItemsToTsvPreview(linePreviewRows))
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- โหลดร่าง TSV เมื่อเปลี่ยนบล็อกที่เลือกเท่านั้น
   }, [selected?.field, selected?.id])
 
   /** แปลง % ภายในพื้นที่พิมพ์ ↔ มม. บนกระดาษ (สำหรับแก้ในคอลัมน์ขวา) */
@@ -358,7 +356,7 @@ export function TaxInvoiceFormDesignerView({ className }: TaxInvoiceFormDesigner
                 ...f,
                 elements: f.elements.map((e) => {
                   if (e.field !== 'line_column' || e.lineColumnGroupId !== groupId) return e
-                  let next = { ...e }
+                  const next = { ...e }
                   if (opts.yPct !== undefined) next.y = clamp(opts.yPct, 0, 100 - e.h)
                   if (opts.hPct !== undefined) next.h = clamp(opts.hPct, 0.5, 100 - next.y)
                   return next
@@ -1482,7 +1480,7 @@ export function TaxInvoiceFormDesignerView({ className }: TaxInvoiceFormDesigner
                     if (!Number.isFinite(raw)) return
                     const { innerW } = selectedLayoutMm
                     const minPct = (draftDimsMinMm.minWmm / innerW) * 100
-                    let wPct = clamp((raw / innerW) * 100, minPct, 100 - selected.x)
+                    const wPct = clamp((raw / innerW) * 100, minPct, 100 - selected.x)
                     if (selected.field === 'line_column' && selected.lineColumnGroupId) {
                       mergeState((prev) => {
                         const f = prev.forms.find((ff) => ff.id === prev.activeFormId)

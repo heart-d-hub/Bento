@@ -8,7 +8,7 @@ export function loadThemePreference(): ThemePreference {
   try {
     const stored = localStorage.getItem(THEME_KEY)
     if (stored === 'light' || stored === 'dark') return stored
-  } catch (e) {
+  } catch {
     // ignore
   }
   return 'dark' // default to dark
@@ -17,7 +17,7 @@ export function loadThemePreference(): ThemePreference {
 export function saveThemePreference(theme: ThemePreference) {
   try {
     localStorage.setItem(THEME_KEY, theme)
-  } catch (e) {
+  } catch {
     // ignore
   }
 }

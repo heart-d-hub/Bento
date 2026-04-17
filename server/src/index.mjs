@@ -162,10 +162,10 @@ app.use((_req, res) => {
 
 ensureDataDir()
 app.listen(PORT, '0.0.0.0', () => {
-  // eslint-disable-next-line no-console
+   
   console.log(`[bento-hub] listening http://0.0.0.0:${PORT}`)
-  // eslint-disable-next-line no-console
+   
   console.log(`[bento-hub] data: ${DATA_DIR}`)
-  // eslint-disable-next-line no-console
+   
   console.log(`[bento-hub] token: (set BENTO_HUB_TOKEN to override) default dev token`)
 })

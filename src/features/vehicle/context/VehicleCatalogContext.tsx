@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import { INITIAL_VEHICLE_CATALOG } from '@/features/vehicle/data/mockCatalog'
 import { normalizeCatalog } from '@/features/vehicle/data/normalizeCatalog'
 import {

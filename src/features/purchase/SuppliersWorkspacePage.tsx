@@ -79,7 +79,7 @@ export function SuppliersWorkspacePage({ className }: SuppliersWorkspacePageProp
     setSupplierModal({ open: true, mode: 'edit', profile: p })
   }
 
-  const handleSaved = (_p: SupplierProfile) => {
+  const handleSaved = () => {
     refresh()
   }
 

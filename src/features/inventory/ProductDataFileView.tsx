@@ -735,11 +735,7 @@ function ProductMasterDetailContent({
   onOpenVehicleManage?: () => void
 }) {
   const allowCost = canViewCost()
-  const tierPriceCtx = useMemo(() => sellPriceTierContextFromProduct(selected), [
-    selected.supplierListPrice,
-    selected.sellTierPercentBasis,
-    selected.scheme,
-  ])
+  const tierPriceCtx = useMemo(() => sellPriceTierContextFromProduct(selected), [selected])
   const sellTierListBasis = selected.sellTierPercentBasis === 'list_discount'
   return (
     <>

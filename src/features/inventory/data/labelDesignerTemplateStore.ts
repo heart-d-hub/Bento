@@ -215,6 +215,7 @@ export function saveLabelDesignerTemplatesState(s: LabelDesignerTemplatesState):
 }
 
 export function entryToTemplate(entry: LabelDesignerTemplateEntry): LabelDesignerTemplate {
-  const { id: _id, ...rest } = entry
+  const { id, ...rest } = entry
+  void id
   return rest
 }

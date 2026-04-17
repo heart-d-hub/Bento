@@ -590,7 +590,8 @@ export function VehicleManageView() {
     ) {
       return
     }
-    const { [id]: _, ...restBy } = catalog.byCategory
+    const { [id]: removedCategory, ...restBy } = catalog.byCategory
+    void removedCategory
     setCatalog({
       ...catalog,
       categories: catalog.categories.filter((c) => c.id !== id),
@@ -651,7 +652,8 @@ export function VehicleManageView() {
     for (const m of modelsForBrand) {
       delete enginesByModelId[m.id]
     }
-    const { [bid]: _removed, ...restModels } = cat.modelsByBrandId
+    const { [bid]: removedModels, ...restModels } = cat.modelsByBrandId
+    void removedModels
     setCatalog({
       ...catalog,
       byCategory: {

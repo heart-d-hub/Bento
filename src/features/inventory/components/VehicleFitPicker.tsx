@@ -1,4 +1,3 @@
-/* eslint-disable react-hooks/set-state-in-effect -- combobox: sync ข้อความช่องค้นหากับ id + clamp highlight */
 import { useVehicleCatalog } from '@/features/vehicle/context/VehicleCatalogContext'
 import {
   findEngineDefForVariant,

@@ -68,7 +68,9 @@ function emptyForm(suggestedCode: string): MemberFormValues {
 }
 
 function memberToForm(m: Member): MemberFormValues {
-  const { id: _id, createdAt: _createdAt, ...rest } = m
+  const { id, createdAt, ...rest } = m
+  void id
+  void createdAt
   return {
     ...rest,
     itemTierOverrides: m.itemTierOverrides.map((x) => ({ ...x })),

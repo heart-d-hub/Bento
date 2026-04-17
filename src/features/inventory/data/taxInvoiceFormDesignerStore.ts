@@ -668,7 +668,7 @@ function normalizeState(raw: unknown): TaxInvoiceFormDesignerState | null {
     if (body) forms.push(body)
   }
   if (forms.length === 0) return null
-  let active =
+  const active =
     typeof o.activeFormId === 'string' && forms.some((x) => x.id === o.activeFormId)
       ? o.activeFormId
       : forms[0]!.id

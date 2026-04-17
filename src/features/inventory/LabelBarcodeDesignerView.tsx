@@ -180,7 +180,6 @@ export function LabelBarcodeDesignerView({ className, previewRow }: LabelBarcode
     if (activeEntry === null || baselineInitializedRef.current) return
     baselineInitializedRef.current = true
     savedBaselineRef.current = structuredClone(lib)
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- snapshot ครั้งแรกเมื่อมีแม่แบบใช้งาน; `lib` ตรงกับ render ของ activeEntry
   }, [activeEntry])
 
   const template = useMemo(() => {

@@ -110,7 +110,8 @@ export function syncStlBoltPairGifts(
       if (!l.stlBoltNutLineId) return l
       if (!out.some((x) => x.lineId === l.stlBoltNutLineId)) {
         changed = true
-        const { stlBoltNutLineId: _, ...rest } = l
+        const { stlBoltNutLineId, ...rest } = l
+        void stlBoltNutLineId
         return rest as PosCartLine
       }
       return l
