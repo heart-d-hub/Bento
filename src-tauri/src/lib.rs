@@ -1,7 +1,13 @@
+mod members_db;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
-    .invoke_handler(tauri::generate_handler![show_system_print_dialog])
+    .invoke_handler(tauri::generate_handler![
+      show_system_print_dialog,
+      members_db::members_load,
+      members_db::members_save_all
+    ])
     .setup(|app| {
       if cfg!(debug_assertions) {
         app.handle().plugin(

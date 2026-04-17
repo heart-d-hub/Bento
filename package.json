@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@fontsource/sarabun": "^5.2.8",
+    "@prisma/client": "^7.7.0",
     "@tauri-apps/api": "^2.10.1",
     "@types/jsbarcode": "^3.11.4",
     "clsx": "^2.1.1",
@@ -22,6 +23,7 @@
     "jsbarcode": "^3.12.3",
     "lucide-react": "^1.7.0",
     "papaparse": "^5.5.3",
+    "prisma": "^7.7.0",
     "qrcode": "^1.5.4",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",

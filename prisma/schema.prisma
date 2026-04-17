@@ -1,0 +1,247 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum MemberStatus {
+  active
+  inactive
+  blacklist
+}
+
+enum PriceTier {
+  tier1
+  tier2
+  tier3
+  tier4
+  tier5
+}
+
+enum SaleMode {
+  retail
+  tax
+}
+
+enum SalePaymentType {
+  cash
+  transfer
+  account
+  mixed
+}
+
+enum PurchaseOrderStatus {
+  draft
+  ordered
+  closed
+  cancelled
+}
+
+enum StockMovementType {
+  sale_out
+  purchase_in
+  adjust_in
+  adjust_out
+  transfer_in
+  transfer_out
+  return_in
+  return_out
+}
+
+model Branch {
+  id        String   @id @default(cuid())
+  code      String   @unique
+  name      String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members        Member[]
+  products       Product[]
+  sales          Sale[]
+  purchaseOrders PurchaseOrder[]
+  stockMovements StockMovement[]
+}
+
+model Member {
+  id               String       @id @default(cuid())
+  memberCode       String       @unique
+  fullName         String
+  address          String?
+  taxId            String?
+  contactPerson    String?
+  email            String?
+  phone            String?
+  fax              String?
+  salesStaffId     String?
+  creditLimitBaht  Float        @default(0)
+  creditTermDays   Int          @default(0)
+  creditTermMonths Int          @default(0)
+  payAtMonthEnd    Boolean      @default(false)
+  cutOffDayOfMonth Int?
+  defaultPriceTier PriceTier    @default(tier1)
+  markupPercent    Float        @default(0)
+  priceStartDate   String?
+  priceEndDate     String?
+  notes            String?
+  memberType       String       @default("general")
+  status           MemberStatus @default(active)
+  pointsBalance    Float        @default(0)
+  arBalance        Float        @default(0)
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  branchId String?
+  branch   Branch? @relation(fields: [branchId], references: [id], onDelete: SetNull)
+
+  sales Sale[]
+
+  @@index([fullName])
+}
+
+model Product {
+  id          String   @id @default(cuid())
+  sku         String   @unique
+  name        String
+  brand       String?
+  category    String
+  subCategory String?
+  location    String?
+  stockMode   String?
+  minStock    Float    @default(0)
+  maxStock    Float?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  branchId String?
+  branch   Branch? @relation(fields: [branchId], references: [id], onDelete: SetNull)
+
+  saleLines          SaleLine[]
+  purchaseOrderLines PurchaseOrderLine[]
+  stockMovements     StockMovement[]
+  priceLevels        ProductPriceLevel[]
+
+  @@index([name])
+  @@index([category])
+}
+
+model ProductPriceLevel {
+  id         String   @id @default(cuid())
+  levelCode  String
+  levelLabel String
+  unitLabel  String   @default("ชิ้น")
+  unitIndex  Int      @default(0)
+  price      Float
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, levelCode, unitIndex])
+}
+
+model Sale {
+  id             String          @id @default(cuid())
+  billNo         String          @unique
+  taxInvoiceNo   String?
+  mode           SaleMode
+  paymentType    SalePaymentType
+  docDate        DateTime
+  subtotal       Float
+  billDiscount   Float           @default(0)
+  beforeVat      Float           @default(0)
+  vatAmount      Float           @default(0)
+  roundingAdjust Float           @default(0)
+  grandTotal     Float
+  remark         String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  branchId String?
+  branch   Branch? @relation(fields: [branchId], references: [id], onDelete: SetNull)
+
+  memberId String?
+  member   Member? @relation(fields: [memberId], references: [id], onDelete: SetNull)
+
+  lines SaleLine[]
+}
+
+model SaleLine {
+  id              String   @id @default(cuid())
+  qty             Float
+  unitLabel       String
+  unitIndex       Int      @default(0)
+  unitPrice       Float
+  discount        Float    @default(0)
+  lineTotal       Float
+  priceLevelLabel String?
+  priceLevelIndex Int?
+  priceTagLabel   String?
+  createdAt       DateTime @default(now())
+
+  saleId String
+  sale   Sale   @relation(fields: [saleId], references: [id], onDelete: Cascade)
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+}
+
+model PurchaseOrder {
+  id           String              @id @default(cuid())
+  poNo         String              @unique
+  status       PurchaseOrderStatus @default(draft)
+  supplierName String
+  orderDate    DateTime            @default(now())
+  expectedDate DateTime?
+  note         String?
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  branchId String?
+  branch   Branch? @relation(fields: [branchId], references: [id], onDelete: SetNull)
+
+  lines PurchaseOrderLine[]
+}
+
+model PurchaseOrderLine {
+  id               String   @id @default(cuid())
+  orderedQty       Float
+  receivedQtyTotal Float    @default(0)
+  unitCost         Float
+  lineTotal        Float
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  purchaseOrderId String
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+}
+
+model StockMovement {
+  id         String            @id @default(cuid())
+  movementAt DateTime          @default(now())
+  type       StockMovementType
+  qtyDelta   Float
+  unitCost   Float?
+  refType    String?
+  refId      String?
+  note       String?
+  createdAt  DateTime          @default(now())
+
+  branchId String?
+  branch   Branch? @relation(fields: [branchId], references: [id], onDelete: SetNull)
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+}

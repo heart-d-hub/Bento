@@ -1,4 +1,6 @@
 import { MOCK_MEMBERS, type Member } from '@/features/members/data/mockMembers'
+import { isTauri } from '@/features/desktop/isTauri'
+import { invoke } from '@tauri-apps/api/core'
 
 const LS_KEY = 'bento.members.store.v1'
 export const MEMBERS_CHANGED_EVENT = 'bento:members:changed'
@@ -57,6 +59,31 @@ export function saveMembers(next: Member[]): void {
     window.dispatchEvent(new CustomEvent(MEMBERS_CHANGED_EVENT))
   } catch {
     /* ignore */
+  }
+}
+
+export async function loadMembersAsync(): Promise<Member[]> {
+  if (!isTauri()) return loadMembers()
+  try {
+    const rows = await invoke<Member[]>('members_load')
+    if (!Array.isArray(rows) || rows.length === 0) return [...MOCK_MEMBERS]
+    const normalized = rows.map(normalizeMember).filter((m): m is Member => Boolean(m))
+    return normalized.length ? normalized : [...MOCK_MEMBERS]
+  } catch {
+    return loadMembers()
+  }
+}
+
+export async function saveMembersAsync(next: Member[]): Promise<void> {
+  if (!isTauri()) {
+    saveMembers(next)
+    return
+  }
+  try {
+    await invoke('members_save_all', { members: next })
+    window.dispatchEvent(new CustomEvent(MEMBERS_CHANGED_EVENT))
+  } catch {
+    saveMembers(next)
   }
 }
 

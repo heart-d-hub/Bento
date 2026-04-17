@@ -7,10 +7,10 @@ import {
   type MemberStatus,
   type MemberType,
 } from '@/features/members/data/mockMembers'
-import { loadMembers, saveMembers } from '@/features/members/data/membersStore'
+import { loadMembers, loadMembersAsync, saveMembers, saveMembersAsync } from '@/features/members/data/membersStore'
 import { clsx } from 'clsx'
 import { Plus, Search, Users } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 type MembersWorkspacePageProps = {
   className?: string
@@ -54,6 +54,16 @@ export function MembersWorkspacePage({ className }: MembersWorkspacePageProps) {
   const [modalOpen, setModalOpen] = useState(false)
   const [modalMode, setModalMode] = useState<'create' | 'edit'>('create')
   const [editing, setEditing] = useState<Member | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    void loadMembersAsync().then((rows) => {
+      if (alive) setMembers(rows)
+    })
+    return () => {
+      alive = false
+    }
+  }, [])
 
   const filtered = useMemo(() => {
     const term = q.trim().toLowerCase()
@@ -100,6 +110,7 @@ export function MembersWorkspacePage({ className }: MembersWorkspacePageProps) {
       setMembers((prev) => {
         const next = [row, ...prev]
         saveMembers(next)
+        void saveMembersAsync(next)
         return next
       })
     } else if (editing) {
@@ -117,6 +128,7 @@ export function MembersWorkspacePage({ className }: MembersWorkspacePageProps) {
               : m,
           )
           saveMembers(next)
+          void saveMembersAsync(next)
           return next
         },
       )

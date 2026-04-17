@@ -202,6 +202,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   const [billDiscount, setBillDiscount] = useState('')
   const [applyRounding, setApplyRounding] = useState(false)
   const [suspendedBills, setSuspendedBills] = useState<SuspendedBill[]>([])
+  const [disabledWasherGiftByMaleCode, setDisabledWasherGiftByMaleCode] = useState<Record<string, boolean>>({})
 
   const [memberTick, setMemberTick] = useState(0)
   useEffect(() => {
@@ -243,47 +244,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     remark: '',
   }))
 
-  const [cart, setCart] = useState<CartLine[]>(() => [
-    {
-      id: 1,
-      code: 'BATT-LUG',
-      name: 'หางปลา',
-      unit: 'ชิ้น',
-      unitIndex: 0,
-      basePrice: 35,
-      price: 35,
-      priceLevel: 'ราคา 1',
-      priceLevelIndex: 0,
-      discount: 0,
-      qty: 1,
-    },
-    {
-      id: 2,
-      code: '90915-YZZD2',
-      name: 'ไส้กรองน้ำมันเครื่อง TOYOTA',
-      unit: 'ลูก',
-      unitIndex: 0,
-      basePrice: 250,
-      price: 250,
-      priceLevel: 'ราคา 1',
-      priceLevelIndex: 0,
-      discount: 10,
-      qty: 2,
-    },
-    {
-      id: 3,
-      code: '04465-0K120',
-      name: 'ผ้าเบรกหน้า TOYOTA REVO',
-      unit: 'ชุด',
-      unitIndex: 0,
-      basePrice: 1850,
-      price: 1850,
-      priceLevel: 'ราคา 1',
-      priceLevelIndex: 0,
-      discount: 0,
-      qty: 1,
-    },
-  ])
+  const [cart, setCart] = useState<CartLine[]>([])
 
   const mockProducts: Product[] = useMemo(
     () =>
@@ -744,10 +705,22 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
       if (!target) return prev
       let next = prev.filter((l) => l.id !== id)
       if (!target.stlBoltRole) {
+        setDisabledWasherGiftByMaleCode((prevMap) => {
+          if (!prevMap[target.code]) return prevMap
+          const copy = { ...prevMap }
+          delete copy[target.code]
+          return copy
+        })
         next = next.filter(
           (l) => !(l.stlBoltMaleCode === target.code && (l.stlBoltRole === 'nut' || l.stlBoltRole === 'washerGift')),
         )
         return next
+      }
+      if (target.stlBoltRole === 'washerGift' && target.stlBoltMaleCode) {
+        const nextDisabled = { ...disabledWasherGiftByMaleCode, [target.stlBoltMaleCode]: true }
+        setDisabledWasherGiftByMaleCode(nextDisabled)
+        // ลบแหวนแล้วต้องไม่ sync รอบเดียวกัน ไม่งั้นจะถูกเติมกลับจนต้องกด 2 ครั้ง
+        return syncStlGiftLineForMaleCode(next, target.stlBoltMaleCode, nextDisabled)
       }
       if (target.stlBoltMaleCode) {
         next = syncStlGiftLineForMaleCode(next, target.stlBoltMaleCode)
@@ -762,6 +735,8 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
       if (idx === -1) {
         const cfg = getPosSellConfig(p.id)
         const picked = pickDefaultPosUnitAndPrice(cfg)
+        const selectedListPrice =
+          picked != null ? cfg.getListUnitPrice(picked.unit.index, picked.level.index) : p.price
         const nextId = (prev.at(-1)?.id ?? 0) + 1
         return [
           ...prev,
@@ -772,8 +747,8 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
             name: p.name,
             unit: picked?.unit.label ?? p.unit,
             unitIndex: picked?.unit.index ?? 0,
-            basePrice: picked?.price ?? p.price,
-            price: picked?.price ?? p.price,
+            basePrice: selectedListPrice,
+            price: selectedListPrice,
             priceLevel: picked?.level.label ?? 'ราคา 1',
             priceLevelIndex: picked?.level.index ?? 0,
             discount: 0,
@@ -787,7 +762,11 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     })
   }
 
-  const syncStlGiftLineForMaleCode = (lines: CartLine[], maleCode: string): CartLine[] => {
+  const syncStlGiftLineForMaleCode = (
+    lines: CartLine[],
+    maleCode: string,
+    disabledMapOverride?: Record<string, boolean>,
+  ): CartLine[] => {
     const maleSeed = lines.find((l) => l.code === maleCode && !l.stlBoltRole)
     if (!maleSeed) return lines
     const maleProductId = maleSeed.productId ?? mockProducts.find((p) => p.code === maleCode)?.id
@@ -801,7 +780,8 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     const nutQty = lines
       .filter((l) => l.stlBoltRole === 'nut' && l.stlBoltMaleCode === maleCode)
       .reduce((s, l) => s + l.qty, 0)
-    const giftQty = Math.max(0, Math.min(maleQty, nutQty))
+    const disabledMap = disabledMapOverride ?? disabledWasherGiftByMaleCode
+    const giftQty = disabledMap[maleCode] ? 0 : Math.max(0, Math.min(maleQty, nutQty))
     const giftIdx = lines.findIndex((l) => l.stlBoltRole === 'washerGift' && l.stlBoltMaleCode === maleCode)
 
     if (giftQty <= 0) return giftIdx >= 0 ? lines.filter((_, i) => i !== giftIdx) : lines
@@ -855,10 +835,13 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
 
       const cfg = getPosSellConfig(nut.id)
       const picked = pickDefaultPosUnitAndPrice(cfg)
+      const selectedListPrice =
+        picked != null ? cfg.getListUnitPrice(picked.unit.index, picked.level.index) : nut.price
       let next = [...prev]
       const nutIdx = next.findIndex((l) => l.stlBoltRole === 'nut' && l.stlBoltMaleCode === line.code)
       if (nutIdx >= 0) {
-        next[nutIdx] = { ...next[nutIdx], qty: next[nutIdx].qty + 1 }
+        // กด +หัว = ซิงก์จำนวนหัวให้เท่ากับตัวผู้ในบรรทัดนี้ทันที
+        next[nutIdx] = { ...next[nutIdx], qty: line.qty }
       } else {
         const nextId = (next.at(-1)?.id ?? 0) + 1
         next.push({
@@ -868,23 +851,36 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
           name: `${nut.name} [หัวน็อตคู่]`,
           unit: picked?.unit.label ?? nut.unit,
           unitIndex: picked?.unit.index ?? 0,
-          basePrice: picked?.price ?? nut.price,
-          price: picked?.price ?? nut.price,
+          basePrice: selectedListPrice,
+          price: selectedListPrice,
           priceLevel: picked?.level.label ?? 'ราคา 1',
           priceLevelIndex: picked?.level.index ?? 0,
           discount: 0,
-          qty: 1,
+          qty: line.qty,
           stlBoltRole: 'nut',
           stlBoltMaleCode: line.code,
         })
       }
-      return syncStlGiftLineForMaleCode(next, line.code)
+      const nextDisabled = { ...disabledWasherGiftByMaleCode }
+      delete nextDisabled[line.code]
+      setDisabledWasherGiftByMaleCode(nextDisabled)
+      return syncStlGiftLineForMaleCode(next, line.code, nextDisabled)
     })
   }
 
   const updateLineQty = (id: number, qtyRaw: string) => {
     const qty = Math.max(0, Number(qtyRaw) || 0)
-    setCart((prev) => prev.map((l) => (l.id === id ? { ...l, qty } : l)))
+    setCart((prev) => {
+      const target = prev.find((l) => l.id === id)
+      if (!target) return prev
+      let next = prev.map((l) => (l.id === id ? { ...l, qty } : l))
+      if (!target.stlBoltRole) {
+        next = syncStlGiftLineForMaleCode(next, target.code)
+      } else if (target.stlBoltRole === 'nut' && target.stlBoltMaleCode) {
+        next = syncStlGiftLineForMaleCode(next, target.stlBoltMaleCode)
+      }
+      return next
+    })
   }
 
   const updateLineUnit = (id: number, unitIndexRaw: string) => {
@@ -941,6 +937,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
 
   const clearCurrentBill = () => {
     setCart([])
+    setDisabledWasherGiftByMaleCode({})
     setBillDiscount('')
     setApplyRounding(false)
     setCashReceived('')
@@ -1100,6 +1097,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     setMode(bill.mode)
     setCustomer(bill.customer)
     setCart(bill.cart)
+    setDisabledWasherGiftByMaleCode({})
     setDocInfo(bill.docInfo)
     setBillDiscount(bill.billDiscount || '')
     setApplyRounding(Boolean(bill.applyRounding))

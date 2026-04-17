@@ -1,4 +1,5 @@
 import { MOCK_PRODUCTS } from '@/features/inventory/data/mockInventory'
+import { getProductMasterList } from '@/features/inventory/data/productMasterData'
 
 const LEGACY_LIST_KEY = 'bento_inventory_category_list_v1'
 const TREE_KEY = 'bento_inventory_category_tree_v2'
@@ -312,10 +313,23 @@ export function normalizeCategoryTree(tree: unknown): MainCategory[] {
 }
 
 export function defaultCategoryTree(): MainCategory[] {
-  const names = [...new Set(MOCK_PRODUCTS.map((p) => p.category))].sort((a, b) =>
+  const masterNames = [...new Set(getProductMasterList().map((p) => p.category.trim()).filter(Boolean))]
+  const fallbackNames = [...new Set(MOCK_PRODUCTS.map((p) => p.category.trim()).filter(Boolean))]
+  const names = (masterNames.length > 0 ? masterNames : fallbackNames).sort((a, b) =>
     a.localeCompare(b, 'th', { sensitivity: 'base' }),
   )
   return names.map((name) => defaultMainFromName(name))
+}
+
+function mergeMissingMainCategoriesFromMaster(tree: MainCategory[]): MainCategory[] {
+  const masterNames = [...new Set(getProductMasterList().map((p) => p.category.trim()).filter(Boolean))]
+  if (masterNames.length === 0) return tree
+  const existing = new Set(tree.map((m) => m.name.trim().toLowerCase()))
+  const missing = masterNames
+    .filter((name) => !existing.has(name.toLowerCase()))
+    .sort((a, b) => a.localeCompare(b, 'th', { sensitivity: 'base' }))
+  if (missing.length === 0) return tree
+  return [...tree, ...missing.map((name) => defaultMainFromName(name))]
 }
 
 function parseLegacyStringList(raw: string): MainCategory[] | null {
@@ -337,19 +351,19 @@ export function loadCategoryTree(): MainCategory[] {
       const parsed = JSON.parse(treeRaw) as unknown
       if (Array.isArray(parsed) && parsed.length > 0) {
         const norm = normalizeCategoryTree(parsed)
-        if (norm.length > 0) return norm
+        if (norm.length > 0) return mergeMissingMainCategoriesFromMaster(norm)
       }
     }
 
     const legacy = localStorage.getItem(LEGACY_LIST_KEY)
     if (legacy) {
       const migrated = parseLegacyStringList(legacy)
-      if (migrated?.length) return migrated
+      if (migrated?.length) return mergeMissingMainCategoriesFromMaster(migrated)
     }
 
-    return defaultCategoryTree()
+    return mergeMissingMainCategoriesFromMaster(defaultCategoryTree())
   } catch {
-    return defaultCategoryTree()
+    return mergeMissingMainCategoriesFromMaster(defaultCategoryTree())
   }
 }
 
