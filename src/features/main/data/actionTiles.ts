@@ -2,7 +2,6 @@ import type { LucideIcon } from 'lucide-react'
 import {
   Boxes,
   BookOpen,
-  Building2,
   FileText,
   Gift,
   History,
@@ -28,7 +27,6 @@ export type ActionTile = {
 
 export const ACTION_TILES: ActionTile[] = [
   { id: 'buy', label: 'ซื้อ', icon: ShoppingBag, iconWrap: NEUTRAL_ICON_WRAP },
-  { id: 'suppliers', label: 'ผู้จำหน่าย', icon: Building2, iconWrap: NEUTRAL_ICON_WRAP },
   { id: 'members', label: 'สมาชิก', icon: Users, iconWrap: NEUTRAL_ICON_WRAP },
   {
     id: 'ar-ap',

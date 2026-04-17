@@ -3,8 +3,12 @@ import {
   addPiecesToBoxPieceProduct,
   adjustPieceStock,
   adjustRollProductKg,
+  deductBoxPieces,
   isBoxPieceProduct,
+  loadBoxPieceStock,
   posRollNominalForProduct,
+  saveBoxPieceStock,
+  notifyLiveStockChanged,
 } from '@/features/pos/data/posLiveStock'
 
 /**
@@ -34,3 +38,38 @@ export function receiveQtyToBranchStock(productId: string, qty: number): void {
   }
   adjustPieceStock(productId, Math.floor(q))
 }
+
+/**
+ * ปรับสต็อกตามผลต่างจำนวนรับ (บวก/ลบ) — ใช้เมื่อแก้ «รับแล้ว» ใน PO
+ */
+export function applySignedReceiveQtyToBranchStock(productId: string, signedQty: number): void {
+  if (signedQty === 0) return
+  if (signedQty > 0) {
+    receiveQtyToBranchStock(productId, signedQty)
+    return
+  }
+  const p = getPosCatalogProducts().find((x) => x.id === productId)
+  if (!p) {
+    throw new Error(`ไม่พบสินค้าในแคตตาล็อก: ${productId}`)
+  }
+  const mode = p.stockMode ?? 'piece'
+  if (mode === 'piece') {
+    adjustPieceStock(productId, Math.trunc(signedQty))
+    return
+  }
+  if (mode === 'kg_roll' || mode === 'meter_roll') {
+    adjustRollProductKg(productId, signedQty, posRollNominalForProduct(p))
+    return
+  }
+  if (isBoxPieceProduct(p) && p.piecesPerBox) {
+    const per = Math.max(1, Math.floor(p.piecesPerBox))
+    const need = Math.abs(Math.floor(signedQty))
+    const map = loadBoxPieceStock()
+    const next = deductBoxPieces(map, productId, need, per)
+    saveBoxPieceStock(next)
+    notifyLiveStockChanged()
+    return
+  }
+  adjustPieceStock(productId, Math.trunc(signedQty))
+}
+

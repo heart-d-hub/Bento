@@ -39,7 +39,7 @@ export const PERMISSION_MENU_GRID: PermissionMenuTile[] = [
   { id: 'sales-history', label: 'ประวัติการขาย', icon: ClipboardList, iconWrap: NEUTRAL_ICON_WRAP },
   { id: 'day-close', label: 'สรุปยอดสิ้นวัน', icon: Sunset, iconWrap: NEUTRAL_ICON_WRAP },
   { id: 'buy', label: 'ซื้อ', icon: ShoppingBag, iconWrap: NEUTRAL_ICON_WRAP },
-  { id: 'suppliers', label: 'ผู้จำหน่าย', icon: Building2, iconWrap: NEUTRAL_ICON_WRAP },
+  { id: 'suppliers', label: 'ผู้จัดจำหน่าย', icon: Building2, iconWrap: NEUTRAL_ICON_WRAP },
   { id: 'members', label: 'สมาชิก', icon: Users, iconWrap: NEUTRAL_ICON_WRAP },
   { id: 'promotions', label: 'โปรโมชัน', icon: Gift, iconWrap: NEUTRAL_ICON_WRAP },
   { id: 'branch-stock', label: 'คลังสินค้า', icon: Package, iconWrap: NEUTRAL_ICON_WRAP },

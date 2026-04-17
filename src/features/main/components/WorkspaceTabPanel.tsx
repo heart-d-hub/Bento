@@ -1,8 +1,7 @@
 import { DashboardLayoutWorkspacePage } from '@/features/main/DashboardLayoutWorkspacePage'
 import { TaskNotepadHistoryWorkspacePage } from '@/features/main/TaskNotepadHistoryWorkspacePage'
 import { GenericTabPlaceholder } from '@/features/main/components/GenericTabPlaceholder'
-import { PurchaseOrdersWorkspacePage } from '@/features/purchase/PurchaseOrdersWorkspacePage'
-import { SuppliersWorkspacePage } from '@/features/purchase/SuppliersWorkspacePage'
+import { BuyWorkspacePage } from '@/features/purchase/BuyWorkspacePage'
 import { useWorkspaceTabs } from '@/features/main/context/WorkspaceTabsContext'
 import { DaySummaryWorkspacePage } from '@/features/pos/DaySummaryWorkspacePage'
 import { PosWorkspacePage } from '@/features/pos/PosWorkspacePage'
@@ -48,11 +47,7 @@ export function WorkspaceTabPanel({ className }: WorkspaceTabPanelProps) {
   }
 
   if (activeTabId === 'buy') {
-    return <PurchaseOrdersWorkspacePage className={clsx('flex-1', className)} />
-  }
-
-  if (activeTabId === 'suppliers') {
-    return <SuppliersWorkspacePage className={clsx('flex-1', className)} />
+    return <BuyWorkspacePage className={clsx('flex-1', className)} />
   }
 
   if (activeTabId === 'catalog') {

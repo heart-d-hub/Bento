@@ -17,6 +17,8 @@ export type SupplierCreditDueConfig = {
   statementCutoffDay: number
   /** จำนวนวันเครดิตนับจากจุดเริ่ม (ค่าเริ่มต้น 30) */
   creditDays: number
+  /** บวกเดือนปฏิทินหลังครบวันเครดิต (เช่น ตรงกับฟอร์มสมาชิก — เครดิตเดือน) */
+  creditMonths: number
   /** ไม่เริ่มนับก่อนวันที่ 1 ของเดือนถัดจากเดือนของวันซื้อ */
   excludePurchaseMonth: boolean
   /** ครบกำหนดชำระที่สิ้นเดือนของเดือนที่ครบเครดิต */
@@ -26,6 +28,7 @@ export type SupplierCreditDueConfig = {
 export const DEFAULT_SUPPLIER_CREDIT: SupplierCreditDueConfig = {
   statementCutoffDay: 25,
   creditDays: 30,
+  creditMonths: 0,
   excludePurchaseMonth: true,
   payAtEndOfDueMonth: true,
 }
@@ -55,6 +58,11 @@ function addCalendarDays(d: Date, days: number): Date {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate() + days)
 }
 
+function addCalendarMonths(d: Date, months: number): Date {
+  if (!months || months <= 0) return d
+  return new Date(d.getFullYear(), d.getMonth() + months, d.getDate())
+}
+
 function endOfCalendarMonth(d: Date): Date {
   return new Date(d.getFullYear(), d.getMonth() + 1, 0)
 }
@@ -80,7 +88,8 @@ export function supplierPayDueDate(
     startCount = maxDate(dayAfterClose, firstAfterPurchaseMonth)
   }
 
-  const afterCredit = addCalendarDays(startCount, c.creditDays)
+  const afterDays = addCalendarDays(startCount, c.creditDays)
+  const afterCredit = addCalendarMonths(afterDays, c.creditMonths ?? 0)
   if (c.payAtEndOfDueMonth) {
     return endOfCalendarMonth(afterCredit)
   }
@@ -99,5 +108,10 @@ export function describeSupplierCreditRule(c: Partial<SupplierCreditDueConfig> =
   const cfg = { ...DEFAULT_SUPPLIER_CREDIT, ...c }
   const co = Math.floor(cfg.statementCutoffDay)
   const nextAfterClose = co < 31 ? `หลังวันที่ ${co} ของเดือน` : 'งวดสิ้นเดือน'
-  return `ตัดรอบ ~วันที่ ${co} · ${nextAfterClose} · เครดิต ${cfg.creditDays} วัน${cfg.excludePurchaseMonth ? ' (ไม่รวมเดือนซื้อ/ขาย)' : ''}${cfg.payAtEndOfDueMonth ? ' · ชำระสิ้นเดือน' : ''}`
+  const months = cfg.creditMonths ?? 0
+  const creditBit =
+    months > 0
+      ? `เครดิต ${cfg.creditDays} วัน + ${months} เดือน`
+      : `เครดิต ${cfg.creditDays} วัน`
+  return `ตัดรอบ ~วันที่ ${co} · ${nextAfterClose} · ${creditBit}${cfg.excludePurchaseMonth ? ' (ไม่รวมเดือนซื้อ/ขาย)' : ''}${cfg.payAtEndOfDueMonth ? ' · ชำระสิ้นเดือน' : ''}`
 }

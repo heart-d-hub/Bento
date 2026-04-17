@@ -69,7 +69,21 @@ function normalizePo(v: unknown): PurchaseOrder | null {
             })
             .filter(Boolean) as PurchaseOrder['receiveBatches'][0]['lines']
           if (blines.length === 0) return null
-          return { id: bid, at, lines: blines }
+          const refNos = typeof x.refNos === 'string' ? x.refNos.trim() : undefined
+          const shippingCostBaht =
+            typeof x.shippingCostBaht === 'number' && Number.isFinite(x.shippingCostBaht)
+              ? Math.max(0, x.shippingCostBaht)
+              : undefined
+          const receiveBranchId =
+            x.receiveBranchId === 'somneuk' || x.receiveBranchId === 'ang' ? x.receiveBranchId : undefined
+          return {
+            id: bid,
+            at,
+            lines: blines,
+            ...(refNos ? { refNos } : {}),
+            ...(shippingCostBaht !== undefined ? { shippingCostBaht } : {}),
+            ...(receiveBranchId ? { receiveBranchId } : {}),
+          }
         })
         .filter(Boolean) as PurchaseOrder['receiveBatches']
     : []

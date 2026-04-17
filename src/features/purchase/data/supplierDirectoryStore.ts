@@ -28,6 +28,16 @@ export type SupplierProfile = {
   otherPaymentMethods?: string[]
   /** บัญชีรับโอน (หลายบัญชีได้) */
   bankAccounts?: SupplierBankAccount[]
+  /** ผู้ติดต่อ (แสดงในตารางหลัก) */
+  contactName?: string
+  /** LINE ID ของซัพพลาย */
+  lineId?: string
+  /** แบรนด์ที่จำหน่าย (แท็ก) */
+  brandsSold?: string[]
+  /** ขนส่งประจำ (ชื่อบริษัทขนส่ง / รับเอง) */
+  defaultShipping?: string
+  /** จำนวนสินค้าประจำ (แสดงในแถว) */
+  regularProductCount?: number
 }
 
 function newSupplierId(): string {
@@ -37,7 +47,7 @@ function newSupplierId(): string {
 function seedProfiles(): SupplierProfile[] {
   return MOCK_SUPPLIERS.map((s) => ({
     id: s.id,
-    supplierCode: s.id.replace(/^sup-/, '').replace(/-/g, '').toUpperCase().slice(0, 10),
+    supplierCode: s.supplierCode,
     name: s.name,
     taxId: s.taxId,
     phone: s.phone,
@@ -45,6 +55,11 @@ function seedProfiles(): SupplierProfile[] {
     notes: '',
     acceptsCash: true,
     acceptsTransfer: true,
+    contactName: s.contactName,
+    lineId: s.lineId,
+    brandsSold: s.brandsSold?.length ? [...s.brandsSold] : undefined,
+    defaultShipping: s.defaultShipping,
+    regularProductCount: s.regularProductCount,
   }))
 }
 
@@ -132,6 +147,12 @@ function normalizeProfile(v: unknown): SupplierProfile | null {
   }
   const bankAccounts = normalizeBankAccountsFromRecord(o)
   const otherPaymentMethods = normalizeOtherPaymentMethods(o)
+  const brandsRaw = o.brandsSold
+  const brandsSold =
+    Array.isArray(brandsRaw) && brandsRaw.length
+      ? brandsRaw.map((x) => (typeof x === 'string' ? x.trim() : '')).filter(Boolean)
+      : undefined
+  const rpc = typeof o.regularProductCount === 'number' && Number.isFinite(o.regularProductCount) ? Math.max(0, Math.floor(o.regularProductCount)) : undefined
   return {
     id,
     supplierCode,
@@ -144,6 +165,11 @@ function normalizeProfile(v: unknown): SupplierProfile | null {
     acceptsTransfer,
     otherPaymentMethods,
     bankAccounts,
+    contactName: optTrim(o.contactName),
+    lineId: optTrim(o.lineId),
+    brandsSold: brandsSold?.length ? brandsSold : undefined,
+    defaultShipping: optTrim(o.defaultShipping),
+    regularProductCount: rpc,
   }
 }
 
@@ -169,6 +195,24 @@ export function upsertSupplierProfile(profile: SupplierProfile): void {
     list.push(profile)
   }
   saveList(list)
+}
+
+export function deleteSupplierProfile(id: string): void {
+  saveList(loadSupplierDirectory().filter((s) => s.id !== id))
+}
+
+/** รหัสแสดงถัดไปแบบ S001, S002 … จากรายการที่มีอยู่ */
+export function nextSupplierDisplayCode(): string {
+  const list = loadSupplierDirectory()
+  let max = 0
+  for (const s of list) {
+    const m = /^S(\d+)$/i.exec(s.supplierCode.trim())
+    if (m) {
+      const n = parseInt(m[1], 10)
+      if (Number.isFinite(n)) max = Math.max(max, n)
+    }
+  }
+  return `S${String(max + 1).padStart(3, '0')}`
 }
 
 function trimOpt(s: string | undefined): string | undefined {
@@ -208,6 +252,14 @@ export function createSupplierProfile(partial: Omit<SupplierProfile, 'id'> & { i
     acceptsTransfer: partial.acceptsTransfer,
     otherPaymentMethods: cleanOtherPaymentMethods(partial.otherPaymentMethods),
     bankAccounts: cleanBankAccounts(partial.bankAccounts),
+    contactName: trimOpt(partial.contactName),
+    lineId: trimOpt(partial.lineId),
+    brandsSold: partial.brandsSold?.length ? partial.brandsSold.map((x) => x.trim()).filter(Boolean) : undefined,
+    defaultShipping: trimOpt(partial.defaultShipping),
+    regularProductCount:
+      partial.regularProductCount != null && Number.isFinite(partial.regularProductCount)
+        ? Math.max(0, Math.floor(partial.regularProductCount))
+        : undefined,
   }
   upsertSupplierProfile(profile)
   return profile

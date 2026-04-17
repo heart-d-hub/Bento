@@ -15,6 +15,7 @@ import {
   SUPPLIER_DIRECTORY_CHANGED_EVENT,
 } from '@/features/purchase/data/supplierDirectoryStore'
 import type { SupplierProfile } from '@/features/purchase/data/supplierDirectoryStore'
+import { mergeLinePatchForOrdered, mergeReceivedQtyTotal } from '@/features/purchase/data/poLineEdit'
 import type { PurchaseOrder, PurchaseOrderLine, PoReceiveLine } from '@/features/purchase/data/poTypes'
 import { nextPurchaseOrderNo } from '@/features/purchase/data/poSequence'
 import {
@@ -22,7 +23,7 @@ import {
   getLatestUnitCostForPo,
   getOnHandQtyBeforeReceive,
 } from '@/features/purchase/data/poMovingAverage'
-import { receiveQtyToBranchStock } from '@/features/purchase/data/poStockReceive'
+import { applySignedReceiveQtyToBranchStock, receiveQtyToBranchStock } from '@/features/purchase/data/poStockReceive'
 import { printPurchaseOrder } from '@/features/purchase/utils/printPurchaseOrder'
 import {
   DEBT_REDUCTION_CHANNELS_CHANGED_EVENT,
@@ -47,6 +48,7 @@ import {
   CheckCircle2,
   FileEdit,
   CircleDollarSign,
+  RotateCcw,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
@@ -212,7 +214,7 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
     const list = loadSupplierDirectory()
     const first = list[0]
     if (!first) {
-      window.alert('ยังไม่มีผู้จำหน่ายในระบบ — กด «เพิ่มผู้จำหน่าย» ก่อน')
+      window.alert('ยังไม่มีผู้จัดจำหน่ายในระบบ — กด «เพิ่มผู้จัดจำหน่าย» ก่อน')
       return
     }
     const po: PurchaseOrder = {
@@ -257,10 +259,63 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
   }
 
   const patchLine = (lineId: string, patch: Partial<PurchaseOrderLine>) => {
-    if (!selected || selected.status !== 'draft') return
+    if (!selected) return
+    if (selected.status === 'draft') {
+      updateSelected({
+        ...selected,
+        lines: selected.lines.map((l) => (l.lineId === lineId ? { ...l, ...patch } : l)),
+      })
+      return
+    }
+    if (selected.status !== 'ordered' && selected.status !== 'closed') return
+    const line = selected.lines.find((l) => l.lineId === lineId)
+    if (!line) return
+    const onlyQtyCost: Partial<Pick<PurchaseOrderLine, 'orderedQty' | 'unitCostOrder'>> = {}
+    if (patch.orderedQty !== undefined) onlyQtyCost.orderedQty = patch.orderedQty
+    if (patch.unitCostOrder !== undefined) onlyQtyCost.unitCostOrder = patch.unitCostOrder
+    if (Object.keys(onlyQtyCost).length === 0) return
+    const result = mergeLinePatchForOrdered(line, onlyQtyCost)
+    if (!result.ok) {
+      window.alert(result.message)
+      return
+    }
     updateSelected({
       ...selected,
-      lines: selected.lines.map((l) => (l.lineId === lineId ? { ...l, ...patch } : l)),
+      lines: selected.lines.map((l) => (l.lineId === lineId ? result.line : l)),
+    })
+  }
+
+  const patchReceivedTotal = (lineId: string, raw: number) => {
+    if (!selected || (selected.status !== 'ordered' && selected.status !== 'closed')) return
+    const line = selected.lines.find((l) => l.lineId === lineId)
+    if (!line) return
+    const result = mergeReceivedQtyTotal(line, raw)
+    if (!result.ok) {
+      window.alert(result.message)
+      return
+    }
+    if (Math.abs(result.delta) < 1e-9) return
+    const cat = getPosCatalogProducts()
+    const p = cat.find((x) => x.id === line.productId)
+    if (!p) {
+      window.alert('ไม่พบสินค้าในแคตตาล็อก')
+      return
+    }
+    try {
+      applySignedReceiveQtyToBranchStock(line.productId, result.delta)
+      if (result.delta > 0) {
+        applyMovingAverageCost(line.productId, result.delta, line.unitCostOrder, p)
+      }
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : 'ปรับสต็อกไม่สำเร็จ')
+      return
+    }
+    const nextLines = selected.lines.map((l) => (l.lineId === lineId ? result.line : l))
+    const afterAllReceived = nextLines.every((l) => l.receivedQtyTotal + 1e-9 >= l.orderedQty)
+    updateSelected({
+      ...selected,
+      lines: nextLines,
+      ...(!afterAllReceived ? { status: 'ordered' as const, closedAt: undefined } : {}),
     })
   }
 
@@ -321,7 +376,12 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
       lines.push({ lineId: l.lineId, qty, unitCost })
     }
     if (!lines.length) {
-      window.alert('กรอกจำนวนที่รับจริงอย่างน้อย 1 แถว')
+      const hasPending = selected.lines.some((ln) => lineBackorder(ln) > 0)
+      if (hasPending) {
+        window.alert('กรอกจำนวนที่รับจริงอย่างน้อย 1 แถว')
+        return
+      }
+      setReceiveOpen(false)
       return
     }
 
@@ -385,6 +445,21 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
     updateSelected({ ...selected, status: 'closed', closedAt: new Date().toISOString() })
   }
 
+  const reopenPo = () => {
+    if (!selected || selected.status !== 'closed') return
+    if (
+      !window.confirm(
+        'เปิด PO กลับเป็น Ordered?\n\n' +
+          '• รับของ / แก้ไขข้อมูลที่เกี่ยวข้องได้อีก\n' +
+          '• ถ้าเคยบันทึกชำระ/เจ้าหนี้ไว้แล้ว ให้ตรวจสอบความสอดคล้องกับบัญชีเอง',
+      )
+    ) {
+      return
+    }
+    updateSelected({ ...selected, status: 'ordered', closedAt: undefined })
+    window.alert(`เปิด PO แล้ว — ${selected.poNo} กลับเป็นสถานะ Ordered`)
+  }
+
   const deleteDraft = () => {
     if (!selected || selected.status !== 'draft') return
     if (!window.confirm('ลบร่างนี้?')) return
@@ -407,7 +482,7 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
     if (!selected) return
     const p = getSupplierProfile(selected.supplierId)
     if (!p) {
-      window.alert('ไม่พบข้อมูลผู้จำหน่ายในแฟ้ม — เลือกจากรายการหรือเพิ่มผู้จำหน่ายใหม่')
+      window.alert('ไม่พบข้อมูลผู้จัดจำหน่ายในแฟ้ม — เลือกจากรายการหรือเพิ่มผู้จัดจำหน่ายใหม่')
       return
     }
     setSupplierModal({ open: true, mode: 'edit', profile: p })
@@ -539,13 +614,33 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
                       </button>
                     </>
                   )}
+                  {selected.status === 'closed' && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={printPo}
+                        className="inline-flex items-center gap-1 rounded border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold shadow-sm"
+                      >
+                        <Printer className="size-3.5" aria-hidden />
+                        พิมพ์ PO
+                      </button>
+                      <button
+                        type="button"
+                        onClick={reopenPo}
+                        className="inline-flex items-center gap-1 rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-xs font-semibold text-amber-900"
+                      >
+                        <RotateCcw className="size-3.5" aria-hidden />
+                        เปิด PO กลับ
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
 
               <div className="rounded-lg border border-slate-200 bg-slate-50/50 p-3">
                 <div className="mb-2 flex flex-wrap items-end justify-between gap-2">
                   <label className="block text-[10px] font-bold uppercase text-slate-500">
-                    ผู้จำหน่าย / ร้านค้าส่ง
+                    ผู้จัดจำหน่าย / ร้านค้าส่ง
                   </label>
                   <div className="flex flex-wrap gap-1.5">
                     <button
@@ -554,7 +649,7 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
                       className="inline-flex items-center gap-1 rounded border border-amber-300 bg-amber-50 px-2 py-1 text-[10px] font-bold uppercase tracking-wide text-amber-900 hover:bg-amber-100"
                     >
                       <UserPlus className="size-3" aria-hidden />
-                      เพิ่มผู้จำหน่าย
+                      เพิ่มผู้จัดจำหน่าย
                     </button>
                     <button
                       type="button"
@@ -723,6 +818,17 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
                                   }
                                   className="w-16 rounded border px-1 py-0.5 text-right"
                                 />
+                              ) : selected.status === 'ordered' || selected.status === 'closed' ? (
+                                <input
+                                  type="number"
+                                  min={Math.max(1, l.receivedQtyTotal)}
+                                  step="any"
+                                  value={l.orderedQty}
+                                  onChange={(e) =>
+                                    patchLine(l.lineId, { orderedQty: Number.parseFloat(e.target.value) || 0 })
+                                  }
+                                  className="w-16 rounded border px-1 py-0.5 text-right"
+                                />
                               ) : (
                                 l.orderedQty
                               )}
@@ -741,11 +847,40 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
                                   }
                                   className="w-24 rounded border px-1 py-0.5 text-right"
                                 />
+                              ) : selected.status === 'ordered' || selected.status === 'closed' ? (
+                                <input
+                                  type="number"
+                                  min={0}
+                                  step={0.01}
+                                  value={l.unitCostOrder}
+                                  onChange={(e) =>
+                                    patchLine(l.lineId, {
+                                      unitCostOrder: Math.max(0, Number.parseFloat(e.target.value) || 0),
+                                    })
+                                  }
+                                  className="w-24 rounded border px-1 py-0.5 text-right"
+                                />
                               ) : (
                                 l.unitCostOrder.toLocaleString('th-TH', { maximumFractionDigits: 2 })
                               )}
                             </td>
-                            <td className="px-2 py-2 text-right tabular-nums">{l.receivedQtyTotal}</td>
+                            <td className="px-2 py-2 text-right">
+                              {selected.status === 'ordered' || selected.status === 'closed' ? (
+                                <input
+                                  type="number"
+                                  min={0}
+                                  max={l.orderedQty}
+                                  step="any"
+                                  value={l.receivedQtyTotal}
+                                  onChange={(e) =>
+                                    patchReceivedTotal(l.lineId, Number.parseFloat(e.target.value) || 0)
+                                  }
+                                  className="w-16 rounded border px-1 py-0.5 text-right tabular-nums"
+                                />
+                              ) : (
+                                <span className="tabular-nums">{l.receivedQtyTotal}</span>
+                              )}
+                            </td>
                             <td className="px-2 py-2 text-right tabular-nums">
                               <span className={lineBackorder(l) > 0 ? 'font-semibold text-amber-700' : ''}>
                                 {lineBackorder(l)}
@@ -772,6 +907,14 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
                   <p className="mt-2 text-[11px] text-slate-500">
                     ต้นทุนที่แสดงดึงจากแฟ้มมาสเตอร์ (avg/cost) — แก้ไขได้ในร่าง · ยังไม่มีผลต่อสต็อก
                   </p>
+                )}
+                {(selected.status === 'ordered' || selected.status === 'closed') && (
+                  <div className="mt-2 space-y-1 text-[11px] text-amber-800">
+                    <p>แก้จำนวนสั่ง/ต้นทุนต่อหน่วยได้หากใส่ผิด — จำนวนสั่งต้องไม่น้อยกว่าที่รับแล้วในแต่ละแถว</p>
+                    <p className="text-slate-600">
+                      แก้ «รับแล้ว» ได้เมื่อตรวจพลาด — ระบบปรับสต็อกตามผลต่าง; ถ้าลดจำนวนรับ ต้นทุนเฉลี่ยไม่คำนวณย้อนอัตโนมัติ
+                    </p>
+                  </div>
                 )}
               </div>
 
@@ -952,52 +1095,82 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog">
           <div className="max-h-[90vh] w-full max-w-lg overflow-auto rounded-xl border border-slate-200 bg-white p-4 shadow-xl">
             <h3 className="text-sm font-bold text-slate-900">รับสินค้า — {selected.poNo}</h3>
-            <p className="mt-1 text-xs text-slate-500">กรอกจำนวนที่ได้รับจริงและต้นทุนตามบิล — ไม่เกินค้างรับ</p>
+            <p className="mt-1 text-xs text-slate-500">
+              {selected.lines.some((ln) => lineBackorder(ln) > 0)
+                ? 'กรอกจำนวนที่ได้รับจริงและต้นทุนตามบิล — ไม่เกินค้างรับ'
+                : 'รับครบแล้ว — แก้จำนวนรับจริงได้ที่ช่อง «รับแล้ว» ในแต่ละแถวด้านล่าง (หรือในตารางด้านบน)'}
+            </p>
             <div className="mt-3 space-y-3">
-              {selected.lines
-                .filter((l) => lineBackorder(l) > 0)
-                .map((l) => (
+              {selected.lines.map((l) => {
+                const remain = lineBackorder(l)
+                const pending = remain > 0
+                return (
                   <div key={l.lineId} className="rounded border border-slate-100 p-2">
                     <p className="text-xs font-semibold text-slate-800">
                       {l.sku} — {l.name}
                     </p>
-                    <p className="text-[10px] text-slate-500">
-                      ค้างรับ {lineBackorder(l)} · สต็อกปัจจุบัน (ก่อนรับ){' '}
-                      {(() => {
-                        const p = getPosCatalogProducts().find((x) => x.id === l.productId)
-                        return p ? getOnHandQtyBeforeReceive(p) : '—'
-                      })()}
-                    </p>
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      <label className="text-[11px]">
-                        จำนวนรับ
-                        <input
-                          value={receiveDraft[l.lineId]?.qty ?? ''}
-                          onChange={(e) =>
-                            setReceiveDraft((d) => {
-                              const cur = d[l.lineId] ?? { qty: '', cost: String(l.unitCostOrder) }
-                              return { ...d, [l.lineId]: { ...cur, qty: e.target.value } }
-                            })
-                          }
-                          className="mt-0.5 block w-24 rounded border px-2 py-1 text-sm"
-                        />
-                      </label>
-                      <label className="text-[11px]">
-                        ต้นทุน/หน่วย (บาท)
-                        <input
-                          value={receiveDraft[l.lineId]?.cost ?? ''}
-                          onChange={(e) =>
-                            setReceiveDraft((d) => {
-                              const cur = d[l.lineId] ?? { qty: String(lineBackorder(l)), cost: '' }
-                              return { ...d, [l.lineId]: { ...cur, cost: e.target.value } }
-                            })
-                          }
-                          className="mt-0.5 block w-28 rounded border px-2 py-1 text-sm"
-                        />
-                      </label>
-                    </div>
+                    {pending ? (
+                      <>
+                        <p className="text-[10px] text-slate-500">
+                          ค้างรับ {remain} · สต็อกปัจจุบัน (ก่อนรับ){' '}
+                          {(() => {
+                            const p = getPosCatalogProducts().find((x) => x.id === l.productId)
+                            return p ? getOnHandQtyBeforeReceive(p) : '—'
+                          })()}
+                        </p>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          <label className="text-[11px]">
+                            จำนวนรับ
+                            <input
+                              value={receiveDraft[l.lineId]?.qty ?? ''}
+                              onChange={(e) =>
+                                setReceiveDraft((d) => {
+                                  const cur = d[l.lineId] ?? { qty: '', cost: String(l.unitCostOrder) }
+                                  return { ...d, [l.lineId]: { ...cur, qty: e.target.value } }
+                                })
+                              }
+                              className="mt-0.5 block w-24 rounded border px-2 py-1 text-sm"
+                            />
+                          </label>
+                          <label className="text-[11px]">
+                            ต้นทุน/หน่วย (บาท)
+                            <input
+                              value={receiveDraft[l.lineId]?.cost ?? ''}
+                              onChange={(e) =>
+                                setReceiveDraft((d) => {
+                                  const cur = d[l.lineId] ?? { qty: String(remain), cost: '' }
+                                  return { ...d, [l.lineId]: { ...cur, cost: e.target.value } }
+                                })
+                              }
+                              className="mt-0.5 block w-28 rounded border px-2 py-1 text-sm"
+                            />
+                          </label>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-[10px] text-slate-500">
+                          สั่ง {l.orderedQty} · รับแล้ว {l.receivedQtyTotal} · ค้างรับ 0
+                        </p>
+                        <label className="mt-2 block text-[11px] font-medium text-slate-700">
+                          รับแล้ว (แก้ไขเมื่อตรวจพลาด)
+                          <input
+                            type="number"
+                            min={0}
+                            max={l.orderedQty}
+                            step="any"
+                            value={l.receivedQtyTotal}
+                            onChange={(e) =>
+                              patchReceivedTotal(l.lineId, Number.parseFloat(e.target.value) || 0)
+                            }
+                            className="mt-0.5 block w-28 rounded border border-slate-200 px-2 py-1 text-sm tabular-nums"
+                          />
+                        </label>
+                      </>
+                    )}
                   </div>
-                ))}
+                )
+              })}
             </div>
             <div className="mt-4 flex justify-end gap-2">
               <button

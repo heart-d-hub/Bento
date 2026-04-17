@@ -15,6 +15,12 @@ export type PoReceiveBatch = {
   id: string
   at: string
   lines: PoReceiveLine[]
+  /** เลขที่ใบกำกับ/อ้างอิง (หลายเลขคั่นด้วย comma) */
+  refNos?: string
+  /** ค่าขนส่งครั้งรับนี้ (บาท) */
+  shippingCostBaht?: number
+  /** รับเข้าสาขา (บันทึกประกอบการรับ — สต็อก POS ยังอัปเดตรวมตาม flow เดิม) */
+  receiveBranchId?: BranchId
 }
 
 export type PurchaseOrderLine = {

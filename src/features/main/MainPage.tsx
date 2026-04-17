@@ -13,7 +13,7 @@ import { useNavigate } from 'react-router-dom'
 function workspacePageTitle(activeTabId: string | null): string | undefined {
   if (activeTabId === 'pos') return 'POS / TAX — ขายหน้าร้าน + ใบกำกับภาษี'
   if (activeTabId === 'buy') return 'ซื้อ — ใบสั่งซื้อ (PO) / รับของ / ค้างรับ'
-  if (activeTabId === 'suppliers') return 'ผู้จำหน่าย — รายชื่อ / รายละเอียด / เครดิต'
+  if (activeTabId === 'suppliers') return 'ผู้จัดจำหน่าย — รายชื่อ / รายละเอียด / เครดิต'
   if (activeTabId === 'catalog') return 'Catalog สินค้า — จัดชุดเสนออู่ / ร้านค้า'
   if (activeTabId === 'label-print')
     return 'พิมพ์ป้ายสินค้า — บาร์โค้ด / ใบเสร็จ'

@@ -24,6 +24,7 @@ export function CreditRuleEditorModal({
 }: CreditRuleEditorModalProps) {
   const [cutoff, setCutoff] = useState(initial.statementCutoffDay)
   const [creditDays, setCreditDays] = useState(initial.creditDays)
+  const [creditMonths, setCreditMonths] = useState(initial.creditMonths ?? 0)
   const [excl, setExcl] = useState(initial.excludePurchaseMonth)
   const [eom, setEom] = useState(initial.payAtEndOfDueMonth)
 
@@ -31,6 +32,7 @@ export function CreditRuleEditorModal({
     if (!open) return
     setCutoff(initial.statementCutoffDay)
     setCreditDays(initial.creditDays)
+    setCreditMonths(initial.creditMonths ?? 0)
     setExcl(initial.excludePurchaseMonth)
     setEom(initial.payAtEndOfDueMonth)
   }, [open, initial])
@@ -40,6 +42,7 @@ export function CreditRuleEditorModal({
   const preview: CounterpartyCreditConfig = {
     statementCutoffDay: cutoff,
     creditDays,
+    creditMonths,
     excludePurchaseMonth: excl,
     payAtEndOfDueMonth: eom,
   }
@@ -96,6 +99,17 @@ export function CreditRuleEditorModal({
               max={180}
               value={creditDays}
               onChange={(e) => setCreditDays(Math.max(0, Math.min(180, Number(e.target.value) || 0)))}
+              className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+            />
+          </label>
+          <label className="block text-[11px] font-medium text-slate-700">
+            เครดิต (เดือนปฏิทิน — บวกหลังครบวันเครดิต)
+            <input
+              type="number"
+              min={0}
+              max={99}
+              value={creditMonths}
+              onChange={(e) => setCreditMonths(Math.max(0, Math.min(99, Number(e.target.value) || 0)))}
               className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
             />
           </label>
