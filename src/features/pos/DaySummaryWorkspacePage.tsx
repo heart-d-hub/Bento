@@ -1,10 +1,10 @@
-import { getPaymentMethodLabel } from '@/features/pos/data/posPaymentMethodLabels'
 import type { PaymentMethodId } from '@/features/pos/data/placeholders'
 import {
   getTodaySalesSummary,
   loadRecentSales,
   POS_SALE_RECORDED_EVENT,
 } from '@/features/pos/data/posSalesHistory'
+import { loadPosDaySummaryAsync } from '@/features/pos/data/posSalesDb'
 import { clsx } from 'clsx'
 import { Banknote } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
@@ -29,6 +29,9 @@ function isSameLocalDay(iso: string, ref: Date): boolean {
 export function DaySummaryWorkspacePage({ className }: DaySummaryWorkspacePageProps) {
   const today = useMemo(() => new Date(), [])
   const [tick, setTick] = useState(0)
+  const [dbCount, setDbCount] = useState<number | null>(null)
+  const [dbTotalBaht, setDbTotalBaht] = useState<number | null>(null)
+  const [dbByPayment, setDbByPayment] = useState<Array<{ id: string; baht: number }> | null>(null)
 
   useEffect(() => {
     const onSale = () => setTick((t) => t + 1)
@@ -36,16 +39,58 @@ export function DaySummaryWorkspacePage({ className }: DaySummaryWorkspacePagePr
     return () => window.removeEventListener(POS_SALE_RECORDED_EVENT, onSale)
   }, [])
 
-  const { count, totalBaht } = getTodaySalesSummary(today)
+  useEffect(() => {
+    const docDate = today.toISOString().slice(0, 10)
+    let alive = true
+    void loadPosDaySummaryAsync(docDate)
+      .then((res) => {
+        if (!alive || !res) return
+        setDbCount(res.count)
+        setDbTotalBaht(res.totalBaht)
+        setDbByPayment(
+          (res.byPayment ?? []).map((x) => ({
+            id: x.paymentType,
+            baht: x.totalBaht,
+          })),
+        )
+      })
+      .catch(() => {
+        if (!alive) return
+        setDbCount(null)
+        setDbTotalBaht(null)
+        setDbByPayment(null)
+      })
+    return () => {
+      alive = false
+    }
+  }, [today, tick])
+
+  const fallback = getTodaySalesSummary(today)
+  const count = dbCount ?? fallback.count
+  const totalBaht = dbTotalBaht ?? fallback.totalBaht
+
+  const paymentLabel = (id: string): string => {
+    const map: Record<string, string> = {
+      cash: 'เงินสด',
+      transfer: 'โอน/QR',
+      account: 'ลงบัญชี',
+      mixed: 'ผสม',
+      qr: 'QR Code',
+      credit: 'เครดิต',
+      bill: 'ลงบิล',
+    }
+    return map[id] ?? id
+  }
 
   const byPayment = useMemo(() => {
+    if (dbByPayment) return dbByPayment
     const map = new Map<PaymentMethodId, number>()
     for (const s of loadRecentSales()) {
       if (!isSameLocalDay(s.at, today)) continue
       map.set(s.paymentId, (map.get(s.paymentId) ?? 0) + s.total)
     }
-    return [...map.entries()].sort((a, b) => b[1] - a[1])
-  }, [today, tick])
+    return [...map.entries()].sort((a, b) => b[1] - a[1]).map(([id, baht]) => ({ id, baht }))
+  }, [dbByPayment, today, tick])
 
   return (
     <div
@@ -84,12 +129,12 @@ export function DaySummaryWorkspacePage({ className }: DaySummaryWorkspacePagePr
           <div>
             <h2 className="mb-2 text-xs font-semibold text-slate-700">แยกตามช่องทางชำระ</h2>
             <ul className="space-y-2 rounded-xl border border-slate-200/80 bg-white p-3">
-              {byPayment.map(([id, baht]) => (
+              {byPayment.map(({ id, baht }) => (
                 <li
                   key={id}
                   className="flex items-center justify-between gap-2 text-xs text-slate-800"
                 >
-                  <span>{getPaymentMethodLabel(id)}</span>
+                  <span>{paymentLabel(id)}</span>
                   <span className="tabular-nums font-medium">{formatBaht(baht)} บาท</span>
                 </li>
               ))}

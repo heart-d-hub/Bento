@@ -1,0 +1,5 @@
+[[permission]]
+identifier = "allow-members-db"
+description = "Allows member CRUD via PostgreSQL."
+commands.allow = ["members_load", "members_upsert", "members_delete"]
+

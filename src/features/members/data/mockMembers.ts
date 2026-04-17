@@ -42,7 +42,7 @@ export type Member = {
 
   memberType: MemberType
   status: MemberStatus
-  defaultBranch: string
+  branchId: string
   /** แต้มสะสม — คำนวณจากธุรกรรม ไม่แก้ในฟอร์มสมาชิก */
   pointsBalance: number
   /** ค้างชำระ — สะท้อนจากลูกหนี้/บิล ไม่แก้ในฟอร์มสมาชิก */
@@ -89,7 +89,7 @@ export const MOCK_MEMBERS: Member[] = [
     itemTierOverrides: [],
     memberType: 'vip',
     status: 'active',
-    defaultBranch: 'สาขา 1',
+    branchId: 'somneuk',
     pointsBalance: 1280,
     arBalance: 0,
     notes: 'ชอบยางมิชลิน',
@@ -120,7 +120,7 @@ export const MOCK_MEMBERS: Member[] = [
     ],
     memberType: 'garage',
     status: 'active',
-    defaultBranch: 'สาขา 2',
+    branchId: 'ang',
     pointsBalance: 5420,
     arBalance: 12500,
     notes: 'วางบิล 30 วัน',
@@ -149,7 +149,7 @@ export const MOCK_MEMBERS: Member[] = [
     itemTierOverrides: [],
     memberType: 'mechanic',
     status: 'active',
-    defaultBranch: 'สาขา 1',
+    branchId: 'somneuk',
     pointsBalance: 210,
     arBalance: 0,
     notes: '',
@@ -178,7 +178,7 @@ export const MOCK_MEMBERS: Member[] = [
     itemTierOverrides: [],
     memberType: 'general',
     status: 'inactive',
-    defaultBranch: 'สาขา 1',
+    branchId: 'somneuk',
     pointsBalance: 0,
     arBalance: 0,
     notes: 'ไม่รับโทรศัพท์เวลากลางคืน',
@@ -207,7 +207,7 @@ export const MOCK_MEMBERS: Member[] = [
     itemTierOverrides: [],
     memberType: 'garage',
     status: 'blacklist',
-    defaultBranch: 'สาขา 2',
+    branchId: 'ang',
     pointsBalance: 0,
     arBalance: 89000,
     notes: 'ค้างชำระ — ติดต่อบัญชี',

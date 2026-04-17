@@ -1,4 +1,5 @@
 mod members_db;
+mod sales_db;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -6,7 +7,12 @@ pub fn run() {
     .invoke_handler(tauri::generate_handler![
       show_system_print_dialog,
       members_db::members_load,
-      members_db::members_save_all
+      members_db::members_upsert,
+      members_db::members_delete,
+      sales_db::sales_create,
+      sales_db::sales_day_summary,
+      sales_db::sales_history_list,
+      sales_db::sales_get_by_bill_no
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

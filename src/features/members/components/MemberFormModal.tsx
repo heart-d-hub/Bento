@@ -11,6 +11,7 @@ import {
   type MemberStatus,
   type MemberType,
 } from '@/features/members/data/mockMembers'
+import { BRANCHES } from '@/features/auth/branches'
 import { clsx } from 'clsx'
 import { Trash2, X } from 'lucide-react'
 import { useEffect, useId, useState, type FormEvent } from 'react'
@@ -61,7 +62,7 @@ function emptyForm(suggestedCode: string): MemberFormValues {
     notes: '',
     memberType: 'general',
     status: 'active',
-    defaultBranch: 'สาขา 1',
+    branchId: BRANCHES[0]?.id ?? '',
     pointsBalance: 0,
     arBalance: 0,
   }
@@ -317,13 +318,18 @@ export function MemberFormModal({
                     <label className={labelClass} htmlFor="member-branch">
                       สาขา
                     </label>
-                    <input
+                    <select
                       id="member-branch"
-                      type="text"
-                      value={form.defaultBranch}
-                      onChange={(e) => set({ defaultBranch: e.target.value })}
+                      value={form.branchId}
+                      onChange={(e) => set({ branchId: e.target.value })}
                       className={inputClass}
-                    />
+                    >
+                      {BRANCHES.map((b) => (
+                        <option key={b.id} value={b.id}>
+                          {b.name}
+                        </option>
+                      ))}
+                    </select>
                   </div>
                 </div>
               </div>

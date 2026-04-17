@@ -4,6 +4,8 @@ import {
   POS_SALE_RECORDED_EVENT,
   type PosSaleRecord,
 } from '@/features/pos/data/posSalesHistory'
+import { loadPosSalesHistoryAsync } from '@/features/pos/data/posSalesDb'
+import { getPosSaleByBillNoAsync } from '@/features/pos/data/posSalesDb'
 import { MOCK_POS_SALES_HISTORY } from '@/features/pos/data/mockPosSalesHistory'
 import { printPosReceipt } from '@/features/pos/utils/posPrintReceipt'
 import { clsx } from 'clsx'
@@ -33,18 +35,41 @@ function formatTime(iso: string): string {
 
 export function SalesHistoryWorkspacePage({ className }: SalesHistoryWorkspacePageProps) {
   const [storedRows, setStoredRows] = useState<PosSaleRecord[]>(() => loadRecentSales())
+  const [dbRows, setDbRows] = useState<PosSaleRecord[] | null>(null)
   const [q, setQ] = useState('')
   const [payment, setPayment] = useState<'all' | string>('all')
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [isReprintLoading, setIsReprintLoading] = useState(false)
 
-  const isDemoFallback = storedRows.length === 0
+  const isDemoFallback = dbRows == null && storedRows.length === 0
   const rows = useMemo(
-    () => (isDemoFallback ? MOCK_POS_SALES_HISTORY : storedRows),
-    [storedRows, isDemoFallback],
+    () => (dbRows && dbRows.length > 0 ? dbRows : isDemoFallback ? MOCK_POS_SALES_HISTORY : storedRows),
+    [dbRows, storedRows, isDemoFallback],
   )
 
   useEffect(() => {
-    const refresh = () => setStoredRows(loadRecentSales())
+    const refresh = () => {
+      setStoredRows(loadRecentSales())
+      void loadPosSalesHistoryAsync(200)
+        .then((rowsFromDb) => {
+          if (!rowsFromDb) {
+            setDbRows(null)
+            return
+          }
+          setDbRows(
+            rowsFromDb.map((r) => ({
+              id: r.id,
+              billNo: r.billNo,
+              at: r.at,
+              total: r.total,
+              paymentId: r.paymentId as PosSaleRecord['paymentId'],
+              lineCount: r.lineCount,
+              lines: r.lines,
+            })),
+          )
+        })
+        .catch(() => setDbRows(null))
+    }
     refresh()
     window.addEventListener(POS_SALE_RECORDED_EVENT, refresh)
     return () => window.removeEventListener(POS_SALE_RECORDED_EVENT, refresh)
@@ -93,7 +118,9 @@ export function SalesHistoryWorkspacePage({ className }: SalesHistoryWorkspacePa
               <p className="text-[11px] text-slate-500">
                 {isDemoFallback
                   ? 'แสดงตัวอย่าง — ยังไม่มีการขายจริงในเครื่องนี้ (บันทึกจริงเก็บได้สูงสุด 80 บิล)'
-                  : 'ข้อมูลในเครื่อง — ล่าสุด 80 รายการ'}
+                  : dbRows
+                    ? 'ข้อมูลจากฐานข้อมูล'
+                    : 'ข้อมูลในเครื่อง — ล่าสุด 80 รายการ'}
                 {' · '}
                 ในมุมมองนี้ {totals.count} บิล · ฿{formatBaht(totals.baht)}
               </p>
@@ -279,13 +306,18 @@ export function SalesHistoryWorkspacePage({ className }: SalesHistoryWorkspacePa
               </div>
               <button
                 type="button"
-                disabled={!selected.lines?.length || selected.lines.some((l) => l.unitPrice === undefined)}
-                onClick={() => {
-                  if (!selected.lines?.length) return
-                  const lines = selected.lines
+                disabled={
+                  isReprintLoading || !selected.lines?.length || selected.lines.some((l) => l.unitPrice === undefined)
+                }
+                onClick={async () => {
+                  setIsReprintLoading(true)
+                  try {
+                    const fresh = (await getPosSaleByBillNoAsync(selected.billNo)) ?? selected
+                    if (!fresh.lines?.length) return
+                    const lines = fresh.lines
                     .filter((l) => l.unitPrice !== undefined)
                     .map((l) => ({
-                      lineId: `re-${selected.id}-${Math.random().toString(36).slice(2, 6)}`,
+                      lineId: `re-${fresh.id}-${Math.random().toString(36).slice(2, 6)}`,
                       productId: l.productId,
                       sku: l.sku ?? '',
                       name: l.name,
@@ -297,17 +329,20 @@ export function SalesHistoryWorkspacePage({ className }: SalesHistoryWorkspacePa
                       priceLevelIndex: 0,
                       priceLevelLabel: 'ราคา 1',
                     }))
-                  printPosReceipt({
-                    billNo: selected.billNo,
-                    lines,
-                    grandTotal: selected.total,
-                    paymentLabel: getPaymentMethodLabel(selected.paymentId),
-                  })
+                    printPosReceipt({
+                      billNo: fresh.billNo,
+                      lines,
+                      grandTotal: fresh.total,
+                      paymentLabel: getPaymentMethodLabel(fresh.paymentId),
+                    })
+                  } finally {
+                    setIsReprintLoading(false)
+                  }
                 }}
                 className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 shadow-sm hover:bg-slate-50 disabled:opacity-50"
               >
                 <Printer className="size-4" aria-hidden />
-                พิมพ์ซ้ำ
+                {isReprintLoading ? 'กำลังดึงบิล...' : 'พิมพ์ซ้ำ'}
               </button>
             </div>
           </div>

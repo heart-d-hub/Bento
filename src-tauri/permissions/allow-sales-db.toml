@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-sales-db"
+description = "Allows POS sales read/write in PostgreSQL."
+commands.allow = ["sales_create", "sales_day_summary", "sales_history_list", "sales_get_by_bill_no"]

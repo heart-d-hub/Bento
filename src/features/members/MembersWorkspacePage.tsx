@@ -7,7 +7,7 @@ import {
   type MemberStatus,
   type MemberType,
 } from '@/features/members/data/mockMembers'
-import { loadMembers, loadMembersAsync, saveMembers, saveMembersAsync } from '@/features/members/data/membersStore'
+import { deleteMemberAsync, loadMembers, loadMembersAsync, saveMembers, upsertMemberAsync } from '@/features/members/data/membersStore'
 import { clsx } from 'clsx'
 import { Plus, Search, Users } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
@@ -107,32 +107,48 @@ export function MembersWorkspacePage({ className }: MembersWorkspacePageProps) {
         notes: values.notes.trim(),
         createdAt: new Date().toISOString().slice(0, 10),
       }
-      setMembers((prev) => {
-        const next = [row, ...prev]
-        saveMembers(next)
-        void saveMembersAsync(next)
-        return next
+      const next = [row, ...members]
+      setMembers(next)
+      saveMembers(next)
+      void upsertMemberAsync(row).catch((error) => {
+        console.error('[members] create persist failed', error)
+        window.alert('บันทึกสมาชิกลงฐานข้อมูลไม่สำเร็จ กรุณาเปิด DevTools ดู error log')
       })
     } else if (editing) {
-      setMembers((prev) =>
-        {
-          const next = prev.map((m) =>
-            m.id === editing.id
-              ? {
-                  ...m,
-                  ...values,
-                  memberCode: values.memberCode.trim(),
-                  fullName: values.fullName.trim(),
-                  notes: values.notes.trim(),
-                }
-              : m,
-          )
-          saveMembers(next)
-          void saveMembersAsync(next)
-          return next
-        },
+      const next = members.map((m) =>
+        m.id === editing.id
+          ? {
+              ...m,
+              ...values,
+              memberCode: values.memberCode.trim(),
+              fullName: values.fullName.trim(),
+              notes: values.notes.trim(),
+            }
+          : m,
       )
+      setMembers(next)
+      saveMembers(next)
+      const updated = next.find((m) => m.id === editing.id)
+      if (!updated) return
+      void upsertMemberAsync(updated).catch((error) => {
+        console.error('[members] edit persist failed', error)
+        window.alert('บันทึกการแก้ไขสมาชิกลงฐานข้อมูลไม่สำเร็จ กรุณาเปิด DevTools ดู error log')
+      })
     }
+  }
+
+  const handleDelete = (row: Member) => {
+    if (!window.confirm(`ลบสมาชิก ${row.memberCode} - ${row.fullName} ?`)) return
+    const prev = members
+    const next = prev.filter((m) => m.id !== row.id)
+    setMembers(next)
+    saveMembers(next)
+    void deleteMemberAsync(row.id).catch((error) => {
+      console.error('[members] delete persist failed', error)
+      setMembers(prev)
+      saveMembers(prev)
+      window.alert('ลบสมาชิกจากฐานข้อมูลไม่สำเร็จ กรุณาเปิด DevTools ดู error log')
+    })
   }
 
   return (
@@ -283,13 +299,22 @@ export function MembersWorkspacePage({ className }: MembersWorkspacePageProps) {
                   </td>
                   <td className="px-2 py-1.5">{statusBadge(m.status)}</td>
                   <td className="whitespace-nowrap px-2 py-1.5 text-right">
-                    <button
-                      type="button"
-                      onClick={() => openEdit(m)}
-                      className="rounded border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-medium text-violet-700 hover:bg-violet-50"
-                    >
-                      แก้ไข
-                    </button>
+                    <div className="inline-flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => openEdit(m)}
+                        className="rounded border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-medium text-violet-700 hover:bg-violet-50"
+                      >
+                        แก้ไข
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDelete(m)}
+                        className="rounded border border-rose-200 bg-white px-2 py-0.5 text-[10px] font-medium text-rose-700 hover:bg-rose-50"
+                      >
+                        ลบ
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))

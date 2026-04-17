@@ -7,6 +7,8 @@
   ],
   "permissions": [
     "allow-show-system-print-dialog",
+    "allow-members-db",
+    "allow-sales-db",
     "core:default",
     "core:window:allow-set-size",
     "core:window:allow-center",

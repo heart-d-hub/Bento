@@ -5,6 +5,8 @@ import {
   peekNextTaxInvoiceNumber,
 } from '@/features/pos/data/posBillSequence'
 import { loadMembers, MEMBERS_CHANGED_EVENT } from '@/features/members/data/membersStore'
+import { BRANCHES } from '@/features/auth/branches'
+import { getStoredBranch } from '@/features/auth/authSession'
 import { getProductMasterBySku, masterSearchExtrasForSku } from '@/features/inventory/data/productMasterData'
 import { loadProductTagsRegistry } from '@/features/inventory/data/productTagsRegistry'
 import { getPosCatalogProducts } from '@/features/pos/data/posCatalogMerge'
@@ -17,6 +19,8 @@ import {
 } from '@/features/pos/data/posUnitPricing'
 import { getStlBoltPairForMaleProduct } from '@/features/promotions/stlBoltPairRegistry'
 import { computeStlVolumePromo } from '@/features/promotions/stlVolumePromo'
+import { createPosSaleAsync } from '@/features/pos/data/posSalesDb'
+import { POS_SALE_RECORDED_EVENT } from '@/features/pos/data/posSalesHistory'
 import { INITIAL_VEHICLE_CATALOG } from '@/features/vehicle/data/mockCatalog'
 import { normalizeCatalog } from '@/features/vehicle/data/normalizeCatalog'
 import { VEHICLE_CATALOG_STORAGE_KEY } from '@/features/vehicle/data/vehicleCatalogStorageKeys'
@@ -168,6 +172,11 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100
 }
 
+function isSaleBillNoDuplicateError(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error)
+  return msg.includes('Sale_billNo_key') || msg.toLowerCase().includes('duplicate key value')
+}
+
 export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   const { theme, setTheme } = useThemePreference()
   const [mode, setMode] = useState<SaleMode>('retail')
@@ -194,6 +203,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   const [showQuotationModal, setShowQuotationModal] = useState(false)
   const [showQRModal, setShowQRModal] = useState(false)
   const [checkoutPaymentType, setCheckoutPaymentType] = useState<CheckoutPaymentType>('cash')
+  const [isSavingCheckout, setIsSavingCheckout] = useState(false)
 
   const [cashReceived, setCashReceived] = useState('')
   const [selectedBank, setSelectedBank] = useState('')
@@ -218,7 +228,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
         accountCode: m.memberCode,
         name: m.fullName,
         taxId: m.taxId ?? '',
-        branch: m.defaultBranch ?? '',
+        branch: BRANCHES.find((b) => b.id === m.branchId)?.name ?? '',
         address: m.address ?? '',
         creditTerms:
           m.creditTermMonths > 0 || m.creditTermDays > 0
@@ -948,6 +958,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   }
 
   const closeCheckoutModal = () => {
+    if (isSavingCheckout) return
     setShowCheckoutModal(false)
     setShowQRModal(false)
     setCashReceived('')
@@ -1015,7 +1026,8 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
           ? 'กรุงไทย'
           : code
 
-  const handleConfirmCheckout = () => {
+  const handleConfirmCheckout = async () => {
+    if (isSavingCheckout) return
     if (!cart.length) return
     const gt = totals.grandTotal
     if (checkoutPaymentType === 'cash' && receivedAmount + 1e-9 < gt) {
@@ -1054,23 +1066,83 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
             ? `ลงบัญชี (${customer.name})`
             : `ผสม — ตรวจรับเงินสด ${mixedCashNum.toLocaleString('th-TH', { minimumFractionDigits: 2 })} + โอน ${mixedTransferNum.toLocaleString('th-TH', { minimumFractionDigits: 2 })} (${bankLabel(selectedBank)})`
 
-    const issuedDocNo = mode === 'retail' ? nextPosBillNumber() : nextTaxInvoiceNumber()
     const docLabel = mode === 'retail' ? 'เลขที่บิล POS' : 'เลขที่ใบกำกับภาษี'
-
-    window.alert(
-      `บันทึกการขายแล้ว\n${docLabel}: ${issuedDocNo}\nวิธีชำระ: ${payLabel}\nยอด: ${gt.toLocaleString('th-TH', { minimumFractionDigits: 2 })} บาท` +
-        (checkoutPaymentType === 'cash'
-          ? `\nเงินทอน: ${Math.max(0, receivedAmount - gt).toLocaleString('th-TH', { minimumFractionDigits: 2 })} บาท`
-          : ''),
-    )
-
-    setDocInfo((prev) => ({
-      ...prev,
-      posBillNo: peekNextPosBillNumber(),
-      taxInvoiceNo: peekNextTaxInvoiceNumber(),
+    const branchId = getStoredBranch()?.id
+    const saleLines = pricedCart.map((line, idx) => ({
+      id: `sl-${Date.now()}-${idx}-${Math.random().toString(16).slice(2, 6)}`,
+      productCode: line.code,
+      productName: line.name,
+      qty: line.qty,
+      unitLabel: line.unit,
+      unitIndex: line.unitIndex ?? 0,
+      unitPrice: line.price,
+      discount: line.discount,
+      lineTotal: round2(line.price * line.qty - line.discount),
+      priceLevelLabel: line.priceLevel || undefined,
+      priceLevelIndex: line.priceLevelIndex,
+      priceTagLabel: line.stlBoltRole === 'washerGift' ? 'แถม' : undefined,
     }))
-    closeCheckoutModal()
-    clearCurrentBill()
+
+    let issuedDocNo = ''
+    let saved = false
+    setIsSavingCheckout(true)
+    try {
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        issuedDocNo = mode === 'retail' ? nextPosBillNumber() : nextTaxInvoiceNumber()
+        const saleId = `sale-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
+        try {
+          await createPosSaleAsync({
+            id: saleId,
+            billNo: issuedDocNo,
+            taxInvoiceNo: mode === 'tax' ? issuedDocNo : undefined,
+            mode,
+            paymentType: checkoutPaymentType,
+            docDate: docInfo.docDate,
+            subtotal: totals.subtotal,
+            billDiscount: totals.discountAmt,
+            beforeVat: totals.beforeVat,
+            vatAmount: totals.vatAmount,
+            roundingAdjust: totals.roundingAdjustment,
+            grandTotal: totals.grandTotal,
+            remark: docInfo.remark,
+            branchId,
+            memberCode: customer.accountCode !== WALK_IN_CUSTOMER.accountCode ? customer.accountCode : undefined,
+            lines: saleLines,
+          })
+          saved = true
+          break
+        } catch (error) {
+          if (isSaleBillNoDuplicateError(error)) {
+            continue
+          }
+          console.error('[pos] create sale in db failed', error)
+          window.alert('บันทึกบิลลงฐานข้อมูลไม่สำเร็จ กรุณาเปิด DevTools ดู error log')
+          return
+        }
+      }
+      if (!saved) {
+        window.alert('เลขที่บิลซ้ำหลายครั้ง กรุณาลองใหม่อีกครั้ง')
+        return
+      }
+
+      window.alert(
+        `บันทึกการขายแล้ว\n${docLabel}: ${issuedDocNo}\nวิธีชำระ: ${payLabel}\nยอด: ${gt.toLocaleString('th-TH', { minimumFractionDigits: 2 })} บาท` +
+          (checkoutPaymentType === 'cash'
+            ? `\nเงินทอน: ${Math.max(0, receivedAmount - gt).toLocaleString('th-TH', { minimumFractionDigits: 2 })} บาท`
+            : ''),
+      )
+      window.dispatchEvent(new CustomEvent(POS_SALE_RECORDED_EVENT))
+
+      setDocInfo((prev) => ({
+        ...prev,
+        posBillNo: peekNextPosBillNumber(),
+        taxInvoiceNo: peekNextTaxInvoiceNumber(),
+      }))
+      closeCheckoutModal()
+      clearCurrentBill()
+    } finally {
+      setIsSavingCheckout(false)
+    }
   }
 
   const handleSuspendBill = () => {
@@ -2050,7 +2122,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
           <div
             className="fixed inset-0 z-[350] flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-sm dark:bg-black/70"
             onMouseDown={(e) => {
-              if (e.target === e.currentTarget) closeCheckoutModal()
+              if (!isSavingCheckout && e.target === e.currentTarget) closeCheckoutModal()
             }}
           >
             <div
@@ -2069,6 +2141,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                 <button
                   type="button"
                   onClick={closeCheckoutModal}
+                  disabled={isSavingCheckout}
                   className="rounded-full p-1 text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-[#1a1f35]"
                   aria-label="ปิด"
                 >
@@ -2298,6 +2371,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                     <button
                       type="button"
                       onClick={closeCheckoutModal}
+                      disabled={isSavingCheckout}
                       className="flex-1 rounded-lg border border-slate-200 bg-white py-3 text-xs font-black uppercase tracking-widest text-slate-600 hover:bg-slate-50 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-slate-400 dark:hover:bg-[#12141c]"
                     >
                       ยกเลิก
@@ -2305,15 +2379,15 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                     <button
                       type="button"
                       onClick={handleConfirmCheckout}
-                      disabled={!canSubmitCheckout}
+                      disabled={!canSubmitCheckout || isSavingCheckout}
                       className={clsx(
                         'flex-1 rounded-lg py-3 text-xs font-black uppercase tracking-widest text-white shadow-sm transition',
-                        canSubmitCheckout
+                        canSubmitCheckout && !isSavingCheckout
                           ? 'bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400'
                           : 'cursor-not-allowed bg-slate-300 text-slate-500 dark:bg-slate-700 dark:text-slate-500',
                       )}
                     >
-                      ยืนยัน
+                      {isSavingCheckout ? 'กำลังบันทึก...' : 'ยืนยัน'}
                     </button>
                   </div>
                 </div>

@@ -275,7 +275,7 @@ export function SuppliersWorkspacePage({ className }: SuppliersWorkspacePageProp
           mode={supplierModal.mode}
           initialProfile={supplierModal.profile}
           onClose={() => setSupplierModal({ open: false, mode: 'create', profile: null })}
-          onSaved={(p, mode) => {
+          onSaved={() => {
             handleSaved()
             setSupplierModal({ open: false, mode: 'create', profile: null })
           }}
