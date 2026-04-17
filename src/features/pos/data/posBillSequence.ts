@@ -1,4 +1,5 @@
 import { getDeviceLabel } from '@/features/device/deviceSession'
+import { getStoredBranch } from '@/features/auth/authSession'
 
 /**
  * เลขบิล POS รูปแบบ: `{เลขเครื่อง}P{ปี พ.ศ. 2 หลัก}-{ลำดับ 6 หลัก}`
@@ -47,16 +48,27 @@ function seqMapKey(machine: number, yy: number): string {
   return `${machine}-${yy}`
 }
 
+function seqMapKeyByPrefix(prefix: string, yy: number): string {
+  return `${prefix}-${yy}`
+}
+
 function formatPosBill(machine: number, yy: number, seq: number): string {
   const seqStr = String(seq).padStart(6, '0')
   const yy2 = String(yy).padStart(2, '0')
   return `${machine}P${yy2}-${seqStr}`
 }
 
-function formatTaxInvoice(machine: number, yy: number, seq: number): string {
+function resolveTaxBranchPrefix(): string {
+  const branchId = getStoredBranch()?.id
+  if (branchId === 'somneuk') return 'SOM'
+  if (branchId === 'ang') return 'ANG'
+  return 'TAX'
+}
+
+function formatTaxInvoice(prefix: string, yy: number, seq: number): string {
   const seqStr = String(seq).padStart(6, '0')
   const yy2 = String(yy).padStart(2, '0')
-  return `${machine}T${yy2}-${seqStr}`
+  return `${prefix}${yy2}-${seqStr}`
 }
 
 function peekNextSeq(machine: number, yy: number, storageKey: string): number {
@@ -76,10 +88,13 @@ export function peekNextPosBillNumber(d: Date = new Date()): string {
 
 /** เลขที่ใบกำกับภาษีถัดไป (ยังไม่เพิ่มลำดับ) */
 export function peekNextTaxInvoiceNumber(d: Date = new Date()): string {
-  const machine = parseMachineNumberFromLabel(getDeviceLabel())
+  const prefix = resolveTaxBranchPrefix()
   const yy = buddhistEraYearLast2Digits(d)
-  const seq = peekNextSeq(machine, yy, TAX_SEQ_KEY)
-  return formatTaxInvoice(machine, yy, seq)
+  const map = loadSeqMap(TAX_SEQ_KEY)
+  const key = seqMapKeyByPrefix(prefix, yy)
+  const prev = map[key]
+  const seq = Number.isFinite(prev) && prev >= 1 ? prev + 1 : 1
+  return formatTaxInvoice(prefix, yy, seq)
 }
 
 /** เลขที่บิล POS ถัดไป (รันต่อเนื่อง แยกตามเครื่องและปี พ.ศ.) */
@@ -97,13 +112,13 @@ export function nextPosBillNumber(d: Date = new Date()): string {
 
 /** เลขที่ใบกำกับภาษีถัดไป (ลำดับแยกจากบิล POS) */
 export function nextTaxInvoiceNumber(d: Date = new Date()): string {
-  const machine = parseMachineNumberFromLabel(getDeviceLabel())
+  const prefix = resolveTaxBranchPrefix()
   const yy = buddhistEraYearLast2Digits(d)
-  const key = seqMapKey(machine, yy)
+  const key = seqMapKeyByPrefix(prefix, yy)
   const map = loadSeqMap(TAX_SEQ_KEY)
   const prev = map[key]
   const nextSeq = Number.isFinite(prev) && prev >= 1 ? prev + 1 : 1
   map[key] = nextSeq
   saveSeqMap(TAX_SEQ_KEY, map)
-  return formatTaxInvoice(machine, yy, nextSeq)
+  return formatTaxInvoice(prefix, yy, nextSeq)
 }

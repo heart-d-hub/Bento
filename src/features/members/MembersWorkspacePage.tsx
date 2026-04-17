@@ -3,11 +3,11 @@ import { MEMBER_PRICE_TIER_LABELS } from '@/features/members/data/memberTypes'
 import {
   MEMBER_STATUS_LABELS,
   MEMBER_TYPE_LABELS,
-  MOCK_MEMBERS,
   type Member,
   type MemberStatus,
   type MemberType,
 } from '@/features/members/data/mockMembers'
+import { loadMembers, saveMembers } from '@/features/members/data/membersStore'
 import { clsx } from 'clsx'
 import { Plus, Search, Users } from 'lucide-react'
 import { useMemo, useState } from 'react'
@@ -47,7 +47,7 @@ function statusBadge(status: MemberStatus) {
 }
 
 export function MembersWorkspacePage({ className }: MembersWorkspacePageProps) {
-  const [members, setMembers] = useState<Member[]>(() => [...MOCK_MEMBERS])
+  const [members, setMembers] = useState<Member[]>(() => loadMembers())
   const [q, setQ] = useState('')
   const [filterStatus, setFilterStatus] = useState<MemberStatus | 'all'>('all')
   const [filterType, setFilterType] = useState<MemberType | 'all'>('all')
@@ -97,20 +97,28 @@ export function MembersWorkspacePage({ className }: MembersWorkspacePageProps) {
         notes: values.notes.trim(),
         createdAt: new Date().toISOString().slice(0, 10),
       }
-      setMembers((prev) => [row, ...prev])
+      setMembers((prev) => {
+        const next = [row, ...prev]
+        saveMembers(next)
+        return next
+      })
     } else if (editing) {
       setMembers((prev) =>
-        prev.map((m) =>
-          m.id === editing.id
-            ? {
-                ...m,
-                ...values,
-                memberCode: values.memberCode.trim(),
-                fullName: values.fullName.trim(),
-                notes: values.notes.trim(),
-              }
-            : m,
-        ),
+        {
+          const next = prev.map((m) =>
+            m.id === editing.id
+              ? {
+                  ...m,
+                  ...values,
+                  memberCode: values.memberCode.trim(),
+                  fullName: values.fullName.trim(),
+                  notes: values.notes.trim(),
+                }
+              : m,
+          )
+          saveMembers(next)
+          return next
+        },
       )
     }
   }

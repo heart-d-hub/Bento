@@ -4,6 +4,13 @@ import {
   peekNextPosBillNumber,
   peekNextTaxInvoiceNumber,
 } from '@/features/pos/data/posBillSequence'
+import { loadMembers, MEMBERS_CHANGED_EVENT } from '@/features/members/data/membersStore'
+import { getProductMasterBySku, masterSearchExtrasForSku } from '@/features/inventory/data/productMasterData'
+import { getPosCatalogProducts } from '@/features/pos/data/posCatalogMerge'
+import { mergeInventoryProductsWithLiveStock } from '@/features/pos/data/posLiveStock'
+import { INITIAL_VEHICLE_CATALOG } from '@/features/vehicle/data/mockCatalog'
+import { normalizeCatalog } from '@/features/vehicle/data/normalizeCatalog'
+import { VEHICLE_CATALOG_STORAGE_KEY } from '@/features/vehicle/data/vehicleCatalogStorageKeys'
 import { useThemePreference } from '@/features/settings/themePreference'
 import { clsx } from 'clsx'
 import {
@@ -30,7 +37,7 @@ import {
   X,
 } from 'lucide-react'
 import { createPortal } from 'react-dom'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 type PosWorkspacePageProps = {
   className?: string
@@ -63,12 +70,29 @@ type Customer = {
 }
 
 type Product = {
-  id: number
+  id: string
   code: string
   name: string
   unit: string
   price: number
   stock: number
+  carBrand?: string
+  carModelLabel?: string
+  yearLabel?: string
+  factoryOem?: string
+  genuineNo?: string
+}
+
+const WALK_IN_CUSTOMER: Customer = {
+  accountCode: 'WK-00001',
+  name: 'ลูกค้าทั่วไป (Walk-in)',
+  taxId: '',
+  branch: '',
+  address: '-',
+  creditTerms: 'เงินสด',
+  creditLimit: 0,
+  creditUsed: 0,
+  points: 0,
 }
 
 type SuspendedBill = {
@@ -89,6 +113,28 @@ type SuspendedBill = {
   applyRounding: boolean
 }
 
+type VehicleFacetRow = {
+  brandName: string
+  modelName: string
+  engineSize: string
+  yearRangeLabel: string
+}
+
+function normalizeSearchText(s: string): string {
+  return s
+    .toLowerCase()
+    .normalize('NFKC')
+    .replace(/[^\p{L}\p{N}]+/gu, '')
+}
+
+function tokenizeSearch(q: string): string[] {
+  return q
+    .trim()
+    .split(/\s+/g)
+    .map((t) => normalizeSearchText(t))
+    .filter(Boolean)
+}
+
 export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   const { theme, setTheme } = useThemePreference()
   const [mode, setMode] = useState<SaleMode>('retail')
@@ -99,6 +145,13 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   const [memberSearchQuery, setMemberSearchQuery] = useState('')
   const [barcodeInput, setBarcodeInput] = useState('')
   const [productSearchQuery, setProductSearchQuery] = useState('')
+  const [productFilterCarBrand, setProductFilterCarBrand] = useState('ทั้งหมด')
+  const [productFilterCarModel, setProductFilterCarModel] = useState('ทั้งหมด')
+  const [productFilterYear, setProductFilterYear] = useState('ทั้งหมด')
+  const [quickFilterCarBrand, setQuickFilterCarBrand] = useState('ทั้งหมด')
+  const [quickFilterCarModel, setQuickFilterCarModel] = useState('ทั้งหมด')
+  const [quickFilterEngine, setQuickFilterEngine] = useState('ทั้งหมด')
+  const [quickFilterYear, setQuickFilterYear] = useState('ทั้งหมด')
   const [showMemberModal, setShowMemberModal] = useState(false)
   const [showProductModal, setShowProductModal] = useState(false)
   const [showCheckoutModal, setShowCheckoutModal] = useState(false)
@@ -117,51 +170,36 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   const [applyRounding, setApplyRounding] = useState(false)
   const [suspendedBills, setSuspendedBills] = useState<SuspendedBill[]>([])
 
-  const mockMembers: Customer[] = useMemo(
-    () => [
-      {
-        accountCode: 'AR-10045',
-        name: 'บริษัท อู่ซ่อมรถเจริญยนต์ จำกัด',
-        taxId: '0105562000000',
-        branch: 'สำนักงานใหญ่',
-        address: '123/45 ถ.มอเตอร์เวย์ แขวงทับช้าง เขตสะพานสูง กทม. 10250',
-        creditTerms: '26/03/2569 - 25/04/2569',
-        creditLimit: 500000,
-        creditUsed: 498000,
-        points: 1250,
-      },
-      {
-        accountCode: 'AR-10046',
-        name: 'สมชาย มอเตอร์ไบค์',
-        taxId: '1234567890123',
-        branch: '00001',
-        address: '99/9 หมู่ 1 ต.บางรัก อ.เมือง จ.เชียงใหม่ 50000',
-        creditTerms: 'เงินสด',
-        creditLimit: 0,
-        creditUsed: 0,
-        points: 300,
-      },
-      {
-        accountCode: 'WK-00001',
-        name: 'ลูกค้าทั่วไป (Walk-in)',
-        taxId: '',
-        branch: '',
-        address: '-',
-        creditTerms: 'เงินสด',
-        creditLimit: 0,
-        creditUsed: 0,
-        points: 0,
-      },
-    ],
-    [],
-  )
+  const [memberTick, setMemberTick] = useState(0)
+  useEffect(() => {
+    const on = () => setMemberTick((n) => n + 1)
+    window.addEventListener(MEMBERS_CHANGED_EVENT, on)
+    return () => window.removeEventListener(MEMBERS_CHANGED_EVENT, on)
+  }, [])
 
-  const walkInCustomer = useMemo(
-    () => mockMembers.find((m) => m.accountCode === 'WK-00001') ?? mockMembers[0],
-    [mockMembers],
-  )
+  const mockMembers: Customer[] = useMemo(() => {
+    const members = loadMembers()
+      .filter((m) => m.status !== 'blacklist')
+      .map((m) => ({
+        accountCode: m.memberCode,
+        name: m.fullName,
+        taxId: m.taxId ?? '',
+        branch: m.defaultBranch ?? '',
+        address: m.address ?? '',
+        creditTerms:
+          m.creditTermMonths > 0 || m.creditTermDays > 0
+            ? `${m.creditTermMonths > 0 ? `${m.creditTermMonths} เดือน ` : ''}${m.creditTermDays > 0 ? `${m.creditTermDays} วัน` : ''}`.trim()
+            : 'เงินสด',
+        creditLimit: m.creditLimitBaht ?? 0,
+        creditUsed: m.arBalance ?? 0,
+        points: m.pointsBalance ?? 0,
+      }))
+    return [WALK_IN_CUSTOMER, ...members]
+  }, [memberTick])
 
-  const [customer, setCustomer] = useState<Customer>(walkInCustomer)
+  const walkInCustomer = useMemo(() => mockMembers.find((m) => m.accountCode === 'WK-00001') ?? WALK_IN_CUSTOMER, [mockMembers])
+
+  const [customer, setCustomer] = useState<Customer>(WALK_IN_CUSTOMER)
 
   const [docInfo, setDocInfo] = useState(() => ({
     posBillNo: peekNextPosBillNumber(),
@@ -179,14 +217,80 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   ])
 
   const mockProducts: Product[] = useMemo(
-    () => [
-      { id: 101, code: 'BATT-LUG', name: 'หางปลา', unit: 'ชิ้น', price: 35, stock: 300 },
-      { id: 102, code: '90915-YZZD2', name: 'ไส้กรองน้ำมันเครื่อง TOYOTA', unit: 'ลูก', price: 250, stock: 45 },
-      { id: 103, code: '04465-0K120', name: 'ผ้าเบรกหน้า TOYOTA REVO', unit: 'ชุด', price: 1850, stock: 12 },
-      { id: 104, code: 'BULB-H4', name: 'หลอดไฟหน้า H4 12V 60/55W', unit: 'หลอด', price: 120, stock: 50 },
-    ],
+    () =>
+      mergeInventoryProductsWithLiveStock(getPosCatalogProducts()).map((p) => ({
+        id: p.id,
+        code: p.sku,
+        name: p.name,
+        unit: p.stockMode === 'kg_roll' ? 'กก.' : p.stockMode === 'meter_roll' ? 'เมตร' : 'ชิ้น',
+        price: 0,
+        stock: p.stock,
+        carBrand: p.carBrand,
+        carModelLabel: p.carModelLabel,
+        yearLabel: p.yearLabel,
+        factoryOem: p.factoryOem,
+        genuineNo: p.genuineNo,
+      })),
     [],
   )
+  const vehicleCatalog = useMemo(() => {
+    try {
+      const raw = localStorage.getItem(VEHICLE_CATALOG_STORAGE_KEY)
+      if (!raw) return INITIAL_VEHICLE_CATALOG
+      const parsed = JSON.parse(raw)
+      if (!parsed || typeof parsed !== 'object') return INITIAL_VEHICLE_CATALOG
+      return normalizeCatalog(parsed)
+    } catch {
+      return INITIAL_VEHICLE_CATALOG
+    }
+  }, [])
+
+  const vehicleFacetRows = useMemo<VehicleFacetRow[]>(() => {
+    const out: VehicleFacetRow[] = []
+    for (const cat of vehicleCatalog.categories) {
+      const data = vehicleCatalog.byCategory[cat.id]
+      if (!data) continue
+      for (const brand of data.brands) {
+        const models = data.modelsByBrandId[brand.id] ?? []
+        for (const model of models) {
+          const engines = data.enginesByModelId[model.id] ?? []
+          for (const eng of engines) {
+            const engineSize = (eng.engine_size ?? '').trim()
+            if (!engineSize) continue
+            for (const v of eng.variants ?? []) {
+              const yearTo = v.yearTo >= 2099 ? 'ปัจจุบัน' : String(v.yearTo)
+              out.push({
+                brandName: brand.name,
+                modelName: model.name,
+                engineSize,
+                yearRangeLabel: `${v.yearFrom}-${yearTo}`,
+              })
+            }
+          }
+        }
+      }
+    }
+    return out
+  }, [vehicleCatalog])
+  const vehicleVariantIdSet = useMemo(() => {
+    const ids = new Set<string>()
+    for (const cat of vehicleCatalog.categories) {
+      const data = vehicleCatalog.byCategory[cat.id]
+      if (!data) continue
+      for (const brand of data.brands) {
+        const models = data.modelsByBrandId[brand.id] ?? []
+        for (const model of models) {
+          const engines = data.enginesByModelId[model.id] ?? []
+          for (const eng of engines) {
+            for (const v of eng.variants ?? []) {
+              if (v.id) ids.add(v.id)
+            }
+          }
+        }
+      }
+    }
+    return ids
+  }, [vehicleCatalog])
 
   const isWalkIn = customer.accountCode === 'WK-00001'
 
@@ -201,15 +305,265 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
         )
       : mockMembers
 
-    // โหมด TAX ไม่ให้ Walk-in
-    return mode === 'tax' ? base.filter((m) => m.accountCode !== 'WK-00001') : base
+    return base
   }, [memberSearchQuery, mockMembers, mode])
 
+  const carBrandOptions = useMemo(
+    () => [
+      'ทั้งหมด',
+      ...new Set(
+        mockProducts
+          .filter((p) => productFilterCarModel === 'ทั้งหมด' || p.carModelLabel === productFilterCarModel)
+          .filter((p) => productFilterYear === 'ทั้งหมด' || p.yearLabel === productFilterYear)
+          .map((p) => p.carBrand)
+          .filter(Boolean) as string[],
+      ),
+    ],
+    [mockProducts, productFilterCarModel, productFilterYear],
+  )
+  const carModelOptions = useMemo(
+    () => [
+      'ทั้งหมด',
+      ...new Set(
+        mockProducts
+          .filter((p) => productFilterCarBrand === 'ทั้งหมด' || p.carBrand === productFilterCarBrand)
+          .filter((p) => productFilterYear === 'ทั้งหมด' || p.yearLabel === productFilterYear)
+          .map((p) => p.carModelLabel)
+          .filter(Boolean) as string[],
+      ),
+    ],
+    [mockProducts, productFilterCarBrand, productFilterYear],
+  )
+  const yearOptions = useMemo(
+    () => [
+      'ทั้งหมด',
+      ...new Set(
+        mockProducts
+          .filter((p) => productFilterCarBrand === 'ทั้งหมด' || p.carBrand === productFilterCarBrand)
+          .filter((p) => productFilterCarModel === 'ทั้งหมด' || p.carModelLabel === productFilterCarModel)
+          .map((p) => p.yearLabel)
+          .filter(Boolean) as string[],
+      ),
+    ],
+    [mockProducts, productFilterCarBrand, productFilterCarModel],
+  )
+
   const filteredProducts = useMemo(() => {
-    const q = productSearchQuery.trim().toLowerCase()
-    if (!q) return mockProducts
-    return mockProducts.filter((p) => p.code.toLowerCase().includes(q) || p.name.toLowerCase().includes(q))
-  }, [mockProducts, productSearchQuery])
+    const tokens = tokenizeSearch(productSearchQuery)
+    return mockProducts
+      .filter((p) => productFilterCarBrand === 'ทั้งหมด' || p.carBrand === productFilterCarBrand)
+      .filter((p) => productFilterCarModel === 'ทั้งหมด' || p.carModelLabel === productFilterCarModel)
+      .filter((p) => productFilterYear === 'ทั้งหมด' || p.yearLabel === productFilterYear)
+      .filter((p) => {
+        if (!tokens.length) return true
+        const hay = normalizeSearchText(
+          [
+          p.code,
+          p.name,
+          p.factoryOem ?? '',
+          p.genuineNo ?? '',
+          p.carBrand ?? '',
+          p.carModelLabel ?? '',
+          p.yearLabel ?? '',
+          masterSearchExtrasForSku(p.code),
+        ]
+            .join(' '),
+        )
+        return tokens.every((t) => hay.includes(t))
+      })
+      .slice(0, 120)
+  }, [mockProducts, productSearchQuery, productFilterCarBrand, productFilterCarModel, productFilterYear])
+
+  const quickSuggestProducts = useMemo(() => {
+    const tokens = tokenizeSearch(barcodeInput)
+    if (!tokens.length) return []
+    const textMatched = mockProducts
+      .filter((p) => {
+        const hay = normalizeSearchText(
+          [
+          p.code,
+          p.name,
+          p.factoryOem ?? '',
+          p.genuineNo ?? '',
+          p.carBrand ?? '',
+          p.carModelLabel ?? '',
+          p.yearLabel ?? '',
+          masterSearchExtrasForSku(p.code),
+        ]
+            .join(' '),
+        )
+        return tokens.every((t) => hay.includes(t))
+      })
+    const filtered = textMatched
+      .filter((p) => quickFilterCarBrand === 'ทั้งหมด' || p.carBrand === quickFilterCarBrand)
+      .filter((p) => quickFilterCarModel === 'ทั้งหมด' || p.carModelLabel === quickFilterCarModel)
+      .filter((p) => {
+        if (quickFilterEngine === 'ทั้งหมด') return true
+        const rows = vehicleFacetRows.filter(
+          (r) =>
+            (!p.carBrand || r.brandName === p.carBrand) &&
+            (!p.carModelLabel || p.carModelLabel === r.modelName || p.carModelLabel.includes(r.modelName)),
+        )
+        return rows.some((r) => r.engineSize === quickFilterEngine)
+      })
+      .filter((p) => {
+        if (quickFilterYear === 'ทั้งหมด') return true
+        const rows = vehicleFacetRows.filter(
+          (r) =>
+            (!p.carBrand || r.brandName === p.carBrand) &&
+            (!p.carModelLabel || p.carModelLabel === r.modelName || p.carModelLabel.includes(r.modelName)),
+        )
+        return rows.some((r) => r.yearRangeLabel === quickFilterYear)
+      })
+    return filtered.slice(0, 8)
+  }, [
+    barcodeInput,
+    mockProducts,
+    quickFilterCarBrand,
+    quickFilterCarModel,
+    quickFilterEngine,
+    quickFilterYear,
+    vehicleFacetRows,
+  ])
+
+  const quickTextMatchedProducts = useMemo(() => {
+    const tokens = tokenizeSearch(barcodeInput)
+    if (!tokens.length) return []
+    return mockProducts.filter((p) => {
+      const hay = normalizeSearchText(
+        [
+          p.code,
+          p.name,
+          p.factoryOem ?? '',
+          p.genuineNo ?? '',
+          p.carBrand ?? '',
+          p.carModelLabel ?? '',
+          p.yearLabel ?? '',
+          masterSearchExtrasForSku(p.code),
+        ].join(' '),
+      )
+      return tokens.every((t) => hay.includes(t))
+    })
+  }, [barcodeInput, mockProducts])
+
+  const hasVehicleFacetForProduct = (p: Product): boolean => {
+    const m = getProductMasterBySku(p.code)
+    if (!m?.vehicleFitments?.length) return false
+    return m.vehicleFitments.some((f) => vehicleVariantIdSet.has(f.engineId))
+  }
+
+  const mappedQuickProducts = useMemo(
+    () => quickTextMatchedProducts.filter((p) => hasVehicleFacetForProduct(p)),
+    [quickTextMatchedProducts, vehicleVariantIdSet],
+  )
+
+  const quickCarBrandOptions = useMemo(
+    () => [
+      'ทั้งหมด',
+      ...new Set(
+        mappedQuickProducts
+          .filter((p) => quickFilterCarModel === 'ทั้งหมด' || p.carModelLabel === quickFilterCarModel)
+          .filter((p) => {
+            if (quickFilterEngine === 'ทั้งหมด') return true
+            const rows = vehicleFacetRows.filter(
+              (r) =>
+                (!p.carBrand || r.brandName === p.carBrand) &&
+                (!p.carModelLabel || p.carModelLabel === r.modelName || p.carModelLabel.includes(r.modelName)),
+            )
+            return rows.some((r) => r.engineSize === quickFilterEngine)
+          })
+          .filter((p) => {
+            if (quickFilterYear === 'ทั้งหมด') return true
+            const rows = vehicleFacetRows.filter(
+              (r) =>
+                (!p.carBrand || r.brandName === p.carBrand) &&
+                (!p.carModelLabel || p.carModelLabel === r.modelName || p.carModelLabel.includes(r.modelName)),
+            )
+            return rows.some((r) => r.yearRangeLabel === quickFilterYear)
+          })
+          .map((p) => p.carBrand)
+          .filter(Boolean) as string[],
+      ),
+    ],
+    [mappedQuickProducts, quickFilterCarModel, quickFilterEngine, quickFilterYear, vehicleFacetRows],
+  )
+
+  const quickCarModelOptions = useMemo(
+    () => [
+      'ทั้งหมด',
+      ...new Set(
+        mappedQuickProducts
+          .filter((p) => quickFilterCarBrand === 'ทั้งหมด' || p.carBrand === quickFilterCarBrand)
+          .filter((p) => {
+            if (quickFilterEngine === 'ทั้งหมด') return true
+            const rows = vehicleFacetRows.filter(
+              (r) =>
+                (!p.carBrand || r.brandName === p.carBrand) &&
+                (!p.carModelLabel || p.carModelLabel === r.modelName || p.carModelLabel.includes(r.modelName)),
+            )
+            return rows.some((r) => r.engineSize === quickFilterEngine)
+          })
+          .filter((p) => {
+            if (quickFilterYear === 'ทั้งหมด') return true
+            const rows = vehicleFacetRows.filter(
+              (r) =>
+                (!p.carBrand || r.brandName === p.carBrand) &&
+                (!p.carModelLabel || p.carModelLabel === r.modelName || p.carModelLabel.includes(r.modelName)),
+            )
+            return rows.some((r) => r.yearRangeLabel === quickFilterYear)
+          })
+          .map((p) => p.carModelLabel)
+          .filter(Boolean) as string[],
+      ),
+    ],
+    [mappedQuickProducts, quickFilterCarBrand, quickFilterEngine, quickFilterYear, vehicleFacetRows],
+  )
+
+  const quickEngineOptions = useMemo(
+    () => [
+      'ทั้งหมด',
+      ...new Set(
+        vehicleFacetRows
+          .filter((r) => quickFilterCarBrand === 'ทั้งหมด' || r.brandName === quickFilterCarBrand)
+          .filter((r) => quickFilterCarModel === 'ทั้งหมด' || r.modelName === quickFilterCarModel)
+          .filter((r) => quickFilterYear === 'ทั้งหมด' || r.yearRangeLabel === quickFilterYear)
+          .map((r) => r.engineSize)
+          .filter(Boolean),
+      ),
+    ],
+    [vehicleFacetRows, quickFilterCarBrand, quickFilterCarModel, quickFilterYear],
+  )
+
+  const quickYearOptions = useMemo(
+    () => [
+      'ทั้งหมด',
+      ...new Set(
+        vehicleFacetRows
+          .filter((r) => quickFilterCarBrand === 'ทั้งหมด' || r.brandName === quickFilterCarBrand)
+          .filter((r) => quickFilterCarModel === 'ทั้งหมด' || r.modelName === quickFilterCarModel)
+          .filter((r) => quickFilterEngine === 'ทั้งหมด' || r.engineSize === quickFilterEngine)
+          .map((r) => r.yearRangeLabel),
+      ),
+    ],
+    [vehicleFacetRows, quickFilterCarBrand, quickFilterCarModel, quickFilterEngine],
+  )
+
+  const showQuickCarFilters = useMemo(() => {
+    // แสดงเฉพาะเมื่อผลค้นหาปัจจุบันมีสินค้าที่ผูกรุ่นรถจริง
+    const hasMappedVehicle = mappedQuickProducts.length > 0
+    if (!hasMappedVehicle) return false
+    const hasBrand = quickCarBrandOptions.length > 1
+    const hasModel = quickCarModelOptions.length > 1
+    const hasEngine = quickEngineOptions.length > 1
+    const hasYear = quickYearOptions.length > 1
+    return hasBrand || hasModel || hasEngine || hasYear
+  }, [
+    mappedQuickProducts,
+    quickCarBrandOptions,
+    quickCarModelOptions,
+    quickEngineOptions,
+    quickYearOptions,
+  ])
 
   const totals = useMemo(() => {
     const subtotal = cart.reduce((sum, line) => sum + line.price * line.qty - line.discount, 0)
@@ -273,7 +627,9 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     e.preventDefault()
     const code = barcodeInput.trim()
     if (!code) return
-    const found = mockProducts.find((p) => p.code.toLowerCase() === code.toLowerCase())
+    const found =
+      mockProducts.find((p) => p.code.toLowerCase() === code.toLowerCase()) ??
+      quickSuggestProducts[0]
     if (found) addProductToCart(found)
     setBarcodeInput('')
   }
@@ -302,10 +658,6 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   const openCheckoutModal = () => {
     if (!cart.length) {
       window.alert('ไม่มีรายการในตะกร้า')
-      return
-    }
-    if (mode === 'tax' && customer.accountCode === 'WK-00001') {
-      window.alert('โหมดใบกำกับภาษี: กรุณาเลือกลูกค้าที่มีข้อมูลภาษี (ไม่ใช่ Walk-in)')
       return
     }
     if (totals.grandTotal <= 0) {
@@ -545,10 +897,9 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                           : mockMembers.find((m) => m.accountCode !== 'WK-00001') ?? mockMembers[0]
                       setCustomer(next)
                     }}
-                    disabled={mode === 'tax'}
                     className={clsx(
                       'rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-bold text-slate-800 shadow-sm outline-none transition-all dark:border-[#2a2d3e] dark:bg-[#1a1f35] dark:text-cyan-100',
-                      mode === 'tax' ? 'cursor-not-allowed opacity-60' : 'cursor-pointer',
+                      'cursor-pointer',
                     )}
                   >
                     <option value="walkin">Walk-in</option>
@@ -593,10 +944,9 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                   <input
                     value={customer.name}
                     onChange={(e) => setCustomer((prev) => ({ ...prev, name: e.target.value }))}
-                    disabled={isWalkIn && mode === 'tax'}
                     className={clsx(
                       'w-full rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-cyan-50 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30',
-                      mode === 'tax' && isWalkIn ? 'cursor-not-allowed opacity-60' : '',
+                      '',
                     )}
                   />
                 </div>
@@ -607,10 +957,10 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                   <input
                     value={customer.taxId}
                     onChange={(e) => setCustomer((prev) => ({ ...prev, taxId: e.target.value }))}
-                    disabled={isWalkIn || mode === 'retail'}
+                    disabled={mode === 'retail'}
                     className={clsx(
                       'w-full rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-cyan-50 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30',
-                      isWalkIn || mode === 'retail' ? 'cursor-not-allowed opacity-60' : '',
+                      mode === 'retail' ? 'cursor-not-allowed opacity-60' : '',
                     )}
                   />
                 </div>
@@ -621,10 +971,10 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                   <input
                     value={customer.branch}
                     onChange={(e) => setCustomer((prev) => ({ ...prev, branch: e.target.value }))}
-                    disabled={isWalkIn || mode === 'retail'}
+                    disabled={mode === 'retail'}
                     className={clsx(
                       'w-full rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-cyan-50 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30',
-                      isWalkIn || mode === 'retail' ? 'cursor-not-allowed opacity-60' : '',
+                      mode === 'retail' ? 'cursor-not-allowed opacity-60' : '',
                     )}
                   />
                 </div>
@@ -636,10 +986,10 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                   <input
                     value={customer.address}
                     onChange={(e) => setCustomer((prev) => ({ ...prev, address: e.target.value }))}
-                    disabled={isWalkIn || mode === 'retail'}
+                    disabled={mode === 'retail'}
                     className={clsx(
                       'w-full rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-cyan-50 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30',
-                      isWalkIn || mode === 'retail' ? 'cursor-not-allowed opacity-60' : '',
+                      mode === 'retail' ? 'cursor-not-allowed opacity-60' : '',
                     )}
                   />
                 </div>
@@ -654,11 +1004,105 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                   <input
                     id="pos-product-search"
                     value={barcodeInput}
-                    onChange={(e) => setBarcodeInput(e.target.value)}
+                    onChange={(e) => {
+                      setBarcodeInput(e.target.value)
+                    }}
                     onKeyDown={handleBarcodeKeyDown}
                     placeholder="สแกนบาร์โค้ด หรือ รหัสสินค้า..."
                     className="w-full rounded border border-slate-200 bg-white py-1.5 pl-8 pr-2 text-xs font-semibold text-slate-800 outline-none placeholder:text-slate-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-cyan-50 dark:placeholder:text-slate-600 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30"
                   />
+                  {(tokenizeSearch(barcodeInput).length > 0 || quickSuggestProducts.length > 0) && (
+                    <div className="absolute left-0 right-0 top-[calc(100%+4px)] z-30 space-y-1 rounded border border-slate-200 bg-white p-2 shadow-lg dark:border-[#2a2d3e] dark:bg-[#12141c]">
+                      {showQuickCarFilters ? (
+                        <>
+                          <div className="grid grid-cols-2 gap-1 lg:grid-cols-4">
+                            <label className="space-y-0.5">
+                              <span className="block text-[9px] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">ยี่ห้อ</span>
+                              <select
+                                value={quickFilterCarBrand}
+                                onChange={(e) => setQuickFilterCarBrand(e.target.value)}
+                                className="w-full rounded border border-slate-200 bg-slate-50 px-1.5 py-1 text-[10px] dark:border-[#2a2d3e] dark:bg-[#050508]"
+                              >
+                                {quickCarBrandOptions.map((opt) => (
+                                  <option key={`q-brand-${opt}`} value={opt}>
+                                    {opt}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label className="space-y-0.5">
+                              <span className="block text-[9px] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">รุ่น</span>
+                              <select
+                                value={quickFilterCarModel}
+                                onChange={(e) => setQuickFilterCarModel(e.target.value)}
+                                className="w-full rounded border border-slate-200 bg-slate-50 px-1.5 py-1 text-[10px] dark:border-[#2a2d3e] dark:bg-[#050508]"
+                              >
+                                {quickCarModelOptions.map((opt) => (
+                                  <option key={`q-model-${opt}`} value={opt}>
+                                    {opt}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label className="space-y-0.5">
+                              <span className="block text-[9px] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">เครื่อง</span>
+                              <select
+                                value={quickFilterEngine}
+                                onChange={(e) => setQuickFilterEngine(e.target.value)}
+                                className="w-full rounded border border-slate-200 bg-slate-50 px-1.5 py-1 text-[10px] dark:border-[#2a2d3e] dark:bg-[#050508]"
+                              >
+                                {quickEngineOptions.map((opt) => (
+                                  <option key={`q-engine-${opt}`} value={opt}>
+                                    {opt}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label className="space-y-0.5">
+                              <span className="block text-[9px] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">ปี</span>
+                              <select
+                                value={quickFilterYear}
+                                onChange={(e) => setQuickFilterYear(e.target.value)}
+                                className="w-full rounded border border-slate-200 bg-slate-50 px-1.5 py-1 text-[10px] dark:border-[#2a2d3e] dark:bg-[#050508]"
+                              >
+                                {quickYearOptions.map((opt) => (
+                                  <option key={`q-year-${opt}`} value={opt}>
+                                    {opt}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          </div>
+                          <p className="text-[10px] text-slate-500 dark:text-slate-400">
+                            ฟิลเตอร์ช่วยถามลูกค้าต่อ: ยี่ห้อ / รุ่น / เครื่อง / ปี
+                          </p>
+                        </>
+                      ) : null}
+                      {quickSuggestProducts.length > 0 ? (
+                        <div className="max-h-56 overflow-auto rounded border border-slate-200 dark:border-[#2a2d3e]">
+                          {quickSuggestProducts.map((p) => (
+                            <button
+                              key={`quick-${p.id}`}
+                              type="button"
+                              onClick={() => {
+                                addProductToCart(p)
+                                setBarcodeInput('')
+                              }}
+                              className="grid w-full grid-cols-12 items-center gap-2 border-b border-slate-100 px-2 py-1.5 text-left hover:bg-slate-50 dark:border-[#1c1f2e] dark:hover:bg-[#1a1f35]"
+                            >
+                              <span className="col-span-3 font-mono text-[10px] font-black text-blue-700 dark:text-cyan-300">{p.code}</span>
+                              <span className="col-span-7 truncate text-[11px] font-semibold text-slate-700 dark:text-slate-200">{p.name}</span>
+                              <span className="col-span-2 text-right font-mono text-[10px] text-slate-500 dark:text-slate-400">{p.stock}</span>
+                            </button>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="rounded border border-slate-200 px-2 py-1 text-[10px] text-slate-500 dark:border-[#2a2d3e] dark:text-slate-400">
+                          ไม่พบรายการที่ตรงเงื่อนไข
+                        </p>
+                      )}
+                    </div>
+                  )}
                 </div>
                 <button
                   type="button"
@@ -744,38 +1188,31 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
               </div>
               <div className="space-y-3 p-3 pos-720p:space-y-2 pos-720p:p-2">
                 <div className="flex flex-col gap-2 pos-720p:gap-1.5">
-                  <div className="min-w-0">
-                    <label className="mb-0.5 block text-[9px] font-black uppercase tracking-widest text-blue-600/80 dark:text-cyan-500/70">
-                      เลขที่บิล POS
-                    </label>
-                    <input
-                      value={docInfo.posBillNo}
-                      readOnly
-                      title="ลำดับแยกจากใบกำกับภาษี"
-                      className={clsx(
-                        'w-full cursor-default rounded border bg-slate-100 px-2 py-1.5 text-[11px] font-black outline-none dark:bg-[#050508]/50',
-                        mode === 'retail'
-                          ? 'border-blue-300 text-blue-800 dark:border-cyan-600/50 dark:text-cyan-300'
-                          : 'border-slate-200 text-slate-600 dark:border-[#1e2233] dark:text-slate-400',
-                      )}
-                    />
-                  </div>
-                  <div className="min-w-0">
-                    <label className="mb-0.5 block text-[9px] font-black uppercase tracking-widest text-blue-600/80 dark:text-cyan-500/70">
-                      เลขที่ใบกำกับภาษี
-                    </label>
-                    <input
-                      value={docInfo.taxInvoiceNo}
-                      readOnly
-                      title="ลำดับแยกจากบิล POS"
-                      className={clsx(
-                        'w-full cursor-default rounded border bg-slate-100 px-2 py-1.5 text-[11px] font-black outline-none dark:bg-[#050508]/50',
-                        mode === 'tax'
-                          ? 'border-indigo-300 text-indigo-800 dark:border-indigo-500/50 dark:text-indigo-300'
-                          : 'border-slate-200 text-slate-600 dark:border-[#1e2233] dark:text-slate-400',
-                      )}
-                    />
-                  </div>
+                  {mode === 'retail' ? (
+                    <div className="min-w-0">
+                      <label className="mb-0.5 block text-[9px] font-black uppercase tracking-widest text-blue-600/80 dark:text-cyan-500/70">
+                        เลขที่บิล POS
+                      </label>
+                      <input
+                        value={docInfo.posBillNo}
+                        readOnly
+                        title="ลำดับแยกจากใบกำกับภาษี"
+                        className="w-full cursor-default rounded border border-blue-300 bg-slate-100 px-2 py-1.5 text-[11px] font-black text-blue-800 outline-none dark:border-cyan-600/50 dark:bg-[#050508]/50 dark:text-cyan-300"
+                      />
+                    </div>
+                  ) : (
+                    <div className="min-w-0">
+                      <label className="mb-0.5 block text-[9px] font-black uppercase tracking-widest text-blue-600/80 dark:text-cyan-500/70">
+                        เลขที่ใบกำกับภาษี
+                      </label>
+                      <input
+                        value={docInfo.taxInvoiceNo}
+                        readOnly
+                        title="ลำดับแยกจากบิล POS"
+                        className="w-full cursor-default rounded border border-indigo-300 bg-slate-100 px-2 py-1.5 text-[11px] font-black text-indigo-800 outline-none dark:border-indigo-500/50 dark:bg-[#050508]/50 dark:text-indigo-300"
+                      />
+                    </div>
+                  )}
                 </div>
                 <div className="max-w-[11rem]">
                   <label className="mb-0.5 block text-[9px] font-black uppercase tracking-widest text-blue-600/80 dark:text-cyan-500/70">
@@ -1071,6 +1508,50 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                     autoFocus
                     className="w-full rounded-lg border border-slate-200 bg-slate-50 py-2 pl-10 pr-3 text-sm text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-cyan-100 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30"
                   />
+                </div>
+                <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                  <label className="space-y-0.5 text-[10px] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                    ยี่ห้อ
+                    <select
+                      value={productFilterCarBrand}
+                      onChange={(e) => setProductFilterCarBrand(e.target.value)}
+                      className="w-full rounded border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs font-semibold normal-case tracking-normal text-slate-800 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-cyan-100"
+                    >
+                      {carBrandOptions.map((opt) => (
+                        <option key={`brand-${opt}`} value={opt}>
+                          {opt}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="space-y-0.5 text-[10px] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                    รุ่นรถ
+                    <select
+                      value={productFilterCarModel}
+                      onChange={(e) => setProductFilterCarModel(e.target.value)}
+                      className="w-full rounded border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs font-semibold normal-case tracking-normal text-slate-800 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-cyan-100"
+                    >
+                      {carModelOptions.map((opt) => (
+                        <option key={`model-${opt}`} value={opt}>
+                          {opt}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="space-y-0.5 text-[10px] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                    ปี/เครื่อง
+                    <select
+                      value={productFilterYear}
+                      onChange={(e) => setProductFilterYear(e.target.value)}
+                      className="w-full rounded border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs font-semibold normal-case tracking-normal text-slate-800 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-cyan-100"
+                    >
+                      {yearOptions.map((opt) => (
+                        <option key={`year-${opt}`} value={opt}>
+                          {opt}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                 </div>
               </div>
 
