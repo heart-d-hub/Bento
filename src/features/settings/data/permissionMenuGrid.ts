@@ -69,3 +69,10 @@ export const PERMISSION_MENU_GRID: PermissionMenuTile[] = [
   { id: 'activity', label: 'Log Activity', icon: History, iconWrap: NEUTRAL_ICON_WRAP },
   { id: 'settings', label: 'ตั้งค่า', icon: Settings, iconWrap: NEUTRAL_ICON_WRAP },
 ]
+
+/** ค่าเริ่มต้นสิทธิ์เมนูหลัก — อนุญาตทุกเมนู */
+export function buildDefaultMainPerm(): Record<string, MainMenuPermission> {
+  return Object.fromEntries(
+    PERMISSION_MENU_GRID.map((m) => [m.id, 'allow' as MainMenuPermission]),
+  )
+}

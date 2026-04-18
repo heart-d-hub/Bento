@@ -13,7 +13,8 @@ export type PosSaleRecord = {
   billNo: string
   at: string
   total: number
-  paymentId: PaymentMethodId
+  /** cash | qr | credit | bill (POS สต็อก) หรือ transfer | account | mixed (POS/TAX หลัก) */
+  paymentId: PaymentMethodId | string
   lineCount: number
   /** รายการสินค้า (สำหรับสถิติแดชบอร์ด — บันทึกหลังเวอร์ชันนี้) */
   lines?: PosSaleLine[]

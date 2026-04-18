@@ -25,6 +25,7 @@ import { normalizeCrossBranchRows } from '@/features/inventory/data/branchInvent
 import {
   collectInventoryCarFilterOptions,
   effectiveSellPriceTier,
+  flushProductMasterDbSave,
   formatMmWithHunApprox,
   generateNextTenDigitSku,
   getProductMasterList,
@@ -1316,6 +1317,12 @@ export function ProductDataFileView() {
   useEffect(() => {
     saveProductMasterList(products, { notify: false })
   }, [products])
+
+  useEffect(() => {
+    return () => {
+      void flushProductMasterDbSave()
+    }
+  }, [])
 
   useEffect(() => {
     const onMaster = () => setProducts([...getProductMasterList()])

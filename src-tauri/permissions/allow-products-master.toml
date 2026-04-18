@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-products-master"
+description = "Allows loading and saving product master (แฟ้มสินค้า) JSON in PostgreSQL."
+commands.allow = ["products_master_load", "products_master_replace_all"]

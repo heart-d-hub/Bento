@@ -8,6 +8,7 @@
   "permissions": [
     "allow-show-system-print-dialog",
     "allow-members-db",
+    "allow-products-master",
     "allow-sales-db",
     "core:default",
     "core:window:allow-set-size",

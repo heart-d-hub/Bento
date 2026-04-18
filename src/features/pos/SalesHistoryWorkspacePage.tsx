@@ -180,7 +180,7 @@ export function SalesHistoryWorkspacePage({ className }: SalesHistoryWorkspacePa
               <span className="font-medium">id</span> — รหัสอ้างอิงภายใน (สร้างตอนบันทึกการขาย)
             </li>
             <li>
-              <span className="font-medium">billNo</span> — เลขที่บิล POS (รูปแบบเช่น 1P69-000001)
+              <span className="font-medium">billNo</span> — เลขที่บิล POS (รูปแบบเช่น 1PA69040001)
             </li>
             <li>
               <span className="font-medium">at</span> — เวลาออกบิล (ISO string)

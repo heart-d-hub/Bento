@@ -55,7 +55,8 @@ import {
   type BoxPieceStockState,
   type RollStockState,
 } from '@/features/pos/data/posLiveStock'
-import { nextPosBillNumber } from '@/features/pos/data/posBillSequence'
+import { isTauri } from '@/features/desktop/isTauri'
+import { nextPosBillNumber, nextPosBillNumberForTodayAsync } from '@/features/pos/data/posBillSequence'
 import { getPosCatalogProducts } from '@/features/pos/data/posCatalogMerge'
 import {
   firstPosPriceLevelWithPrice,
@@ -129,11 +130,11 @@ type PosCartContextValue = {
   removeLine: (lineId: string) => void
   clearCart: () => void
   findProducts: (query: string) => InventoryProduct[]
-  completeSale: (paymentId: PaymentMethodId) => {
+  completeSale: (paymentId: PaymentMethodId) => Promise<{
     billNo: string
     total: number
     lines: PosCartLine[]
-  }
+  }>
   lastCompletedBill: { billNo: string; total: number; at: string; lines: PosCartLine[] } | null
   clearLastBill: () => void
   /** เปิดม้วนเต็ม 1 ม้วน → เพิ่มเป็นม้วนเปิด (กก. ตาม nominal) */
@@ -1170,13 +1171,13 @@ export function PosCartProvider({ children }: { children: ReactNode }) {
   const lineCount = useMemo(() => lines.length, [lines])
 
   const completeSale = useCallback(
-    (paymentId: PaymentMethodId) => {
+    async (paymentId: PaymentMethodId) => {
       if (lines.length === 0 || grandTotal <= 0) {
         throw new Error('empty')
       }
       const linesSnapshot = [...lines]
       const total = grandTotal
-      const billNo = nextPosBillNumber()
+      const billNo = isTauri() ? await nextPosBillNumberForTodayAsync() : nextPosBillNumber()
 
       const pieceDeductions: { productId: string; qty: number }[] = []
       let nextRoll = { ...rollStockByProductId }

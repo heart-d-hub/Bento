@@ -6,7 +6,7 @@ import {
   setStaffUsername,
   setStoredBranch,
 } from '@/features/auth/authSession'
-import { MOCK_STAFF_USERS } from '@/features/settings/data/mockStaffUsers'
+import { loadStaffUsers } from '@/features/settings/data/staffUsersStore'
 import { clsx } from 'clsx'
 import { Lock, User } from 'lucide-react'
 import { type FormEvent, useEffect, useId, useState } from 'react'
@@ -20,6 +20,7 @@ export function LoginPage() {
   const formId = useId()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!isLoggedIn()) return
@@ -32,11 +33,24 @@ export function LoginPage() {
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault()
+    setError(null)
     if (!username.trim() || !password.trim()) return
     const u = username.trim()
+    const staff = loadStaffUsers().find((s) => s.username.toLowerCase() === u.toLowerCase()) ?? null
+    if (!staff) {
+      setError('ไม่พบผู้ใช้นี้ในระบบ')
+      return
+    }
+    if (staff.status !== 'active') {
+      setError('บัญชีนี้ถูกระงับการใช้งาน')
+      return
+    }
+    if (staff.password !== password) {
+      setError('รหัสผ่านไม่ถูกต้อง')
+      return
+    }
     setStaffUsername(u)
-    const staff = MOCK_STAFF_USERS.find((s) => s.username.toLowerCase() === u.toLowerCase()) ?? null
-    setStaffRole(staff?.role === 'MANAGER' ? 'admin' : 'staff')
+    setStaffRole(staff.isAdmin || staff.role === 'MANAGER' ? 'admin' : 'staff')
     setLoggedIn(true)
     setStoredBranch(null)
     navigate('/branch')
@@ -100,6 +114,12 @@ export function LoginPage() {
             </div>
           </div>
 
+          {error ? (
+            <p className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-center text-[11px] text-rose-800">
+              {error}
+            </p>
+          ) : null}
+
           <button
             type="submit"
             className="mt-2 w-full rounded-xl bg-slate-800 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-900 active:scale-[0.99]"
@@ -107,6 +127,11 @@ export function LoginPage() {
             เข้าสู่ระบบ
           </button>
         </form>
+
+        <p className="mt-4 text-center text-[10px] leading-relaxed text-slate-500">
+          ผู้ใช้ทดสอบ: <span className="font-mono">ANG</span> / <span className="font-mono">EVE</span> /{' '}
+          <span className="font-mono">STOCK</span> — รหัส <span className="font-mono">bento123</span>
+        </p>
 
         <div className="mt-6 flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-center text-[11px] text-slate-500">
           <button type="button" className="hover:text-slate-800 hover:underline">
@@ -121,7 +146,7 @@ export function LoginPage() {
         </div>
       </div>
 
-      <p className="relative z-10 mt-8 text-[10px] text-slate-400">Bento · mock login — ยังไม่เชื่อมเซิร์ฟเวอร์</p>
+      <p className="relative z-10 mt-6 text-[10px] text-slate-400">Bento — ล็อกอินในเครื่อง (รายชื่อผู้ใช้ตั้งค่าในโค้ดจนกว่าจะเชื่อมเซิร์ฟเวอร์)</p>
     </div>
   )
 }

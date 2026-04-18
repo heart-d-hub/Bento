@@ -1,4 +1,6 @@
 mod members_db;
+mod postgres_pool;
+mod products_db;
 mod sales_db;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -9,10 +11,15 @@ pub fn run() {
       members_db::members_load,
       members_db::members_upsert,
       members_db::members_delete,
+      products_db::products_master_load,
+      products_db::products_master_replace_all,
+      sales_db::database_ping,
       sales_db::sales_create,
       sales_db::sales_day_summary,
       sales_db::sales_history_list,
-      sales_db::sales_get_by_bill_no
+      sales_db::sales_get_by_bill_no,
+      sales_db::pos_bill_peek_next,
+      sales_db::pos_bill_next
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

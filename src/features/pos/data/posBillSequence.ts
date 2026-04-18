@@ -1,14 +1,26 @@
 import { getDeviceLabel } from '@/features/device/deviceSession'
 import { getStoredBranch } from '@/features/auth/authSession'
+import { isTauri } from '@/features/desktop/isTauri'
+import { invoke } from '@tauri-apps/api/core'
+import { localDateYYYYMMDD, parseLocalYYYYMMDD } from '@/features/pos/utils/posLocalDate'
 
 /**
- * เลขบิล POS รูปแบบ: `{เลขเครื่อง}P{ปี พ.ศ. 2 หลัก}-{ลำดับ 6 หลัก}`
- * ตัวอย่าง: เครื่อง PC1 (ดึงเลข 1), พ.ศ. 2569 → `1P69-000001`
+ * เลขบิล POS (ขายปลีก): `{เลขเครื่อง}P{สาขา}{ปี พ.ศ. 2 หลัก}{เดือน}{ลำดับ 4 หลัก}`
+ * เลขที่ใบกำกับภาษี: `{นำสาขา}{เลขเครื่อง}{ปี}{เดือน}{ลำดับ 4 หลัก}`
  *
- * เลขที่ใบกำกับภาษีแยกลำดับ: `{เลขเครื่อง}T{ปี พ.ศ. 2 หลัก}-{ลำดับ 6 หลัก}` เช่น `1T69-000001`
+ * **Tauri:** ลำดับใน Postgres (`PosBillSequenceCounter`)
+ * **เบราว์เซอร์:** localStorage เดิม
  */
-const POS_SEQ_KEY = 'bento.pos.billSeq.v2'
-const TAX_SEQ_KEY = 'bento.pos.taxInvoiceSeq.v2'
+const POS_SEQ_KEY = 'bento.pos.billSeq.v3'
+const TAX_SEQ_KEY = 'bento.pos.taxInvoiceSeq.v4'
+
+export type PosBillSeqPayload = {
+  kind: 'retail' | 'tax'
+  /** YYYY-MM-DD ตามหน้า POS */
+  docDate: string
+  machine: number
+  branchId?: string
+}
 
 export function parseMachineNumberFromLabel(label: string): number {
   const m = label.trim().match(/\d+/)
@@ -18,10 +30,15 @@ export function parseMachineNumberFromLabel(label: string): number {
   return Math.min(n, 99)
 }
 
-/** ปี พ.ศ. 2 หลักท้าย (เช่น 2569 → 69) ตามวันที่เครื่อง */
+/** ปี พ.ศ. 2 หลักท้าย (เช่น 2569 → 69) ตามวันที่เอกสาร */
 export function buddhistEraYearLast2Digits(d: Date = new Date()): number {
   const be = d.getFullYear() + 543
   return be % 100
+}
+
+/** A = อังอะไหล่, S = สมนึกอะไหล่ */
+function branchLetter(): 'A' | 'S' {
+  return getStoredBranch()?.id === 'somneuk' ? 'S' : 'A'
 }
 
 function loadSeqMap(storageKey: string): Record<string, number> {
@@ -44,81 +61,131 @@ function saveSeqMap(storageKey: string, map: Record<string, number>): void {
   }
 }
 
-function seqMapKey(machine: number, yy: number): string {
-  return `${machine}-${yy}`
-}
-
-function seqMapKeyByPrefix(prefix: string, yy: number): string {
-  return `${prefix}-${yy}`
-}
-
-function formatPosBill(machine: number, yy: number, seq: number): string {
-  const seqStr = String(seq).padStart(6, '0')
+function formatRetailPosBill(machine: number, d: Date, seq: number): string {
+  const L = branchLetter()
+  const yy = buddhistEraYearLast2Digits(d)
   const yy2 = String(yy).padStart(2, '0')
-  return `${machine}P${yy2}-${seqStr}`
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const seq4 = String(seq).padStart(4, '0')
+  return `${machine}P${L}${yy2}${mm}${seq4}`
 }
 
-function resolveTaxBranchPrefix(): string {
-  const branchId = getStoredBranch()?.id
-  if (branchId === 'somneuk') return 'SOM'
-  if (branchId === 'ang') return 'ANG'
-  return 'TAX'
+function retailPosSeqStorageKey(machine: number, d: Date): string {
+  const L = branchLetter()
+  const yy = buddhistEraYearLast2Digits(d)
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  return `${machine}-P-${L}-${yy}-${mm}`
 }
 
-function formatTaxInvoice(prefix: string, yy: number, seq: number): string {
-  const seqStr = String(seq).padStart(6, '0')
-  const yy2 = String(yy).padStart(2, '0')
-  return `${prefix}${yy2}-${seqStr}`
-}
-
-function peekNextSeq(machine: number, yy: number, storageKey: string): number {
-  const map = loadSeqMap(storageKey)
-  const key = seqMapKey(machine, yy)
+function peekNextRetailPosSeq(machine: number, d: Date): number {
+  const key = retailPosSeqStorageKey(machine, d)
+  const map = loadSeqMap(POS_SEQ_KEY)
   const prev = map[key]
   return Number.isFinite(prev) && prev >= 1 ? prev + 1 : 1
 }
 
-/** เลขที่บิล POS ถัดไป (ยังไม่เพิ่มลำดับ — แสดงบนหน้าจอก่อนยืนยันขาย) */
+function taxMachinePrefix(): string {
+  const letter = branchLetter()
+  const n = parseMachineNumberFromLabel(getDeviceLabel())
+  const digit = Math.min(Math.max(n, 1), 9)
+  return `${letter}${digit}`
+}
+
+function formatTaxInvoice(d: Date, seq: number): string {
+  const prefix = taxMachinePrefix()
+  const yy = buddhistEraYearLast2Digits(d)
+  const yy2 = String(yy).padStart(2, '0')
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const seq4 = String(seq).padStart(4, '0')
+  return `${prefix}${yy2}${mm}${seq4}`
+}
+
+function taxSeqStorageKey(d: Date): string {
+  const prefix = taxMachinePrefix()
+  const yy = buddhistEraYearLast2Digits(d)
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  return `${prefix}-${yy}-${mm}`
+}
+
+function buildSeqPayload(kind: 'retail' | 'tax', docDate: string): PosBillSeqPayload {
+  return {
+    kind,
+    docDate,
+    machine: parseMachineNumberFromLabel(getDeviceLabel()),
+    branchId: getStoredBranch()?.id,
+  }
+}
+
+/** Tauri: ดึงจาก Postgres */
+export async function peekNextPosBillNumberAsync(docDate: string): Promise<string> {
+  if (!isTauri()) {
+    return peekNextPosBillNumber(parseLocalYYYYMMDD(docDate))
+  }
+  return invoke<string>('pos_bill_peek_next', { payload: buildSeqPayload('retail', docDate) })
+}
+
+export async function peekNextTaxInvoiceNumberAsync(docDate: string): Promise<string> {
+  if (!isTauri()) {
+    return peekNextTaxInvoiceNumber(parseLocalYYYYMMDD(docDate))
+  }
+  return invoke<string>('pos_bill_peek_next', { payload: buildSeqPayload('tax', docDate) })
+}
+
+export async function nextPosBillNumberAsync(docDate: string): Promise<string> {
+  if (!isTauri()) {
+    return nextPosBillNumber(parseLocalYYYYMMDD(docDate))
+  }
+  return invoke<string>('pos_bill_next', { payload: buildSeqPayload('retail', docDate) })
+}
+
+export async function nextTaxInvoiceNumberAsync(docDate: string): Promise<string> {
+  if (!isTauri()) {
+    return nextTaxInvoiceNumber(parseLocalYYYYMMDD(docDate))
+  }
+  return invoke<string>('pos_bill_next', { payload: buildSeqPayload('tax', docDate) })
+}
+
+/** เลขที่บิล POS ถัดไป (ยังไม่เพิ่มลำดับ) — ใช้กับ localStorage / fallback */
 export function peekNextPosBillNumber(d: Date = new Date()): string {
   const machine = parseMachineNumberFromLabel(getDeviceLabel())
-  const yy = buddhistEraYearLast2Digits(d)
-  const seq = peekNextSeq(machine, yy, POS_SEQ_KEY)
-  return formatPosBill(machine, yy, seq)
+  const seq = peekNextRetailPosSeq(machine, d)
+  return formatRetailPosBill(machine, d, seq)
 }
 
 /** เลขที่ใบกำกับภาษีถัดไป (ยังไม่เพิ่มลำดับ) */
 export function peekNextTaxInvoiceNumber(d: Date = new Date()): string {
-  const prefix = resolveTaxBranchPrefix()
-  const yy = buddhistEraYearLast2Digits(d)
+  const key = taxSeqStorageKey(d)
   const map = loadSeqMap(TAX_SEQ_KEY)
-  const key = seqMapKeyByPrefix(prefix, yy)
   const prev = map[key]
   const seq = Number.isFinite(prev) && prev >= 1 ? prev + 1 : 1
-  return formatTaxInvoice(prefix, yy, seq)
+  return formatTaxInvoice(d, seq)
 }
 
-/** เลขที่บิล POS ถัดไป (รันต่อเนื่อง แยกตามเครื่องและปี พ.ศ.) */
+/** เลขที่บิล POS ถัดไป — เพิ่มลำดับ (localStorage) */
 export function nextPosBillNumber(d: Date = new Date()): string {
   const machine = parseMachineNumberFromLabel(getDeviceLabel())
-  const yy = buddhistEraYearLast2Digits(d)
-  const key = seqMapKey(machine, yy)
+  const key = retailPosSeqStorageKey(machine, d)
   const map = loadSeqMap(POS_SEQ_KEY)
   const prev = map[key]
   const nextSeq = Number.isFinite(prev) && prev >= 1 ? prev + 1 : 1
   map[key] = nextSeq
   saveSeqMap(POS_SEQ_KEY, map)
-  return formatPosBill(machine, yy, nextSeq)
+  return formatRetailPosBill(machine, d, nextSeq)
 }
 
-/** เลขที่ใบกำกับภาษีถัดไป (ลำดับแยกจากบิล POS) */
+/** เลขที่ใบกำกับภาษีถัดไป */
 export function nextTaxInvoiceNumber(d: Date = new Date()): string {
-  const prefix = resolveTaxBranchPrefix()
-  const yy = buddhistEraYearLast2Digits(d)
-  const key = seqMapKeyByPrefix(prefix, yy)
+  const key = taxSeqStorageKey(d)
   const map = loadSeqMap(TAX_SEQ_KEY)
   const prev = map[key]
   const nextSeq = Number.isFinite(prev) && prev >= 1 ? prev + 1 : 1
   map[key] = nextSeq
   saveSeqMap(TAX_SEQ_KEY, map)
-  return formatTaxInvoice(prefix, yy, nextSeq)
+  return formatTaxInvoice(d, nextSeq)
+}
+
+/** สำหรับตะกร้า POS (วันที่ = วันนี้ตาม local) — Tauri ใช้ DB */
+export async function nextPosBillNumberForTodayAsync(): Promise<string> {
+  const docDate = localDateYYYYMMDD(new Date())
+  return nextPosBillNumberAsync(docDate)
 }

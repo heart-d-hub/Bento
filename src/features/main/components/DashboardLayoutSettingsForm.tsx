@@ -78,7 +78,7 @@ export function DashboardLayoutSettingsForm() {
         <p className="mb-2 text-xs leading-relaxed text-slate-600">
           เลขที่บิลหน้าขายใช้รูปแบบ{' '}
           <span className="font-mono text-[11px] text-slate-800">{'{เครื่อง}P{ปี พ.ศ. 2 หลัก}-{ลำดับ 6 หลัก}'}</span>{' '}
-          เช่น <span className="font-mono text-[11px]">1P69-000001</span> (เครื่อง PC1, พ.ศ. 2569) — ลำดับรันแยกตามเครื่องและปี
+          เช่น <span className="font-mono text-[11px]">1PA69040001</span> (PC1, อังอะไหล่, พ.ศ. 69 เดือน 4) — ลำดับรีทุกเดือน
         </p>
         <p className="text-xs leading-relaxed text-slate-600">
           ตั้งชื่อเครื่องเป็น <span className="font-medium text-slate-800">PC1 / PC2</span> ในแถบบนของโปรแกรม (เฉพาะแอดมิน) ระบบจะดึงเลขจากชื่อเครื่องอัตโนมัติ — ปัจจุบัน:{' '}

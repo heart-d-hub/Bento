@@ -15,6 +15,8 @@ export type StaffUser = {
   password: string
   /** หน้าที่ / ตำแหน่ง */
   role: string
+  /** ผู้ดูแลระบบ — สิทธิ์ครบทุกเมนู (mock; ระบบจริงผูกกับ RBAC) */
+  isAdmin: boolean
   /** ISO date */
   startDate: string
   status: StaffStatus
@@ -49,8 +51,9 @@ export const MOCK_STAFF_USERS: StaffUser[] = [
     displayNamePos: 'Ang — แคชเชียร์',
     nationalId: '1234567890123',
     photoDataUrl: null,
-    password: '••••••••',
+    password: 'bento123',
     role: 'MANAGER',
+    isAdmin: true,
     startDate: '2020-01-15',
     status: 'active',
   },
@@ -60,8 +63,9 @@ export const MOCK_STAFF_USERS: StaffUser[] = [
     displayNamePos: 'Eve',
     nationalId: '9876543210987',
     photoDataUrl: null,
-    password: '••••••••',
+    password: 'bento123',
     role: 'SALE',
+    isAdmin: false,
     startDate: '2022-06-01',
     status: 'active',
   },
@@ -71,8 +75,9 @@ export const MOCK_STAFF_USERS: StaffUser[] = [
     displayNamePos: 'คลัง A',
     nationalId: '5555555555555',
     photoDataUrl: null,
-    password: '••••••••',
+    password: 'bento123',
     role: 'STOCK',
+    isAdmin: false,
     startDate: '2021-03-20',
     status: 'active',
   },

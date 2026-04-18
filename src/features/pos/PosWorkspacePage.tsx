@@ -1,10 +1,14 @@
 import {
-  nextPosBillNumber,
-  nextTaxInvoiceNumber,
+  nextPosBillNumberAsync,
+  nextTaxInvoiceNumberAsync,
   peekNextPosBillNumber,
+  peekNextPosBillNumberAsync,
   peekNextTaxInvoiceNumber,
+  peekNextTaxInvoiceNumberAsync,
 } from '@/features/pos/data/posBillSequence'
-import { loadMembers, MEMBERS_CHANGED_EVENT } from '@/features/members/data/membersStore'
+import { isTauri } from '@/features/desktop/isTauri'
+import type { Member } from '@/features/members/data/mockMembers'
+import { loadMembers, loadMembersAsync, MEMBERS_CHANGED_EVENT } from '@/features/members/data/membersStore'
 import { BRANCHES } from '@/features/auth/branches'
 import { getStoredBranch } from '@/features/auth/authSession'
 import { getProductMasterBySku, masterSearchExtrasForSku } from '@/features/inventory/data/productMasterData'
@@ -21,6 +25,7 @@ import { getStlBoltPairForMaleProduct } from '@/features/promotions/stlBoltPairR
 import { computeStlVolumePromo } from '@/features/promotions/stlVolumePromo'
 import { createPosSaleAsync } from '@/features/pos/data/posSalesDb'
 import { POS_SALE_RECORDED_EVENT } from '@/features/pos/data/posSalesHistory'
+import { localDateYYYYMMDD, parseLocalYYYYMMDD } from '@/features/pos/utils/posLocalDate'
 import { INITIAL_VEHICLE_CATALOG } from '@/features/vehicle/data/mockCatalog'
 import { normalizeCatalog } from '@/features/vehicle/data/normalizeCatalog'
 import { VEHICLE_CATALOG_STORAGE_KEY } from '@/features/vehicle/data/vehicleCatalogStorageKeys'
@@ -29,24 +34,27 @@ import { clsx } from 'clsx'
 import {
   Activity,
   Banknote,
+  BookOpen,
   CheckCircle2,
   Building2,
   CalendarClock,
   Clock,
   ClipboardList,
-  FileText,
-  Layers,
   MapPin,
+  Medal,
+  Pause,
   Printer,
   QrCode,
   Receipt,
   Search,
+  Play,
   Send,
   ShoppingCart,
   Sun,
   Moon,
   Trash2,
   Users,
+  Wallet,
   X,
 } from 'lucide-react'
 import { createPortal } from 'react-dom'
@@ -115,6 +123,9 @@ const WALK_IN_CUSTOMER: Customer = {
   points: 0,
 }
 
+/** พักบิลธรรมดา vs แจ้งยอดแล้วพักรอให้คนอื่นโอน */
+type SuspendedBillKind = 'hold' | 'await_transfer'
+
 type SuspendedBill = {
   id: string
   createdAt: number
@@ -131,6 +142,44 @@ type SuspendedBill = {
   }
   billDiscount: string
   applyRounding: boolean
+  /** ไม่มี = พักบิลธรรมดา (รุ่นเก่า) */
+  suspendKind?: SuspendedBillKind
+}
+
+function suspendedCartSubtotal(cart: CartLine[]): number {
+  return round2(cart.reduce((s, line) => s + round2(line.price * line.qty - line.discount), 0))
+}
+
+/** ยอดแสดงในรายการบิลพัก (หักส่วนลดท้ายบิลตัวเลข — ไม่รวม VAT/ปัดเศษเต็มรูปแบบ) */
+function suspendedBillGrandDisplay(b: SuspendedBill): number {
+  const sub = suspendedCartSubtotal(b.cart)
+  const billDisc = Number.parseFloat(b.billDiscount || '0') || 0
+  return round2(Math.max(0, sub - billDisc))
+}
+
+function formatSuspendedBillTime(ts: number): string {
+  return new Date(ts).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', hour12: false })
+}
+
+function formatThaiBillNoticeDate(docDate: string): string {
+  const d = parseLocalYYYYMMDD(docDate)
+  if (Number.isNaN(d.getTime())) return docDate
+  return d.toLocaleDateString('th-TH', { day: 'numeric', month: 'numeric', year: 'numeric' })
+}
+
+/** รอบเครดิตตามเดือนของวันที่เอกสาร (พ.ศ.) */
+function formatCreditCycleRangeFromDocDate(docDate: string): string {
+  const d = parseLocalYYYYMMDD(docDate)
+  if (Number.isNaN(d.getTime())) return '—'
+  const start = new Date(d.getFullYear(), d.getMonth(), 1)
+  const end = new Date(d.getFullYear(), d.getMonth() + 1, 0)
+  const fmt = (x: Date) =>
+    x.toLocaleDateString('th-TH', { day: '2-digit', month: '2-digit', year: 'numeric' })
+  return `${fmt(start)} - ${fmt(end)}`
+}
+
+function isSuspendedAwaitTransfer(b: SuspendedBill): boolean {
+  return (b.suspendKind ?? 'hold') === 'await_transfer'
 }
 
 type VehicleFacetRow = {
@@ -198,7 +247,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   const [showProductModal, setShowProductModal] = useState(false)
   const [showCheckoutModal, setShowCheckoutModal] = useState(false)
   const [showSuspendModal, setShowSuspendModal] = useState(false)
-  const [showPreBillModal, setShowPreBillModal] = useState(false)
+  const [showAmountNoticeModal, setShowAmountNoticeModal] = useState(false)
   const [showPickingModal, setShowPickingModal] = useState(false)
   const [showQuotationModal, setShowQuotationModal] = useState(false)
   const [showQRModal, setShowQRModal] = useState(false)
@@ -215,14 +264,26 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   const [disabledWasherGiftByMaleCode, setDisabledWasherGiftByMaleCode] = useState<Record<string, boolean>>({})
 
   const [memberTick, setMemberTick] = useState(0)
+  const [posMemberRows, setPosMemberRows] = useState<Member[]>(() => loadMembers())
+
   useEffect(() => {
     const on = () => setMemberTick((n) => n + 1)
     window.addEventListener(MEMBERS_CHANGED_EVENT, on)
     return () => window.removeEventListener(MEMBERS_CHANGED_EVENT, on)
   }, [])
 
+  useEffect(() => {
+    let alive = true
+    void loadMembersAsync().then((rows) => {
+      if (alive) setPosMemberRows(rows)
+    })
+    return () => {
+      alive = false
+    }
+  }, [memberTick])
+
   const mockMembers: Customer[] = useMemo(() => {
-    const members = loadMembers()
+    const members = posMemberRows
       .filter((m) => m.status !== 'blacklist')
       .map((m) => ({
         accountCode: m.memberCode,
@@ -239,20 +300,64 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
         points: m.pointsBalance ?? 0,
       }))
     return [WALK_IN_CUSTOMER, ...members]
-  }, [memberTick])
+  }, [posMemberRows])
 
   const walkInCustomer = useMemo(() => mockMembers.find((m) => m.accountCode === 'WK-00001') ?? WALK_IN_CUSTOMER, [mockMembers])
 
   const [customer, setCustomer] = useState<Customer>(WALK_IN_CUSTOMER)
 
-  const [docInfo, setDocInfo] = useState(() => ({
-    posBillNo: peekNextPosBillNumber(),
-    taxInvoiceNo: peekNextTaxInvoiceNumber(),
-    docDate: new Date().toISOString().split('T')[0],
-    employee: '001 สมชาย (Player 1)',
-    vatType: 'exclude' as 'exclude' | 'include' | 'none',
-    remark: '',
-  }))
+  const [docInfo, setDocInfo] = useState(() => {
+    const d = new Date()
+    return {
+      posBillNo: peekNextPosBillNumber(d),
+      taxInvoiceNo: peekNextTaxInvoiceNumber(d),
+      docDate: localDateYYYYMMDD(d),
+      employee: '001 สมชาย (Player 1)',
+      vatType: 'exclude' as 'exclude' | 'include' | 'none',
+      remark: '',
+    }
+  })
+
+  useEffect(() => {
+    const docDate = docInfo.docDate
+    const d = parseLocalYYYYMMDD(docDate)
+    if (!isTauri()) {
+      setDocInfo((prev) => ({
+        ...prev,
+        posBillNo: peekNextPosBillNumber(d),
+        taxInvoiceNo: peekNextTaxInvoiceNumber(d),
+      }))
+      return
+    }
+    let cancel = false
+    void (async () => {
+      try {
+        const [pos, tax] = await Promise.all([
+          peekNextPosBillNumberAsync(docDate),
+          peekNextTaxInvoiceNumberAsync(docDate),
+        ])
+        if (!cancel) {
+          setDocInfo((prev) => (prev.docDate !== docDate ? prev : { ...prev, posBillNo: pos, taxInvoiceNo: tax }))
+        }
+      } catch (e) {
+        console.error('[pos] bill sequence peek failed', e)
+        if (!cancel) {
+          setDocInfo((prev) =>
+            prev.docDate !== docDate
+              ? prev
+              : {
+                  ...prev,
+                  posBillNo: peekNextPosBillNumber(d),
+                  taxInvoiceNo: peekNextTaxInvoiceNumber(d),
+                },
+          )
+        }
+      }
+    })()
+    return () => {
+      cancel = true
+    }
+  }, [docInfo.docDate])
 
   const [cart, setCart] = useState<CartLine[]>([])
 
@@ -359,6 +464,29 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   }, [vehicleCatalog])
 
   const isWalkIn = customer.accountCode === 'WK-00001'
+
+  const creditBar = useMemo(() => {
+    const limit = Math.max(0, customer.creditLimit)
+    const usedRaw = Math.max(0, customer.creditUsed)
+    const used = limit > 0 ? Math.min(usedRaw, limit) : usedRaw
+    const remaining = Math.max(0, limit - used)
+    const pct = limit > 0 ? Math.min(100, (remaining / limit) * 100) : 0
+    return { limit, used, remaining, pct }
+  }, [customer.creditLimit, customer.creditUsed])
+
+  const creditCycleDisplay = useMemo(() => {
+    if (isWalkIn) return 'เงินสด'
+    const m = posMemberRows.find((row) => row.memberCode === customer.accountCode)
+    if (!m) return 'เงินสด'
+    const hasCreditProfile =
+      (m.creditLimitBaht ?? 0) > 0 ||
+      (m.creditTermMonths ?? 0) > 0 ||
+      (m.creditTermDays ?? 0) > 0 ||
+      m.payAtMonthEnd ||
+      (m.cutOffDayOfMonth != null && m.cutOffDayOfMonth > 0)
+    if (!hasCreditProfile) return 'เงินสด'
+    return formatCreditCycleRangeFromDocDate(docInfo.docDate)
+  }, [isWalkIn, customer.accountCode, posMemberRows, docInfo.docDate])
 
   const filteredMembers = useMemo(() => {
     const q = memberSearchQuery.trim().toLowerCase()
@@ -702,8 +830,26 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     return { subtotal, discountAmt, beforeVat, vatAmount, rawGrandTotal, roundingAdjustment, grandTotal }
   }, [applyRounding, billDiscount, pricedCart, docInfo.vatType, mode])
 
+  const hasAwaitTransferSuspended = useMemo(
+    () => suspendedBills.some(isSuspendedAwaitTransfer),
+    [suspendedBills],
+  )
+
   const receivedAmount = useMemo(() => Number.parseFloat(cashReceived || '0') || 0, [cashReceived])
   const changeAmount = useMemo(() => receivedAmount - totals.grandTotal, [receivedAmount, totals.grandTotal])
+
+  const quickCashAmounts = useMemo(() => {
+    const total = totals.grandTotal
+    if (total <= 0) return []
+    const amounts = new Set<number>()
+    const denoms = [10, 20, 50, 100, 500, 1000]
+    denoms.forEach((d) => {
+      let rounded = Math.ceil(total / d) * d
+      if (rounded <= total) rounded += d
+      amounts.add(rounded)
+    })
+    return Array.from(amounts).sort((a, b) => a - b).slice(0, 3)
+  }, [totals.grandTotal])
 
   const mixedCashNum = useMemo(() => Number.parseFloat(mixedCashAmount || '0') || 0, [mixedCashAmount])
   const mixedTransferNum = useMemo(() => Number.parseFloat(mixedTransferAmount || '0') || 0, [mixedTransferAmount])
@@ -985,6 +1131,35 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     setShowCheckoutModal(true)
   }
 
+  const handleCheckoutPaymentTypeChange = (type: CheckoutPaymentType) => {
+    setCheckoutPaymentType(type)
+    setCashReceived('')
+    setSelectedBank('')
+    setMixedCashAmount('')
+    setMixedTransferAmount('')
+  }
+
+  const handleCashNumpad = (val: string) => {
+    const gt = totals.grandTotal
+    if (val === 'C') {
+      setCashReceived('')
+      return
+    }
+    if (val === 'DEL') {
+      setCashReceived((prev) => prev.slice(0, -1))
+      return
+    }
+    if (val === 'EXACT') {
+      setCashReceived(gt.toFixed(2))
+      return
+    }
+    if (!/^\d$/.test(val)) return
+    setCashReceived((prev) => {
+      if (prev.length >= 8) return prev
+      return prev + val
+    })
+  }
+
   const MIX_TOTAL_EPS = 0.01
 
   const canSubmitCheckout = useMemo(() => {
@@ -1088,7 +1263,10 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     setIsSavingCheckout(true)
     try {
       for (let attempt = 0; attempt < 10; attempt += 1) {
-        issuedDocNo = mode === 'retail' ? nextPosBillNumber() : nextTaxInvoiceNumber()
+        issuedDocNo =
+          mode === 'retail'
+            ? await nextPosBillNumberAsync(docInfo.docDate)
+            : await nextTaxInvoiceNumberAsync(docInfo.docDate)
         const saleId = `sale-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
         try {
           await createPosSaleAsync({
@@ -1133,11 +1311,34 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
       )
       window.dispatchEvent(new CustomEvent(POS_SALE_RECORDED_EVENT))
 
-      setDocInfo((prev) => ({
-        ...prev,
-        posBillNo: peekNextPosBillNumber(),
-        taxInvoiceNo: peekNextTaxInvoiceNumber(),
-      }))
+      if (isTauri()) {
+        try {
+          const [pos, tax] = await Promise.all([
+            peekNextPosBillNumberAsync(docInfo.docDate),
+            peekNextTaxInvoiceNumberAsync(docInfo.docDate),
+          ])
+          setDocInfo((prev) => ({ ...prev, posBillNo: pos, taxInvoiceNo: tax }))
+        } catch (e) {
+          console.error('[pos] bill sequence peek after save failed', e)
+          setDocInfo((prev) => {
+            const d = parseLocalYYYYMMDD(prev.docDate)
+            return {
+              ...prev,
+              posBillNo: peekNextPosBillNumber(d),
+              taxInvoiceNo: peekNextTaxInvoiceNumber(d),
+            }
+          })
+        }
+      } else {
+        setDocInfo((prev) => {
+          const d = parseLocalYYYYMMDD(prev.docDate)
+          return {
+            ...prev,
+            posBillNo: peekNextPosBillNumber(d),
+            taxInvoiceNo: peekNextTaxInvoiceNumber(d),
+          }
+        })
+      }
       closeCheckoutModal()
       clearCurrentBill()
     } finally {
@@ -1145,7 +1346,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     }
   }
 
-  const handleSuspendBill = () => {
+  const handleSuspendBill = (suspendKind: SuspendedBillKind = 'hold') => {
     if (!cart.length) return
     const next: SuspendedBill = {
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -1156,10 +1357,11 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
       docInfo,
       billDiscount,
       applyRounding,
+      suspendKind,
     }
     setSuspendedBills((prev) => [next, ...prev])
     setShowSuspendModal(false)
-    setShowPreBillModal(false)
+    setShowAmountNoticeModal(false)
     setShowPickingModal(false)
     setShowQuotationModal(false)
     clearCurrentBill()
@@ -1175,6 +1377,11 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     setApplyRounding(Boolean(bill.applyRounding))
     setSuspendedBills((prev) => prev.filter((b) => b.id !== bill.id))
     setShowSuspendModal(false)
+  }
+
+  const removeSuspendedBill = (id: string) => {
+    if (!window.confirm('ลบบิลที่พักไว้รายการนี้? จะไม่สามารถเรียกคืนได้')) return
+    setSuspendedBills((prev) => prev.filter((b) => b.id !== id))
   }
 
   return (
@@ -1204,7 +1411,10 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
             <button
               type="button"
               onClick={() => setShowSuspendModal(true)}
-              className="relative inline-flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[10px] font-black uppercase tracking-widest text-amber-800 shadow-sm transition hover:bg-amber-100 dark:border-amber-700/50 dark:bg-amber-900/20 dark:text-amber-400 dark:hover:bg-amber-900/35 pos-720p:px-2 pos-720p:py-1 pos-720p:text-[9px]"
+              className={clsx(
+                'relative inline-flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[10px] font-black uppercase tracking-widest text-amber-800 shadow-sm transition hover:bg-amber-100 dark:border-amber-700/50 dark:bg-amber-900/20 dark:text-amber-400 dark:hover:bg-amber-900/35 pos-720p:px-2 pos-720p:py-1 pos-720p:text-[9px]',
+                hasAwaitTransferSuspended && 'ring-2 ring-pink-400/90 ring-offset-2 ring-offset-white dark:ring-pink-500/80 dark:ring-offset-[#0d0f17]',
+              )}
             >
               <Clock className="size-4 animate-pulse" aria-hidden />
               บิลที่พักไว้
@@ -1278,7 +1488,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                     )}
                   >
                     <option value="walkin">Walk-in</option>
-                    <option value="member">สมาชิก/ลูกหนี้</option>
+                    <option value="member">สมาชิกระบบ</option>
                   </select>
                   <div className="relative min-w-0 w-full max-w-[14rem] sm:w-56 sm:max-w-none">
                     <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3 -translate-y-1/2 text-slate-400 dark:text-cyan-500/50" />
@@ -1286,7 +1496,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                       id="pos-member-search"
                       value={memberSearchQuery}
                       onChange={(e) => setMemberSearchQuery(e.target.value)}
-                      placeholder="ค้นหาลูกค้า..."
+                      placeholder="สแกนหรือค้นหาลูกค้า..."
                       className="w-full rounded-full border border-slate-200 bg-slate-50 py-1 pl-8 pr-8 text-[10px] font-semibold text-slate-800 outline-none placeholder:text-slate-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-cyan-50 dark:placeholder:text-slate-600 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30"
                     />
                     <button
@@ -1301,74 +1511,166 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                 </div>
               </div>
 
-              <div className="grid grid-cols-12 gap-2 pos-720p:gap-1.5">
-                <div className="col-span-12 sm:col-span-3 pos-720p:col-span-4">
-                  <label className="mb-0.5 block text-[9px] font-black uppercase tracking-widest text-blue-600/80 dark:text-cyan-500/70">
-                    รหัสลูกค้า
-                  </label>
-                  <input
-                    value={customer.accountCode}
-                    readOnly
-                    className="w-full cursor-default rounded border border-slate-200 bg-slate-100 px-2 py-1 text-[11px] font-black text-purple-700 outline-none dark:border-[#1e2233] dark:bg-[#050508]/50 dark:text-fuchsia-400"
-                  />
+              {mode === 'retail' ? (
+                <div className="grid grid-cols-12 gap-2 pos-720p:gap-1.5">
+                  <div className="col-span-12 sm:col-span-3 pos-720p:col-span-4">
+                    <label className="mb-0.5 block text-[9px] font-black uppercase tracking-widest text-blue-600/80 dark:text-cyan-500/70">
+                      รหัสลูกค้า
+                    </label>
+                    <input
+                      value={customer.accountCode}
+                      readOnly
+                      className="w-full cursor-default rounded border border-slate-200 bg-slate-100 px-2 py-1 text-[11px] font-black text-purple-700 outline-none dark:border-[#1e2233] dark:bg-[#050508]/50 dark:text-fuchsia-400"
+                    />
+                  </div>
+                  <div className="col-span-12 sm:col-span-9 pos-720p:col-span-8">
+                    <label className="mb-0.5 block text-[9px] font-black uppercase tracking-widest text-blue-600/80 dark:text-cyan-500/70">
+                      ชื่อลูกค้า/บริษัท
+                    </label>
+                    <input
+                      value={customer.name}
+                      onChange={(e) => setCustomer((prev) => ({ ...prev, name: e.target.value }))}
+                      className="w-full rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-cyan-50 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30"
+                    />
+                  </div>
+
+                  <div className="col-span-12 sm:col-span-4">
+                    <label className="mb-0.5 block text-[9px] font-black uppercase tracking-widest text-blue-600/80 dark:text-cyan-500/70">
+                      รอบเครดิต
+                    </label>
+                    <input
+                      readOnly
+                      value={creditCycleDisplay}
+                      className="w-full cursor-default rounded border border-slate-200 bg-slate-100 px-2 py-1.5 text-[11px] font-semibold text-slate-600 outline-none dark:border-[#2a2d3e] dark:bg-[#0d0f17]/80 dark:text-slate-400"
+                    />
+                  </div>
+                  <div className="col-span-12 sm:col-span-4">
+                    <label className="mb-0.5 block text-[9px] font-black uppercase tracking-widest text-amber-800/90 dark:text-amber-400/90">
+                      แต้มสะสม
+                    </label>
+                    <div className="relative flex items-center justify-between gap-1.5 rounded border border-amber-200 bg-amber-50/80 px-2 py-1.5 dark:border-amber-600/40 dark:bg-amber-950/25">
+                      <span className="font-mono text-[11px] font-bold tabular-nums leading-none text-amber-900 dark:text-amber-200">
+                        {customer.points.toLocaleString('th-TH')}
+                      </span>
+                      <Medal className="size-4 shrink-0 text-amber-400 dark:text-amber-500" aria-hidden />
+                    </div>
+                  </div>
+                  <div className="col-span-12 flex min-h-0 flex-col justify-center sm:col-span-4">
+                    <div className="mb-1 flex items-start justify-between gap-2 text-[9px] font-black uppercase tracking-widest text-slate-600 dark:text-slate-400">
+                      <span>วงเงินเครดิต</span>
+                      {creditBar.limit > 0 ? (
+                        <span className="text-emerald-600 dark:text-emerald-400">
+                          เหลือ: {creditBar.remaining.toLocaleString('th-TH')}
+                        </span>
+                      ) : (
+                        <span className="font-semibold normal-case text-slate-500 dark:text-slate-500">เงินสด</span>
+                      )}
+                    </div>
+                    <div
+                      className="h-3 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700"
+                      role="progressbar"
+                      aria-valuenow={creditBar.limit > 0 ? Math.round(creditBar.pct) : 0}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                    >
+                      <div
+                        className="h-full rounded-full bg-gradient-to-r from-emerald-600 to-emerald-400 transition-[width] duration-300"
+                        style={{ width: creditBar.limit > 0 ? `${creditBar.pct}%` : '0%' }}
+                      />
+                    </div>
+                  </div>
                 </div>
-                <div className="col-span-12 sm:col-span-9 pos-720p:col-span-8">
-                  <label className="mb-0.5 block text-[9px] font-black uppercase tracking-widest text-blue-600/80 dark:text-cyan-500/70">
-                    ชื่อลูกค้า/บริษัท
-                  </label>
-                  <input
-                    value={customer.name}
-                    onChange={(e) => setCustomer((prev) => ({ ...prev, name: e.target.value }))}
-                    className={clsx(
-                      'w-full rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-cyan-50 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30',
-                      '',
-                    )}
-                  />
+              ) : (
+                <div className="grid grid-cols-12 gap-2 pos-720p:gap-1.5">
+                  <div className="col-span-12 sm:col-span-3">
+                    <label className="mb-0.5 block text-[9px] font-black uppercase tracking-widest text-blue-600/80 dark:text-cyan-500/70">
+                      รหัสลูกค้า
+                    </label>
+                    <input
+                      value={customer.accountCode}
+                      readOnly
+                      className="w-full cursor-default rounded border border-slate-200 bg-slate-100 px-2 py-1 text-[11px] font-black text-purple-700 outline-none dark:border-[#1e2233] dark:bg-[#050508]/50 dark:text-fuchsia-400"
+                    />
+                  </div>
+                  <div className="col-span-12 sm:col-span-5">
+                    <label className="mb-0.5 block text-[9px] font-black uppercase tracking-widest text-blue-600/80 dark:text-cyan-500/70">
+                      ชื่อลูกค้า/บริษัท
+                    </label>
+                    <input
+                      value={customer.name}
+                      onChange={(e) => setCustomer((prev) => ({ ...prev, name: e.target.value }))}
+                      className="w-full rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-cyan-50 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30"
+                    />
+                  </div>
+                  <div className="col-span-12 sm:col-span-4">
+                    <label className="mb-0.5 block text-[9px] font-black uppercase tracking-widest text-blue-600/80 dark:text-cyan-500/70">
+                      เลขผู้เสียภาษี
+                    </label>
+                    <input
+                      value={customer.taxId}
+                      onChange={(e) => setCustomer((prev) => ({ ...prev, taxId: e.target.value }))}
+                      className="w-full rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-cyan-50 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30"
+                    />
+                  </div>
+
+                  <div className="col-span-12 sm:col-span-6">
+                    <label className="mb-0.5 flex items-center gap-1 text-[9px] font-black uppercase tracking-widest text-blue-600/80 dark:text-cyan-500/70">
+                      <MapPin className="size-3 shrink-0" aria-hidden />
+                      ที่อยู่
+                    </label>
+                    <input
+                      value={customer.address}
+                      onChange={(e) => setCustomer((prev) => ({ ...prev, address: e.target.value }))}
+                      className="w-full rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-cyan-50 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30"
+                    />
+                  </div>
+                  <div className="col-span-12 sm:col-span-2">
+                    <label className="mb-0.5 block text-[9px] font-black uppercase tracking-widest text-blue-600/80 dark:text-cyan-500/70">
+                      รอบเครดิต
+                    </label>
+                    <input
+                      readOnly
+                      value={creditCycleDisplay}
+                      className="w-full cursor-default rounded border border-slate-200 bg-slate-100 px-2 py-1.5 text-[11px] font-semibold text-slate-600 outline-none dark:border-[#2a2d3e] dark:bg-[#0d0f17]/80 dark:text-slate-400"
+                    />
+                  </div>
+                  <div className="col-span-12 sm:col-span-2">
+                    <label className="mb-0.5 block text-[9px] font-black uppercase tracking-widest text-amber-800/90 dark:text-amber-400/90">
+                      แต้มสะสม
+                    </label>
+                    <div className="relative flex items-center justify-between gap-1.5 rounded border border-amber-200 bg-amber-50/80 px-2 py-1.5 dark:border-amber-600/40 dark:bg-amber-950/25">
+                      <span className="min-w-0 truncate font-mono text-[11px] font-bold tabular-nums leading-none text-amber-900 dark:text-amber-200">
+                        {customer.points.toLocaleString('th-TH')}
+                      </span>
+                      <Medal className="size-4 shrink-0 text-amber-400 dark:text-amber-500" aria-hidden />
+                    </div>
+                  </div>
+                  <div className="col-span-12 flex min-h-0 flex-col justify-center sm:col-span-2">
+                    <div className="mb-1 flex items-start justify-between gap-1 text-[9px] font-black uppercase tracking-widest text-slate-600 dark:text-slate-400">
+                      <span className="leading-tight">วงเงินเครดิต</span>
+                      {creditBar.limit > 0 ? (
+                        <span className="shrink-0 text-emerald-600 dark:text-emerald-400">
+                          เหลือ: {creditBar.remaining.toLocaleString('th-TH')}
+                        </span>
+                      ) : (
+                        <span className="shrink-0 font-semibold normal-case text-slate-500 dark:text-slate-500">เงินสด</span>
+                      )}
+                    </div>
+                    <div
+                      className="h-3 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700"
+                      role="progressbar"
+                      aria-valuenow={creditBar.limit > 0 ? Math.round(creditBar.pct) : 0}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                    >
+                      <div
+                        className="h-full rounded-full bg-gradient-to-r from-emerald-600 to-emerald-400 transition-[width] duration-300"
+                        style={{ width: creditBar.limit > 0 ? `${creditBar.pct}%` : '0%' }}
+                      />
+                    </div>
+                  </div>
                 </div>
-                <div className="col-span-6 sm:col-span-4 pos-720p:col-span-4">
-                  <label className="mb-0.5 block text-[9px] font-black uppercase tracking-widest text-blue-600/80 dark:text-cyan-500/70">
-                    เลขผู้เสียภาษี
-                  </label>
-                  <input
-                    value={customer.taxId}
-                    onChange={(e) => setCustomer((prev) => ({ ...prev, taxId: e.target.value }))}
-                    disabled={mode === 'retail'}
-                    className={clsx(
-                      'w-full rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-cyan-50 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30',
-                      mode === 'retail' ? 'cursor-not-allowed opacity-60' : '',
-                    )}
-                  />
-                </div>
-                <div className="col-span-6 sm:col-span-2 pos-720p:col-span-2">
-                  <label className="mb-0.5 block text-[9px] font-black uppercase tracking-widest text-blue-600/80 dark:text-cyan-500/70">
-                    สาขา
-                  </label>
-                  <input
-                    value={customer.branch}
-                    onChange={(e) => setCustomer((prev) => ({ ...prev, branch: e.target.value }))}
-                    disabled={mode === 'retail'}
-                    className={clsx(
-                      'w-full rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-cyan-50 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30',
-                      mode === 'retail' ? 'cursor-not-allowed opacity-60' : '',
-                    )}
-                  />
-                </div>
-                <div className="col-span-12 sm:col-span-6 pos-720p:col-span-6">
-                  <label className="mb-0.5 flex items-center gap-1 text-[9px] font-black uppercase tracking-widest text-blue-600/80 dark:text-cyan-500/70">
-                    <MapPin className="size-3" aria-hidden />
-                    ที่อยู่
-                  </label>
-                  <input
-                    value={customer.address}
-                    onChange={(e) => setCustomer((prev) => ({ ...prev, address: e.target.value }))}
-                    disabled={mode === 'retail'}
-                    className={clsx(
-                      'w-full rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-cyan-50 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30',
-                      mode === 'retail' ? 'cursor-not-allowed opacity-60' : '',
-                    )}
-                  />
-                </div>
-              </div>
+              )}
 
             </section>
 
@@ -1777,7 +2079,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
               <div className="grid grid-cols-2 gap-2 border-t border-slate-200 bg-white/80 p-3 dark:border-[#2a2d3e] dark:bg-[#0d0f17]/60 pos-720p:gap-1.5 pos-720p:p-2">
                 <button
                   type="button"
-                  onClick={handleSuspendBill}
+                  onClick={() => handleSuspendBill('hold')}
                   disabled={!cart.length}
                   className={clsx(
                     'inline-flex items-center justify-center gap-1.5 rounded-lg border px-2.5 py-2 text-[10px] font-black uppercase tracking-widest shadow-sm transition pos-720p:gap-1 pos-720p:px-2 pos-720p:py-1.5 pos-720p:text-[9px]',
@@ -1792,7 +2094,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                 <button
                   type="button"
                   onClick={() => {
-                    if (cart.length) setShowPreBillModal(true)
+                    if (cart.length) setShowAmountNoticeModal(true)
                   }}
                   disabled={!cart.length}
                   className={clsx(
@@ -1802,8 +2104,8 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                       : 'cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-slate-600',
                   )}
                 >
-                  <FileText className="size-4 shrink-0 pos-720p:size-3.5" aria-hidden />
-                  พรีบิล
+                  <Send className="size-4 shrink-0 pos-720p:size-3.5" aria-hidden />
+                  แจ้งยอด
                 </button>
                 <button
                   type="button"
@@ -1862,55 +2164,125 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
         typeof document !== 'undefined' &&
         createPortal(
           <div
-            className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-sm dark:bg-black/70"
+            className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-600/35 p-4 backdrop-blur-md dark:bg-slate-950/50"
             onMouseDown={(e) => {
               if (e.target === e.currentTarget) setShowSuspendModal(false)
             }}
           >
-            <div className="w-full max-w-2xl overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-[#2a2d3e] dark:bg-[#0d0f17]">
-              <div className="flex items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 p-4 dark:border-[#2a2d3e] dark:bg-[#12141c]">
-                <h3 className="flex items-center gap-2 text-sm font-black uppercase tracking-widest text-slate-800 dark:text-slate-100">
-                  <Clock className="size-4 text-amber-600 dark:text-amber-400" aria-hidden />
-                  บิลที่พักไว้
-                </h3>
-                <button
-                  type="button"
-                  onClick={() => setShowSuspendModal(false)}
-                  className="rounded-full p-1 text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-[#1a1f35]"
-                  aria-label="ปิด"
-                >
-                  <X className="size-5" />
-                </button>
+            <div className="w-full max-w-2xl overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-2xl dark:border-slate-600/50 dark:bg-[#1e222e]">
+              <div className="border-t-[3px] border-t-amber-500">
+                <div className="flex items-center justify-between gap-3 border-b border-slate-200 bg-gradient-to-r from-amber-50/80 to-slate-50/90 px-4 py-3 dark:border-slate-600/40 dark:from-amber-950/25 dark:to-[#252a38]">
+                  <h3 className="flex min-w-0 items-center gap-2 text-xs font-black uppercase tracking-widest text-slate-800 sm:text-sm dark:text-slate-100">
+                    <Clock className="size-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+                    <span className="truncate">
+                      รายการบิลที่พักไว้ <span className="font-mono text-[10px] opacity-80">(SUSPENDED BILLS)</span>
+                    </span>
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={() => setShowSuspendModal(false)}
+                    className="rounded-full p-1 text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-[#1a1f35]"
+                    aria-label="ปิด"
+                  >
+                    <X className="size-5" />
+                  </button>
+                </div>
               </div>
-              <div className="max-h-[70vh] overflow-auto space-y-2 p-2">
+              <div className="max-h-[60vh] overflow-auto space-y-2 p-2 sm:max-h-[70vh]">
                 {suspendedBills.length === 0 ? (
                   <div className="p-10 text-center text-sm font-semibold text-slate-500 dark:text-slate-400">ไม่มีบิลที่พักไว้</div>
                 ) : (
-                  suspendedBills.map((b) => (
-                    <button
-                      type="button"
+                  suspendedBills.map((b) => {
+                    const awaitTransfer = isSuspendedAwaitTransfer(b)
+                    return (
+                    <div
                       key={b.id}
-                      onClick={() => resumeSuspendedBill(b)}
-                      className="flex w-full items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-3 text-left shadow-sm transition hover:bg-slate-50 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:hover:bg-[#1a1f35]"
+                      className={clsx(
+                        'flex w-full items-stretch gap-2 rounded-lg border px-2 py-2.5 shadow-sm sm:gap-3 sm:px-3 sm:py-3',
+                        awaitTransfer
+                          ? 'border-pink-400/70 bg-gradient-to-r from-pink-50 via-rose-50/80 to-white dark:border-pink-500/45 dark:from-pink-950/50 dark:via-rose-950/35 dark:to-[#12141c]'
+                          : 'border-slate-200 bg-white dark:border-[#2a2d3e] dark:bg-[#12141c]',
+                      )}
                     >
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="rounded bg-slate-900 px-2 py-0.5 text-[9px] font-black uppercase tracking-widest text-white dark:bg-emerald-600">
-                            {b.mode === 'tax' ? 'TAX' : 'POS'}
+                      <div
+                        className={clsx(
+                          'hidden w-1 shrink-0 rounded-full sm:block',
+                          awaitTransfer ? 'bg-gradient-to-b from-pink-500 to-rose-600' : 'bg-amber-400/80',
+                        )}
+                        aria-hidden
+                      />
+                      <div className="min-w-0 flex-1 text-left">
+                        <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+                          <span
+                            className={clsx(
+                              'rounded px-2 py-0.5 text-[9px] font-black tabular-nums',
+                              awaitTransfer
+                                ? 'bg-pink-600 text-white dark:bg-pink-700'
+                                : 'bg-amber-100 text-amber-900 dark:bg-amber-900/50 dark:text-amber-100',
+                            )}
+                          >
+                            {awaitTransfer ? 'แจ้งยอด · รอโอน' : `เวลา ${formatSuspendedBillTime(b.createdAt)}`}
                           </span>
-                          <span className="truncate text-[12px] font-black text-slate-800 dark:text-slate-100">{b.customer.name}</span>
+                          {awaitTransfer ? (
+                            <span className="rounded border border-pink-200/80 bg-white/90 px-2 py-0.5 text-[9px] font-black tabular-nums text-pink-900 dark:border-pink-500/30 dark:bg-pink-950/40 dark:text-pink-100">
+                              เวลา {formatSuspendedBillTime(b.createdAt)}
+                            </span>
+                          ) : null}
+                          <span
+                            className={clsx(
+                              'rounded px-2 py-0.5 text-[9px] font-black uppercase tracking-widest text-white',
+                              b.mode === 'tax' ? 'bg-violet-600' : 'bg-blue-600',
+                            )}
+                          >
+                            {b.mode === 'tax' ? 'TAX' : 'RETAIL'}
+                          </span>
+                          <span className="min-w-0 truncate text-[11px] font-bold text-slate-800 sm:text-[12px] dark:text-slate-100">
+                            {b.customer.name}
+                          </span>
                         </div>
-                        <div className="mt-1 flex items-center gap-3 text-[11px] font-semibold text-slate-500 dark:text-slate-400">
-                          <span className="font-mono">{new Date(b.createdAt).toLocaleString('th-TH')}</span>
-                          <span className="font-mono">{b.cart.length} รายการ</span>
+                        <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                          <span>สินค้า {b.cart.length} รายการ</span>
+                          <span className="text-slate-300 dark:text-slate-600" aria-hidden>
+                            ·
+                          </span>
+                          <span className="font-mono text-cyan-600 dark:text-cyan-400">
+                            ยอด{' '}
+                            {suspendedBillGrandDisplay(b).toLocaleString('th-TH', { minimumFractionDigits: 2 })} ฿
+                          </span>
                         </div>
                       </div>
-                      <div className="text-right">
-                        <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">Resume</div>
+                      <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
+                        <button
+                          type="button"
+                          onClick={() => removeSuspendedBill(b.id)}
+                          className="flex size-9 items-center justify-center rounded-lg border border-slate-200 bg-slate-900 text-slate-300 shadow-sm transition hover:bg-slate-800 hover:text-white dark:border-[#2a2d3e] dark:bg-[#1a1f2e] dark:text-slate-400 dark:hover:bg-[#252b40] dark:hover:text-slate-100 sm:size-10"
+                          aria-label="ลบบิลที่พักไว้"
+                          title="ลบ"
+                        >
+                          <Trash2 className="size-4 shrink-0" aria-hidden />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => resumeSuspendedBill(b)}
+                          className="flex items-center gap-1.5 rounded-lg bg-amber-600 px-2.5 py-2 text-[11px] font-black uppercase tracking-wide text-white shadow-sm transition hover:bg-amber-500 sm:px-4 sm:py-2.5 sm:text-xs"
+                        >
+                          <Play className="size-3.5 shrink-0 fill-current sm:size-4" aria-hidden />
+                          เรียกคืน
+                        </button>
                       </div>
-                    </button>
-                  ))
+                    </div>
+                    )
+                  })
                 )}
+              </div>
+              <div className="flex justify-end border-t border-slate-200 bg-slate-50/80 px-3 py-2.5 dark:border-[#2a2d3e] dark:bg-[#0a0c12]">
+                <button
+                  type="button"
+                  onClick={() => setShowSuspendModal(false)}
+                  className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-black uppercase tracking-widest text-slate-700 shadow-sm transition hover:bg-slate-50 dark:border-[#2a2d3e] dark:bg-[#1a1f2e] dark:text-slate-200 dark:hover:bg-[#252b40]"
+                >
+                  ปิด (CLOSE)
+                </button>
               </div>
             </div>
           </div>,
@@ -2120,46 +2492,40 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
         typeof document !== 'undefined' &&
         createPortal(
           <div
-            className="fixed inset-0 z-[350] flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-sm dark:bg-black/70"
+            className="fixed inset-0 z-[350] flex items-center justify-center bg-slate-600/35 p-4 backdrop-blur-md dark:bg-slate-950/50"
             onMouseDown={(e) => {
               if (!isSavingCheckout && e.target === e.currentTarget) closeCheckoutModal()
             }}
           >
             <div
-              className="w-full max-w-lg overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-[#2a2d3e] dark:bg-[#0d0f17]"
+              className="w-full max-w-2xl overflow-hidden rounded-3xl border border-slate-200/90 bg-white shadow-xl dark:border-slate-600/50 dark:bg-[#1e222e]"
               role="dialog"
               aria-modal="true"
               aria-labelledby="checkout-title"
             >
-              <div className="flex items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 p-4 dark:border-[#2a2d3e] dark:bg-[#12141c]">
-                <h3
-                  id="checkout-title"
-                  className="text-sm font-black uppercase tracking-widest text-slate-800 dark:text-slate-100"
-                >
-                  เลือกวิธีชำระเงิน
-                </h3>
+              <div className="flex justify-end px-4 pt-4">
                 <button
                   type="button"
                   onClick={closeCheckoutModal}
                   disabled={isSavingCheckout}
-                  className="rounded-full p-1 text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-[#1a1f35]"
+                  className="rounded-full p-1 text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-white/10"
                   aria-label="ปิด"
                 >
                   <X className="size-5" />
                 </button>
               </div>
 
-              <div className="space-y-4 p-5">
-                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-center dark:border-[#2a2d3e] dark:bg-[#050508]">
-                  <div className="text-[10px] font-black uppercase tracking-widest text-slate-500 dark:text-cyan-500/70">
-                    ยอดชำระสุทธิ
-                  </div>
-                  <div className="mt-1 bg-gradient-to-r from-emerald-500 to-blue-500 bg-clip-text font-mono text-3xl font-black text-transparent dark:from-emerald-400 dark:to-cyan-300">
-                    {totals.grandTotal.toLocaleString('th-TH', { minimumFractionDigits: 2 })}
+              <div className="space-y-4 px-6 pb-6 pt-0">
+                <div className="text-center">
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 shadow-inner dark:border-slate-600/50 dark:bg-[#252a38]/80">
+                    <div className="text-xs font-bold text-slate-500 dark:text-slate-400">ยอดชำระสุทธิ</div>
+                    <div className="mt-1 bg-gradient-to-r from-emerald-500 to-blue-500 bg-clip-text font-mono text-4xl font-black text-transparent dark:from-emerald-400 dark:to-cyan-300">
+                      {totals.grandTotal.toLocaleString('th-TH', { minimumFractionDigits: 2 })} ฿
+                    </div>
                   </div>
                 </div>
 
-                <div className="max-h-36 space-y-1 overflow-auto rounded-xl border border-slate-200 bg-white p-2 dark:border-[#2a2d3e] dark:bg-[#12141c]">
+                <div className="max-h-28 space-y-1 overflow-auto rounded-xl border border-slate-200 bg-white p-2 dark:border-slate-600/50 dark:bg-[#252a38]/50">
                   {pricedCart.map((l) => (
                     <div key={`checkout-line-${l.id}`} className="flex items-center justify-between gap-2 rounded px-1 py-1 text-[11px]">
                       <div className="min-w-0">
@@ -2175,187 +2541,285 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                   ))}
                 </div>
 
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                  <button
-                    type="button"
-                    onClick={() => setCheckoutPaymentType('cash')}
-                    className={clsx(
-                      'flex min-h-[3rem] flex-col items-center justify-center gap-1 rounded-lg border px-2 py-2 text-[10px] font-black uppercase tracking-widest transition sm:text-[11px]',
-                      checkoutPaymentType === 'cash'
-                        ? 'border-blue-500 bg-blue-50 text-blue-700 dark:border-cyan-500 dark:bg-cyan-900/20 dark:text-cyan-300'
-                        : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-[#2a2d3e] dark:bg-[#0d0f17] dark:text-slate-400 dark:hover:bg-[#12141c]',
-                    )}
-                  >
-                    <Banknote className="size-4 shrink-0" aria-hidden />
-                    เงินสด
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setCheckoutPaymentType('transfer')}
-                    className={clsx(
-                      'flex min-h-[3rem] flex-col items-center justify-center gap-1 rounded-lg border px-2 py-2 text-[10px] font-black uppercase tracking-widest transition sm:text-[11px]',
-                      checkoutPaymentType === 'transfer'
-                        ? 'border-blue-500 bg-blue-50 text-blue-700 dark:border-cyan-500 dark:bg-cyan-900/20 dark:text-cyan-300'
-                        : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-[#2a2d3e] dark:bg-[#0d0f17] dark:text-slate-400 dark:hover:bg-[#12141c]',
-                    )}
-                  >
-                    <QrCode className="size-4 shrink-0" aria-hidden />
-                    โอน/QR
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setCheckoutPaymentType('account')}
-                    className={clsx(
-                      'flex min-h-[3rem] flex-col items-center justify-center gap-1 rounded-lg border px-2 py-2 text-[10px] font-black uppercase tracking-widest transition sm:text-[11px]',
-                      checkoutPaymentType === 'account'
-                        ? 'border-blue-500 bg-blue-50 text-blue-700 dark:border-cyan-500 dark:bg-cyan-900/20 dark:text-cyan-300'
-                        : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-[#2a2d3e] dark:bg-[#0d0f17] dark:text-slate-400 dark:hover:bg-[#12141c]',
-                    )}
-                  >
-                    <Building2 className="size-4 shrink-0" aria-hidden />
-                    ลงบัญชี
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setCheckoutPaymentType('mixed')}
-                    className={clsx(
-                      'flex min-h-[3rem] flex-col items-center justify-center gap-1 rounded-lg border px-2 py-2 text-[10px] font-black uppercase tracking-widest transition sm:text-[11px]',
-                      checkoutPaymentType === 'mixed'
-                        ? 'border-blue-500 bg-blue-50 text-blue-700 dark:border-cyan-500 dark:bg-cyan-900/20 dark:text-cyan-300'
-                        : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-[#2a2d3e] dark:bg-[#0d0f17] dark:text-slate-400 dark:hover:bg-[#12141c]',
-                    )}
-                  >
-                    <Layers className="size-4 shrink-0" aria-hidden />
-                    ผสม
-                  </button>
+                <h3
+                  id="checkout-title"
+                  className="text-center text-sm font-bold uppercase tracking-widest text-slate-800 dark:text-slate-200"
+                >
+                  เลือกวิธีชำระเงิน
+                </h3>
+
+                <div className="flex flex-wrap justify-center gap-2.5">
+                  {(
+                    [
+                      {
+                        id: 'cash' as const,
+                        label: 'เงินสด',
+                        icon: <Banknote className="size-4 shrink-0" aria-hidden />,
+                        activeColor: 'text-emerald-600 dark:text-emerald-400',
+                        activeBorder: 'border-emerald-500',
+                        activeBg: 'bg-emerald-50 dark:bg-emerald-900/20',
+                        disabled: false,
+                      },
+                      {
+                        id: 'transfer' as const,
+                        label: 'โอนเงิน',
+                        icon: <QrCode className="size-4 shrink-0" aria-hidden />,
+                        activeColor: 'text-blue-600 dark:text-cyan-400',
+                        activeBorder: 'border-blue-500',
+                        activeBg: 'bg-blue-50 dark:bg-blue-900/20',
+                        disabled: false,
+                      },
+                      {
+                        id: 'account' as const,
+                        label: 'ลงบัญชี',
+                        icon: <BookOpen className="size-4 shrink-0" aria-hidden />,
+                        activeColor: 'text-teal-600 dark:text-teal-400',
+                        activeBorder: 'border-teal-500',
+                        activeBg: 'bg-teal-50 dark:bg-teal-900/20',
+                        disabled: false,
+                      },
+                      {
+                        id: 'mixed' as const,
+                        label: 'ผสม',
+                        icon: <Wallet className="size-4 shrink-0" aria-hidden />,
+                        activeColor: 'text-purple-600 dark:text-purple-400',
+                        activeBorder: 'border-purple-500',
+                        activeBg: 'bg-purple-50 dark:bg-purple-900/20',
+                        disabled: false,
+                      },
+                    ] as const
+                  ).map((pm) => {
+                    const isSelected = checkoutPaymentType === pm.id
+                    let btnClass =
+                      'flex min-h-[2.75rem] items-center justify-center gap-2 rounded-xl border-2 px-4 py-2 text-[12px] font-bold uppercase tracking-wider transition-all group '
+                    if (pm.disabled) {
+                      btnClass +=
+                        'cursor-not-allowed border-slate-200 bg-slate-50 opacity-60 dark:border-slate-600 dark:bg-[#151822] dark:text-slate-600'
+                    } else if (isSelected) {
+                      btnClass += `${pm.activeBg} ${pm.activeBorder} ${pm.activeColor} scale-[1.02] shadow-sm`
+                    } else {
+                      btnClass +=
+                        'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-slate-600 dark:bg-[#252a38] dark:text-slate-400 dark:hover:bg-[#2d3445]'
+                    }
+                    return (
+                      <button
+                        key={pm.id}
+                        type="button"
+                        disabled={pm.disabled || isSavingCheckout}
+                        onClick={() => !pm.disabled && handleCheckoutPaymentTypeChange(pm.id)}
+                        className={btnClass}
+                      >
+                        <div
+                          className={
+                            isSelected && !pm.disabled
+                              ? ''
+                              : 'text-slate-400 transition-colors group-hover:text-slate-600 dark:group-hover:text-slate-300'
+                          }
+                        >
+                          {pm.icon}
+                        </div>
+                        <span className="tracking-wider">{pm.label}</span>
+                      </button>
+                    )
+                  })}
                 </div>
 
-                {checkoutPaymentType === 'cash' && (
-                  <div className="space-y-2 rounded-xl border border-slate-200 bg-white p-4 dark:border-[#2a2d3e] dark:bg-[#12141c]">
-                    <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 dark:text-cyan-500/70">
-                      รับเงินมา
-                    </label>
-                    <input
-                      value={cashReceived}
-                      onChange={(e) => setCashReceived(e.target.value)}
-                      inputMode="decimal"
-                      placeholder="0"
-                      className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-right font-mono text-lg font-black text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-cyan-100 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30"
-                    />
-                    <div className="flex justify-between text-[11px] font-black uppercase tracking-widest text-slate-500 dark:text-slate-400">
-                      <span>เงินทอน</span>
-                      <span className={clsx('font-mono', changeAmount >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400')}>
-                        {Math.max(0, changeAmount).toLocaleString('th-TH', { minimumFractionDigits: 2 })}
-                      </span>
-                    </div>
-                  </div>
-                )}
-
-                {checkoutPaymentType === 'transfer' && (
-                  <div className="space-y-2 rounded-xl border border-slate-200 bg-white p-4 dark:border-[#2a2d3e] dark:bg-[#12141c]">
-                    <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 dark:text-cyan-500/70">
-                      เลือกบัญชีรับโอน
-                    </label>
-                    <select
-                      value={selectedBank}
-                      onChange={(e) => setSelectedBank(e.target.value)}
-                      className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-cyan-100 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30"
-                    >
-                      <option value="">เลือกบัญชี...</option>
-                      <option value="kbank">กสิกรไทย</option>
-                      <option value="scb">ไทยพาณิชย์</option>
-                      <option value="ktb">กรุงไทย</option>
-                    </select>
-                    <button
-                      type="button"
-                      onClick={() => setShowQRModal(true)}
-                      className="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-slate-700 transition hover:bg-slate-100 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-slate-200 dark:hover:bg-[#1a1f35]"
-                    >
-                      <QrCode className="size-4" aria-hidden />
-                      แสดง QR
-                    </button>
-                  </div>
-                )}
-
-                {checkoutPaymentType === 'account' && (
-                  <div className="space-y-2 rounded-xl border border-slate-200 bg-white p-4 dark:border-[#2a2d3e] dark:bg-[#12141c]">
-                    <p className="text-[11px] font-semibold leading-relaxed text-slate-600 dark:text-slate-300">
-                      บันทึกเป็นยอดค้างชำระ (ลูกหนี้) ตามลูกค้าที่เลือกในหน้าจอหลัก
-                    </p>
-                    {isWalkIn ? (
-                      <p className="text-[11px] font-black uppercase tracking-widest text-rose-600 dark:text-rose-400">
-                        กรุณาเลือกลูกค้าที่มีรหัสลูกหนี้ (ไม่ใช่ Walk-in)
-                      </p>
-                    ) : (
-                      <p className="text-[11px] text-emerald-700 dark:text-emerald-400">
-                        ลูกค้า: <span className="font-black">{customer.name}</span> ({customer.accountCode})
-                      </p>
-                    )}
-                  </div>
-                )}
-
-                {checkoutPaymentType === 'mixed' && (
-                  <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-[#2a2d3e] dark:bg-[#12141c]">
-                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 dark:text-cyan-500/70">
-                      แบ่งชำระ: เงินสด + โอน ให้รวมเท่ายอดชำระสุทธิ
-                    </p>
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                      <div className="space-y-1">
-                        <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 dark:text-cyan-500/70">
-                          ยอดเงินสด
-                        </label>
-                        <input
-                          value={mixedCashAmount}
-                          onChange={(e) => setMixedCashAmount(e.target.value)}
-                          inputMode="decimal"
-                          placeholder="0"
-                          className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-right font-mono text-lg font-black text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-cyan-100 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30"
-                        />
+                <div className="min-h-[220px] rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-600/50 dark:bg-[#252a38]/60">
+                  {checkoutPaymentType === 'cash' && (
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                      <div className="flex flex-col gap-3">
+                        <div>
+                          <label className="mb-1 block text-[10px] font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">
+                            รับเงินมา (Received)
+                          </label>
+                          <input
+                            type="text"
+                            readOnly
+                            value={
+                              cashReceived
+                                ? (() => {
+                                    const n = Number.parseFloat(cashReceived)
+                                    return Number.isNaN(n)
+                                      ? cashReceived
+                                      : n.toLocaleString('th-TH', { minimumFractionDigits: 0, maximumFractionDigits: 2 })
+                                  })()
+                                : ''
+                            }
+                            placeholder="0"
+                            className="w-full rounded-xl border border-blue-300 bg-white py-2 px-3 text-right font-mono text-xl font-bold text-slate-800 shadow-inner outline-none dark:border-blue-500/50 dark:bg-[#1a1f2e] dark:text-cyan-100"
+                          />
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-[10px] font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">
+                            เงินทอน (Change)
+                          </label>
+                          <input
+                            type="text"
+                            readOnly
+                            value={
+                              changeAmount >= 0 && receivedAmount > 0
+                                ? Math.max(0, changeAmount).toLocaleString('th-TH', { minimumFractionDigits: 2 })
+                                : '0.00'
+                            }
+                            className={clsx(
+                              'w-full rounded-xl border py-2 px-3 text-right font-mono text-xl font-bold outline-none transition-colors',
+                              changeAmount >= 0 && receivedAmount > 0
+                                ? 'border-emerald-400 bg-emerald-50 text-emerald-600 shadow-[0_0_10px_rgba(52,211,153,0.1)] dark:border-emerald-500/40 dark:bg-emerald-900/10 dark:text-emerald-400'
+                                : 'border-slate-200 bg-slate-100 text-slate-400 dark:border-slate-600 dark:bg-[#1a1f2e] dark:text-slate-500',
+                            )}
+                          />
+                        </div>
+                        <div className="mt-auto grid grid-cols-4 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleCashNumpad('EXACT')}
+                            disabled={isSavingCheckout}
+                            className="rounded-lg border border-emerald-200 bg-emerald-100 py-2 text-[11px] font-bold uppercase text-emerald-700 transition-colors hover:bg-emerald-200 dark:border-emerald-500/50 dark:bg-emerald-900/30 dark:text-emerald-400"
+                          >
+                            พอดี
+                          </button>
+                          {quickCashAmounts.map((amt, idx) => (
+                            <button
+                              key={`quick-${idx}-${amt}`}
+                              type="button"
+                              onClick={() => setCashReceived(amt.toString())}
+                              disabled={isSavingCheckout}
+                              className="rounded-lg border border-blue-200 bg-blue-50 py-2 font-mono text-[11px] font-bold text-blue-600 transition-colors hover:bg-blue-100 dark:border-blue-500/30 dark:bg-blue-900/20 dark:text-cyan-400"
+                            >
+                              {amt.toLocaleString('th-TH')}
+                            </button>
+                          ))}
+                        </div>
                       </div>
-                      <div className="space-y-1">
-                        <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 dark:text-cyan-500/70">
-                          ยอดโอน
-                        </label>
-                        <input
-                          value={mixedTransferAmount}
-                          onChange={(e) => setMixedTransferAmount(e.target.value)}
-                          inputMode="decimal"
-                          placeholder="0"
-                          className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-right font-mono text-lg font-black text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-cyan-100 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30"
-                        />
+                      <div className="grid grid-cols-3 gap-2">
+                        {(['7', '8', '9', '4', '5', '6', '1', '2', '3', 'C', '0', 'DEL'] as const).map((btn) => (
+                          <button
+                            key={btn}
+                            type="button"
+                            disabled={isSavingCheckout}
+                            onClick={() => handleCashNumpad(btn)}
+                            className={clsx(
+                              'flex items-center justify-center rounded-xl border py-3 font-mono text-lg font-bold shadow-sm transition-all hover:scale-[1.02] active:scale-95',
+                              btn === 'C'
+                                ? 'border-rose-200 bg-rose-50 text-rose-600 dark:border-rose-500/30 dark:bg-rose-900/20 dark:text-rose-400'
+                                : btn === 'DEL'
+                                  ? 'border-amber-200 bg-amber-50 text-amber-600 dark:border-amber-500/30 dark:bg-amber-900/20 dark:text-amber-400'
+                                  : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:border-slate-600 dark:bg-[#2d3445] dark:text-slate-200 dark:hover:bg-[#363e52]',
+                            )}
+                          >
+                            {btn === 'DEL' ? <Trash2 className="size-5" aria-hidden /> : btn}
+                          </button>
+                        ))}
                       </div>
                     </div>
-                    <div className="space-y-1">
-                      <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 dark:text-cyan-500/70">
-                        บัญชีรับโอน (ส่วนโอน)
+                  )}
+
+                  {checkoutPaymentType === 'transfer' && (
+                    <div className="space-y-2">
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">
+                        เลือกบัญชีรับโอน
                       </label>
                       <select
                         value={selectedBank}
                         onChange={(e) => setSelectedBank(e.target.value)}
-                        className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-cyan-100 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30"
+                        className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-semibold text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-slate-600 dark:bg-[#1a1f2e] dark:text-cyan-100"
                       >
                         <option value="">เลือกบัญชี...</option>
                         <option value="kbank">กสิกรไทย</option>
                         <option value="scb">ไทยพาณิชย์</option>
                         <option value="ktb">กรุงไทย</option>
                       </select>
-                    </div>
-                    <div className="flex justify-between rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-[11px] font-black uppercase tracking-widest dark:border-[#2a2d3e] dark:bg-[#050508]">
-                      <span className="text-slate-500 dark:text-slate-400">รวมตรวจสอบ</span>
-                      <span
-                        className={clsx(
-                          'font-mono',
-                          Math.abs(mixedSum - totals.grandTotal) <= MIX_TOTAL_EPS
-                            ? 'text-emerald-600 dark:text-emerald-400'
-                            : 'text-rose-600 dark:text-rose-400',
-                        )}
+                      <button
+                        type="button"
+                        onClick={() => setShowQRModal(true)}
+                        className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-700 transition hover:bg-slate-50 dark:border-slate-600 dark:bg-[#1a1f2e] dark:text-slate-200 dark:hover:bg-[#2d3445]"
                       >
-                        {mixedSum.toLocaleString('th-TH', { minimumFractionDigits: 2 })} /{' '}
-                        {totals.grandTotal.toLocaleString('th-TH', { minimumFractionDigits: 2 })}
-                      </span>
+                        <QrCode className="size-4" aria-hidden />
+                        แสดง QR
+                      </button>
                     </div>
-                  </div>
-                )}
+                  )}
+
+                  {checkoutPaymentType === 'account' && (
+                    <div className="space-y-2">
+                      <p className="text-[11px] font-semibold leading-relaxed text-slate-600 dark:text-slate-300">
+                        บันทึกเป็นยอดค้างชำระ (ลูกหนี้) ตามลูกค้าที่เลือกในหน้าจอหลัก
+                      </p>
+                      {isWalkIn ? (
+                        <p className="text-[11px] font-black uppercase tracking-widest text-rose-600 dark:text-rose-400">
+                          กรุณาเลือกลูกค้าที่มีรหัสลูกหนี้ (ไม่ใช่ Walk-in)
+                        </p>
+                      ) : (
+                        <p className="text-[11px] text-emerald-700 dark:text-emerald-400">
+                          ลูกค้า: <span className="font-black">{customer.name}</span> ({customer.accountCode})
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  {checkoutPaymentType === 'mixed' && (
+                    <div className="space-y-3">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">
+                        แบ่งชำระ: เงินสด + โอน ให้รวมเท่ายอดชำระสุทธิ
+                      </p>
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                        <div className="space-y-1">
+                          <label className="block text-[10px] font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">
+                            ยอดเงินสด
+                          </label>
+                          <input
+                            value={mixedCashAmount}
+                            onChange={(e) => setMixedCashAmount(e.target.value)}
+                            inputMode="decimal"
+                            placeholder="0"
+                            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-right font-mono text-lg font-black text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-slate-600 dark:bg-[#1a1f2e] dark:text-cyan-100"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <label className="block text-[10px] font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">
+                            ยอดโอน
+                          </label>
+                          <input
+                            value={mixedTransferAmount}
+                            onChange={(e) => setMixedTransferAmount(e.target.value)}
+                            inputMode="decimal"
+                            placeholder="0"
+                            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-right font-mono text-lg font-black text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-slate-600 dark:bg-[#1a1f2e] dark:text-cyan-100"
+                          />
+                        </div>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="block text-[10px] font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">
+                          บัญชีรับโอน (ส่วนโอน)
+                        </label>
+                        <select
+                          value={selectedBank}
+                          onChange={(e) => setSelectedBank(e.target.value)}
+                          className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-slate-600 dark:bg-[#1a1f2e] dark:text-cyan-100"
+                        >
+                          <option value="">เลือกบัญชี...</option>
+                          <option value="kbank">กสิกรไทย</option>
+                          <option value="scb">ไทยพาณิชย์</option>
+                          <option value="ktb">กรุงไทย</option>
+                        </select>
+                      </div>
+                      <div className="flex justify-between rounded-xl border border-slate-100 bg-white px-3 py-2 text-[11px] font-black uppercase tracking-widest dark:border-slate-600 dark:bg-[#1a1f2e]">
+                        <span className="text-slate-500 dark:text-slate-400">รวมตรวจสอบ</span>
+                        <span
+                          className={clsx(
+                            'font-mono',
+                            Math.abs(mixedSum - totals.grandTotal) <= MIX_TOTAL_EPS
+                              ? 'text-emerald-600 dark:text-emerald-400'
+                              : 'text-rose-600 dark:text-rose-400',
+                          )}
+                        >
+                          {mixedSum.toLocaleString('th-TH', { minimumFractionDigits: 2 })} /{' '}
+                          {totals.grandTotal.toLocaleString('th-TH', { minimumFractionDigits: 2 })}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
 
                 <div className="space-y-2">
                   {!canSubmitCheckout && (
@@ -2372,7 +2836,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                       type="button"
                       onClick={closeCheckoutModal}
                       disabled={isSavingCheckout}
-                      className="flex-1 rounded-lg border border-slate-200 bg-white py-3 text-xs font-black uppercase tracking-widest text-slate-600 hover:bg-slate-50 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-slate-400 dark:hover:bg-[#12141c]"
+                      className="flex-1 rounded-xl border border-slate-200 bg-white py-3 text-xs font-black uppercase tracking-widest text-slate-600 hover:bg-slate-50 dark:border-slate-600 dark:bg-[#252a38] dark:text-slate-400 dark:hover:bg-[#2d3445]"
                     >
                       ยกเลิก
                     </button>
@@ -2381,7 +2845,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                       onClick={handleConfirmCheckout}
                       disabled={!canSubmitCheckout || isSavingCheckout}
                       className={clsx(
-                        'flex-1 rounded-lg py-3 text-xs font-black uppercase tracking-widest text-white shadow-sm transition',
+                        'flex-1 rounded-xl py-3 text-xs font-black uppercase tracking-widest text-white shadow-sm transition',
                         canSubmitCheckout && !isSavingCheckout
                           ? 'bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400'
                           : 'cursor-not-allowed bg-slate-300 text-slate-500 dark:bg-slate-700 dark:text-slate-500',
@@ -2449,80 +2913,123 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
           document.body,
         )}
 
-      {showPreBillModal &&
+      {showAmountNoticeModal &&
         typeof document !== 'undefined' &&
         createPortal(
           <div
-            className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-sm dark:bg-black/70"
+            className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-600/35 p-4 backdrop-blur-md dark:bg-slate-950/50"
             onMouseDown={(e) => {
-              if (e.target === e.currentTarget) setShowPreBillModal(false)
+              if (e.target === e.currentTarget) setShowAmountNoticeModal(false)
             }}
           >
-            <div className="w-full max-w-2xl overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-[#2a2d3e] dark:bg-[#0d0f17]">
-              <div className="flex items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 p-4 dark:border-[#2a2d3e] dark:bg-[#12141c]">
-                <h3 className="flex items-center gap-2 text-sm font-black uppercase tracking-widest text-slate-800 dark:text-slate-100">
-                  <FileText className="size-4 text-blue-500 dark:text-cyan-400" aria-hidden />
-                  พรีบิล (Pre-bill)
-                </h3>
+            <div className="w-full max-w-lg overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-2xl dark:border-slate-600/50 dark:bg-[#1e222e]">
+              <div className="border-t-[3px] border-t-pink-500">
+                <div className="flex items-center justify-between gap-3 border-b border-slate-200 bg-gradient-to-r from-pink-50 via-rose-50/40 to-slate-50/80 px-4 py-3 dark:border-slate-600/40 dark:from-pink-950/30 dark:via-rose-950/20 dark:to-[#252a38]">
+                  <h3 className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-sm font-bold text-slate-800 dark:text-slate-100">
+                    <Send className="size-4 shrink-0 text-pink-600 dark:text-pink-400" aria-hidden />
+                    <span>แจ้งยอด</span>
+                    <span className="font-mono text-[10px] font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">
+                      (AMOUNT NOTICE)
+                    </span>
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={() => setShowAmountNoticeModal(false)}
+                    className="rounded-full p-1 text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-[#1a1f35]"
+                    aria-label="ปิด"
+                  >
+                    <X className="size-5" />
+                  </button>
+                </div>
+              </div>
+              <div className="max-h-[85vh] space-y-4 overflow-auto p-4">
+                <p className="text-center text-[11px] leading-relaxed text-slate-600 dark:text-slate-400">
+                  ส่งสรุปนี้ให้คนโอน — กด <span className="font-black text-pink-700 dark:text-pink-300">พักบิลนี้เพื่อรอโอนเงิน</span> แล้วไปดูในรายการบิลที่พัก
+                  (แถบ<span className="text-pink-600 dark:text-pink-400">ชมพู</span>) จะไม่ปนกับพักบิลธรรมดา
+                </p>
+
+                <div className="rounded-xl border border-pink-100/90 bg-gradient-to-b from-white via-pink-50/25 to-slate-50/90 p-4 shadow-sm dark:border-pink-900/35 dark:from-[#262b38] dark:via-[#222833] dark:to-[#1c202c]">
+                  <p className="text-center text-[15px] font-bold tracking-wide text-slate-800 dark:text-slate-100">แจ้งยอด</p>
+                  <p className="mt-2 text-center text-sm font-semibold text-pink-700 dark:text-pink-300">ลูกค้า: {customer.name}</p>
+                  <p className="mt-1 text-center text-[11px] text-slate-500 dark:text-slate-400">
+                    {formatThaiBillNoticeDate(docInfo.docDate)} · {docInfo.employee}
+                  </p>
+
+                  <div className="mt-3 overflow-x-auto rounded-lg border border-slate-200/90 bg-white/80 dark:border-slate-600/50 dark:bg-[#2a3040]/60">
+                    <table className="w-full min-w-[300px] text-left text-[11px]">
+                      <thead>
+                        <tr className="border-b border-slate-200 bg-slate-100/95 text-[10px] font-black uppercase tracking-wider text-slate-600 dark:border-slate-600 dark:bg-slate-800/80 dark:text-slate-400">
+                          <th className="px-2 py-2">รายการสินค้า</th>
+                          <th className="w-[4.5rem] px-2 py-2 text-right">จำนวน</th>
+                          <th className="w-20 px-2 py-2 text-right">ราคา</th>
+                          <th className="w-24 px-2 py-2 text-right">รวม</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pricedCart.map((l) => (
+                          <tr key={l.id} className="border-b border-slate-100 last:border-0 dark:border-slate-600/40">
+                            <td className="px-2 py-2 align-top">
+                              <div className="font-mono text-[9px] text-pink-600 dark:text-pink-400">{l.code}</div>
+                              <div className="font-semibold leading-snug text-slate-800 dark:text-slate-100">{l.name}</div>
+                            </td>
+                            <td className="px-2 py-2 text-right tabular-nums text-slate-600 dark:text-slate-300">
+                              {l.qty} {l.unit}
+                            </td>
+                            <td className="px-2 py-2 text-right font-mono tabular-nums text-slate-600 dark:text-slate-300">
+                              {l.price.toLocaleString('th-TH', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}
+                            </td>
+                            <td className="px-2 py-2 text-right font-mono font-semibold tabular-nums text-emerald-700 dark:text-emerald-300">
+                              {round2(l.price * l.qty - l.discount).toLocaleString('th-TH', { minimumFractionDigits: 2 })}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="mt-3 flex items-center justify-between border-t border-slate-200 pt-2 text-[11px] text-slate-500 dark:border-slate-600 dark:text-slate-400">
+                    <span>รวมเป็นเงิน</span>
+                    <span className="font-mono font-semibold text-slate-800 dark:text-slate-200">
+                      {round2(totals.subtotal).toLocaleString('th-TH', { minimumFractionDigits: 2 })} ฿
+                    </span>
+                  </div>
+                  <div className="mt-2 flex items-end justify-between gap-2">
+                    <span className="text-[11px] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">ยอดสุทธิที่ต้องชำระ</span>
+                    <span className="font-mono text-2xl font-black text-emerald-700 dark:text-emerald-300">
+                      {totals.grandTotal.toLocaleString('th-TH', { minimumFractionDigits: 2 })} ฿
+                    </span>
+                  </div>
+
+                  <p className="mt-4 text-center text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
+                    ชำระโอนตามบัญชีที่ร้านแจ้งหรือตกลงกับลูกค้า
+                  </p>
+                </div>
+
                 <button
                   type="button"
-                  onClick={() => setShowPreBillModal(false)}
-                  className="rounded-full p-1 text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-[#1a1f35]"
-                  aria-label="ปิด"
+                  onClick={() => handleSuspendBill('await_transfer')}
+                  className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 py-3.5 text-sm font-black text-white shadow-md transition hover:from-amber-400 hover:to-orange-500 dark:from-amber-600 dark:to-orange-700 dark:hover:from-amber-500 dark:hover:to-orange-600"
                 >
-                  <X className="size-5" />
+                  <Pause className="size-5 shrink-0" aria-hidden />
+                  พักบิลนี้เพื่อรอโอนเงิน
                 </button>
-              </div>
-              <div className="space-y-3 p-4">
-                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-slate-200">
-                  <div className="flex justify-between text-[11px] font-black uppercase tracking-widest text-slate-500 dark:text-slate-400">
-                    <span>ลูกค้า</span>
-                    <span className="font-semibold normal-case tracking-normal">{customer.name}</span>
-                  </div>
-                  <div className="mt-2 max-h-60 overflow-auto rounded-md border border-slate-200 bg-white p-2 dark:border-[#2a2d3e] dark:bg-[#12141c]">
-                    {pricedCart.map((l) => (
-                      <div key={l.id} className="flex items-center justify-between gap-3 py-1 text-[12px]">
-                        <div className="min-w-0">
-                          <div className="font-mono text-[10px] font-black text-blue-700 dark:text-cyan-300">{l.code}</div>
-                          <div className="truncate font-semibold">{l.name}</div>
-                        </div>
-                        <div className="font-mono font-black">
-                          {(l.price * l.qty - l.discount).toLocaleString('th-TH', { minimumFractionDigits: 2 })}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="mt-3 flex items-end justify-between">
-                    <span className="text-xs font-black uppercase tracking-widest">ยอดรวม</span>
-                    <span className="bg-gradient-to-r from-emerald-500 to-blue-500 bg-clip-text font-mono text-2xl font-black text-transparent dark:from-emerald-400 dark:to-cyan-300">
-                      {totals.grandTotal.toLocaleString('th-TH', { minimumFractionDigits: 2 })}
-                    </span>
-                  </div>
-                </div>
-                <div className="flex gap-3">
+
+                <button
+                  type="button"
+                  onClick={() => setShowAmountNoticeModal(false)}
+                  className="w-full py-1 text-center text-[12px] font-semibold text-slate-600 underline-offset-2 hover:underline dark:text-slate-400"
+                >
+                  ปิด (ย้อนกลับไปหน้าเดิม)
+                </button>
+
+                <div className="border-t border-slate-200 pt-3 dark:border-[#2a2d3e]">
                   <button
                     type="button"
-                    onClick={handleSuspendBill}
-                    className="flex-1 rounded-lg border border-amber-200 bg-amber-50 py-3 text-xs font-black uppercase tracking-widest text-amber-800 hover:bg-amber-100 dark:border-amber-700/50 dark:bg-amber-900/20 dark:text-amber-400 dark:hover:bg-amber-900/35"
+                    onClick={() => setShowAmountNoticeModal(false)}
+                    className="flex w-full items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white py-2.5 text-xs font-black uppercase tracking-widest text-slate-700 hover:bg-slate-50 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-slate-200 dark:hover:bg-[#1a1f35]"
                   >
-                    พักบิล
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowPreBillModal(false)}
-                    className="flex-1 rounded-lg border border-slate-200 bg-white py-3 text-xs font-black uppercase tracking-widest text-slate-700 hover:bg-slate-50 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-slate-200 dark:hover:bg-[#12141c]"
-                  >
-                    ปิด
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowPreBillModal(false)}
-                    className="flex-1 rounded-lg bg-gradient-to-r from-blue-600 to-indigo-600 py-3 text-xs font-black uppercase tracking-widest text-white hover:from-blue-500 hover:to-indigo-500 dark:from-cyan-600 dark:to-blue-600 dark:hover:from-cyan-500 dark:hover:to-blue-500"
-                  >
-                    <span className="inline-flex items-center justify-center gap-2">
-                      <Printer className="size-4" aria-hidden />
-                      พิมพ์
-                    </span>
+                    <Printer className="size-4 shrink-0" aria-hidden />
+                    พิมพ์แจ้งยอด
                   </button>
                 </div>
               </div>
@@ -2648,12 +3155,12 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                   <button
                     type="button"
                     onClick={() => {
-                      handleSuspendBill()
+                      handleSuspendBill('hold')
                       setShowQuotationModal(false)
                     }}
                     className="flex-1 rounded-lg bg-gradient-to-r from-emerald-500 to-teal-500 py-3 text-xs font-black uppercase tracking-widest text-white hover:from-emerald-400 hover:to-teal-400"
                   >
-                    ส่ง/พักบิล
+                    พักบิล
                   </button>
                 </div>
               </div>

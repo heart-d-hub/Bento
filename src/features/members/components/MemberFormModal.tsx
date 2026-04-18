@@ -1,9 +1,4 @@
-import {
-  MEMBER_PRICE_TIER_LABELS,
-  MOCK_SALES_STAFF,
-  type MemberItemTierOverride,
-  type MemberPriceTier,
-} from '@/features/members/data/memberTypes'
+import { MEMBER_PRICE_TIER_LABELS, type MemberItemTierOverride, type MemberPriceTier } from '@/features/members/data/memberTypes'
 import {
   MEMBER_STATUS_LABELS,
   MEMBER_TYPE_LABELS,
@@ -12,9 +7,11 @@ import {
   type MemberType,
 } from '@/features/members/data/mockMembers'
 import { BRANCHES } from '@/features/auth/branches'
+import type { StaffUser } from '@/features/settings/data/mockStaffUsers'
+import { loadStaffUsers, STAFF_USERS_CHANGED_EVENT } from '@/features/settings/data/staffUsersStore'
 import { clsx } from 'clsx'
 import { Trash2, X } from 'lucide-react'
-import { useEffect, useId, useState, type FormEvent } from 'react'
+import { useEffect, useId, useMemo, useState, type FormEvent } from 'react'
 
 const inputClass =
   'w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-900 shadow-sm outline-none focus:border-violet-400 focus:ring-1 focus:ring-violet-300'
@@ -37,7 +34,29 @@ function todayIso(): string {
   return new Date().toISOString().slice(0, 10)
 }
 
-function emptyForm(suggestedCode: string): MemberFormValues {
+/** รหัส Sales เดิม (mock) → id พนักงานใน จัดการผู้ใช้ */
+const LEGACY_SALES_TO_STAFF: Record<string, string> = {
+  s1: 'staff-1',
+  s2: 'staff-2',
+  s3: 'staff-3',
+  s4: 'staff-1',
+}
+
+function pickDefaultSalesStaffId(staff: StaffUser[]): string {
+  const active = staff.filter((s) => s.status === 'active')
+  return active[0]?.id ?? staff[0]?.id ?? ''
+}
+
+function resolveSalesStaffId(raw: string, staff: StaffUser[]): string {
+  if (!staff.length) return raw
+  const ids = new Set(staff.map((s) => s.id))
+  if (raw && ids.has(raw)) return raw
+  const mapped = LEGACY_SALES_TO_STAFF[raw]
+  if (mapped && ids.has(mapped)) return mapped
+  return pickDefaultSalesStaffId(staff)
+}
+
+function emptyForm(suggestedCode: string, salesStaffIdDefault: string): MemberFormValues {
   const t = todayIso()
   return {
     memberCode: suggestedCode,
@@ -48,7 +67,7 @@ function emptyForm(suggestedCode: string): MemberFormValues {
     email: '',
     phone: '',
     fax: '',
-    salesStaffId: MOCK_SALES_STAFF[0]?.id ?? 's1',
+    salesStaffId: salesStaffIdDefault,
     creditLimitBaht: 0,
     creditTermDays: 0,
     creditTermMonths: 0,
@@ -88,18 +107,48 @@ export function MemberFormModal({
 }: MemberFormModalProps) {
   const titleId = useId()
   const tierRadioName = useId()
+  const [staffUsers, setStaffUsers] = useState<StaffUser[]>(() => loadStaffUsers())
   const [form, setForm] = useState<MemberFormValues>(() =>
-    mode === 'edit' && initial ? memberToForm(initial) : emptyForm(suggestedCode),
+    mode === 'edit' && initial
+      ? { ...memberToForm(initial), salesStaffId: resolveSalesStaffId(initial.salesStaffId, loadStaffUsers()) }
+      : emptyForm(suggestedCode, pickDefaultSalesStaffId(loadStaffUsers())),
   )
 
   useEffect(() => {
+    const on = () => setStaffUsers(loadStaffUsers())
+    window.addEventListener(STAFF_USERS_CHANGED_EVENT, on)
+    return () => window.removeEventListener(STAFF_USERS_CHANGED_EVENT, on)
+  }, [])
+
+  useEffect(() => {
     if (!open) return
+    const staff = loadStaffUsers()
     if (mode === 'edit' && initial) {
-      setForm(memberToForm(initial))
+      const base = memberToForm(initial)
+      base.salesStaffId = resolveSalesStaffId(base.salesStaffId, staff)
+      setForm(base)
     } else {
-      setForm(emptyForm(suggestedCode))
+      setForm(emptyForm(suggestedCode, pickDefaultSalesStaffId(staff)))
     }
   }, [open, mode, initial, suggestedCode])
+
+  useEffect(() => {
+    if (!open) return
+    if (!staffUsers.length) {
+      setForm((f) => (f.salesStaffId === '' ? f : { ...f, salesStaffId: '' }))
+      return
+    }
+    const ids = new Set(staffUsers.map((s) => s.id))
+    setForm((f) => {
+      if (ids.has(f.salesStaffId)) return f
+      return { ...f, salesStaffId: pickDefaultSalesStaffId(staffUsers) }
+    })
+  }, [open, staffUsers])
+
+  const salesSelectOptions = useMemo(() => {
+    const active = staffUsers.filter((s) => s.status === 'active')
+    return active.length ? active : staffUsers
+  }, [staffUsers])
 
   if (!open) return null
 
@@ -337,25 +386,35 @@ export function MemberFormModal({
               {/* คอลัมน์ขวา — เครดิต / ราคา / ระบบ */}
               <div className="space-y-2">
                 <p className="text-[10px] font-semibold uppercase tracking-wide text-violet-700">
-                  Sales · เครดิต · วงเงิน
+                  ผู้ดูแลข้อมูล · เครดิต · วงเงิน
                 </p>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className={labelClass} htmlFor="sales">
-                      Sales
+                      พนักงานผู้ดูแลข้อมูล
                     </label>
-                    <select
-                      id="sales"
-                      value={form.salesStaffId}
-                      onChange={(e) => set({ salesStaffId: e.target.value })}
-                      className={inputClass}
-                    >
-                      {MOCK_SALES_STAFF.map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.displayName}
-                        </option>
-                      ))}
-                    </select>
+                    <p className="mb-1 text-[9px] leading-snug text-slate-500">
+                      รายชื่อจากการตั้งค่า → จัดการผู้ใช้ (บันทึกว่าใครกรอก/แก้ข้อมูลสมาชิก)
+                    </p>
+                    {salesSelectOptions.length === 0 ? (
+                      <p className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-[10px] text-amber-900">
+                        ยังไม่มีพนักงานในระบบ — ไปที่ <span className="font-semibold">การตั้งค่า → จัดการผู้ใช้</span> เพื่อเพิ่มรายชื่อ
+                      </p>
+                    ) : (
+                      <select
+                        id="sales"
+                        value={form.salesStaffId}
+                        onChange={(e) => set({ salesStaffId: e.target.value })}
+                        className={inputClass}
+                      >
+                        {salesSelectOptions.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.displayNamePos}
+                            {s.username ? ` · ${s.username}` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    )}
                   </div>
                   <div>
                     <label className={labelClass} htmlFor="credit-limit">

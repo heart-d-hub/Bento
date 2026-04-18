@@ -7,7 +7,7 @@ import type { PosSaleRecord } from '@/features/pos/data/posSalesHistory'
 export const MOCK_POS_SALES_HISTORY: PosSaleRecord[] = [
   {
     id: 'demo-1',
-    billNo: '1P69-000101',
+    billNo: '1PA69040101',
     at: '2026-04-02T09:15:00',
     total: 1250.5,
     paymentId: 'cash',
@@ -19,7 +19,7 @@ export const MOCK_POS_SALES_HISTORY: PosSaleRecord[] = [
   },
   {
     id: 'demo-2',
-    billNo: '2P69-000015',
+    billNo: '2PA69040015',
     at: '2026-04-02T11:42:00',
     total: 3200,
     paymentId: 'qr',
@@ -28,7 +28,7 @@ export const MOCK_POS_SALES_HISTORY: PosSaleRecord[] = [
   },
   {
     id: 'demo-3',
-    billNo: '1P69-000102',
+    billNo: '1PA69040102',
     at: '2026-04-01T16:05:00',
     total: 450,
     paymentId: 'bill',

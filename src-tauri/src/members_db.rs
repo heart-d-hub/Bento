@@ -1,6 +1,6 @@
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
-use sqlx::{postgres::PgPoolOptions, FromRow, PgPool};
+use sqlx::{FromRow, PgPool};
 
 static DB_POOL: OnceCell<PgPool> = OnceCell::new();
 
@@ -22,13 +22,13 @@ async fn ensure_default_branches(pool: &PgPool) -> Result<(), String> {
     r#"
     INSERT INTO "Branch" ("id", "code", "name", "isActive", "createdAt", "updatedAt")
     VALUES
-      ('somneuk', 'SOM', 'สมนึกอะไหล่', true, now(), now()),
-      ('ang', 'ANG', 'อังอะไหล่', true, now(), now())
+      ('somneuk', 'SOM', 'สมนึกอะไหล่', true, (now() AT TIME ZONE 'Asia/Bangkok'), (now() AT TIME ZONE 'Asia/Bangkok')),
+      ('ang', 'ANG', 'อังอะไหล่', true, (now() AT TIME ZONE 'Asia/Bangkok'), (now() AT TIME ZONE 'Asia/Bangkok'))
     ON CONFLICT ("id") DO UPDATE SET
       "code" = EXCLUDED."code",
       "name" = EXCLUDED."name",
       "isActive" = EXCLUDED."isActive",
-      "updatedAt" = now()
+      "updatedAt" = (now() AT TIME ZONE 'Asia/Bangkok')
     "#,
   )
   .execute(pool)
@@ -50,7 +50,7 @@ async fn upsert_member(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, m: &Membe
       $1, $2, $3, NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''), NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''),
       $11, $12, $13, $14, $15,
       $16::"PriceTier", $17, NULLIF($18, ''), NULLIF($19, ''), $20::jsonb, NULLIF($21, ''),
-      $22, $23::"MemberStatus", NULLIF($24, ''), $25, $26, COALESCE(NULLIF($27, '')::date::timestamp, now()), now()
+      $22, $23::"MemberStatus", NULLIF($24, ''), $25, $26, COALESCE(NULLIF($27, '')::date::timestamp, (now() AT TIME ZONE 'Asia/Bangkok')), (now() AT TIME ZONE 'Asia/Bangkok')
     )
     ON CONFLICT (id) DO UPDATE SET
       "memberCode" = EXCLUDED."memberCode",
@@ -78,7 +78,7 @@ async fn upsert_member(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, m: &Membe
       "branchId" = EXCLUDED."branchId",
       "pointsBalance" = EXCLUDED."pointsBalance",
       "arBalance" = EXCLUDED."arBalance",
-      "updatedAt" = now()
+      "updatedAt" = (now() AT TIME ZONE 'Asia/Bangkok')
     "#,
   )
   .bind(m.id.clone())
@@ -153,9 +153,7 @@ async fn get_pool() -> Result<PgPool, String> {
   let _ = dotenvy::from_filename("../.env");
   let _ = dotenvy::dotenv();
   let url = std::env::var("DATABASE_URL").map_err(|_| "DATABASE_URL is not set".to_string())?;
-  let pool = PgPoolOptions::new()
-    .max_connections(5)
-    .connect(&url)
+  let pool = crate::postgres_pool::connect_pool(&url)
     .await
     .map_err(|e| format!("connect postgres failed: {e}"))?;
   let _ = DB_POOL.set(pool.clone());

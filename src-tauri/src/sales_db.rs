@@ -1,6 +1,6 @@
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
-use sqlx::{postgres::PgPoolOptions, FromRow, PgPool};
+use sqlx::{FromRow, PgPool};
 
 static DB_POOL: OnceCell<PgPool> = OnceCell::new();
 
@@ -11,13 +11,22 @@ async fn get_pool() -> Result<PgPool, String> {
   let _ = dotenvy::from_filename("../.env");
   let _ = dotenvy::dotenv();
   let url = std::env::var("DATABASE_URL").map_err(|_| "DATABASE_URL is not set".to_string())?;
-  let pool = PgPoolOptions::new()
-    .max_connections(5)
-    .connect(&url)
+  let pool = crate::postgres_pool::connect_pool(&url)
     .await
     .map_err(|e| format!("connect postgres failed: {e}"))?;
   let _ = DB_POOL.set(pool.clone());
   Ok(pool)
+}
+
+/// ตรวจว่าเชื่อม PostgreSQL ได้ (ใช้ DATABASE_URL จาก .env)
+#[tauri::command]
+pub async fn database_ping() -> Result<(), String> {
+  let pool = get_pool().await?;
+  sqlx::query_scalar::<_, i32>("SELECT 1")
+    .fetch_one(&pool)
+    .await
+    .map_err(|e| format!("database ping failed: {e}"))?;
+  Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,9 +123,9 @@ pub async fn sales_create(payload: SaleCreatePayload) -> Result<SaleCreateResult
       subtotal, "billDiscount", "beforeVat", "vatAmount", "roundingAdjust", "grandTotal",
       remark, "branchId", "memberId", "createdAt", "updatedAt"
     ) VALUES (
-      $1, $2, NULLIF($3, ''), $4::"SaleMode", $5::"SalePaymentType", COALESCE(NULLIF($6, '')::date::timestamp, now()),
+      $1, $2, NULLIF($3, ''), $4::"SaleMode", $5::"SalePaymentType", COALESCE(NULLIF($6, '')::date::timestamp, (now() AT TIME ZONE 'Asia/Bangkok')),
       $7, $8, $9, $10, $11, $12,
-      NULLIF($13, ''), NULLIF($14, ''), $15, now(), now()
+      NULLIF($13, ''), NULLIF($14, ''), $15, (now() AT TIME ZONE 'Asia/Bangkok'), (now() AT TIME ZONE 'Asia/Bangkok')
     )
     "#,
   )
@@ -145,11 +154,11 @@ pub async fn sales_create(payload: SaleCreatePayload) -> Result<SaleCreateResult
       INSERT INTO "Product" (
         id, sku, name, category, "isActive", "createdAt", "updatedAt"
       ) VALUES (
-        $1, $2, $3, 'ทั่วไป', true, now(), now()
+        $1, $2, $3, 'ทั่วไป', true, (now() AT TIME ZONE 'Asia/Bangkok'), (now() AT TIME ZONE 'Asia/Bangkok')
       )
       ON CONFLICT (sku) DO UPDATE SET
         name = EXCLUDED.name,
-        "updatedAt" = now()
+        "updatedAt" = (now() AT TIME ZONE 'Asia/Bangkok')
       RETURNING id
       "#,
     )
@@ -167,7 +176,7 @@ pub async fn sales_create(payload: SaleCreatePayload) -> Result<SaleCreateResult
         "priceLevelLabel", "priceLevelIndex", "priceTagLabel", "createdAt", "saleId", "productId"
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7,
-        NULLIF($8, ''), $9, NULLIF($10, ''), now(), $11, $12
+        NULLIF($8, ''), $9, NULLIF($10, ''), (now() AT TIME ZONE 'Asia/Bangkok'), $11, $12
       )
       "#,
     )
@@ -314,4 +323,163 @@ pub async fn sales_get_by_bill_no(bill_no: String) -> Result<Option<SalesHistory
   .await
   .map_err(|e| format!("query sale by bill no failed: {e}"))?;
   Ok(row)
+}
+
+// --- POS bill / tax invoice sequence (Postgres, แทน localStorage) ---
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PosBillSeqPayload {
+  pub kind: String,
+  pub doc_date: String,
+  pub machine: i32,
+  pub branch_id: Option<String>,
+}
+
+fn branch_letter(branch_id: Option<&str>) -> char {
+  match branch_id.map(str::trim).filter(|s| !s.is_empty()) {
+    Some("somneuk") => 'S',
+    _ => 'A',
+  }
+}
+
+fn parse_doc_date_yyyy_mm_dd(s: &str) -> Result<(i32, u32), String> {
+  let t = s.trim();
+  if t.len() != 10 || t.as_bytes().get(4) != Some(&b'-') || t.as_bytes().get(7) != Some(&b'-') {
+    return Err(format!("invalid docDate (expected YYYY-MM-DD): {t}"));
+  }
+  let y: i32 = t[0..4]
+    .parse()
+    .map_err(|_| format!("invalid year in docDate: {t}"))?;
+  let mo: u32 = t[5..7]
+    .parse()
+    .map_err(|_| format!("invalid month in docDate: {t}"))?;
+  if !(1..=12).contains(&mo) {
+    return Err(format!("invalid month in docDate: {t}"));
+  }
+  Ok((y, mo))
+}
+
+fn buddhist_era_year_last2_digits(gregorian_year: i32) -> i32 {
+  let be = gregorian_year + 543;
+  be.rem_euclid(100)
+}
+
+fn retail_storage_key(machine: i32, letter: char, yy: i32, mm: u32) -> String {
+  // ตรงกับ localStorage key เดิม: `${machine}-P-${L}-${yy}-${mm}` (yy ไม่ pad ใน key)
+  format!("{machine}-P-{letter}-{yy}-{mm:02}")
+}
+
+fn tax_machine_prefix(letter: char, machine: i32) -> String {
+  let digit = machine.clamp(1, 9);
+  format!("{letter}{digit}")
+}
+
+fn tax_storage_key(prefix: &str, yy: i32, mm: u32) -> String {
+  format!("{prefix}-{yy}-{mm:02}")
+}
+
+fn format_retail_bill(machine: i32, letter: char, yy: i32, mm: u32, seq: i32) -> String {
+  format!("{machine}P{letter}{yy:02}{mm:02}{seq:04}")
+}
+
+fn format_tax_bill(prefix: &str, yy: i32, mm: u32, seq: i32) -> String {
+  format!("{prefix}{yy:02}{mm:02}{seq:04}")
+}
+
+struct ResolvedPosBillSeq {
+  key: String,
+  kind: String,
+  yy: i32,
+  mm: u32,
+  machine: i32,
+  letter: char,
+  tax_prefix: Option<String>,
+}
+
+fn resolve_pos_bill_seq(p: &PosBillSeqPayload) -> Result<ResolvedPosBillSeq, String> {
+  let kind = p.kind.trim().to_ascii_lowercase();
+  if kind != "retail" && kind != "tax" {
+    return Err(format!("pos bill kind must be retail or tax, got {}", p.kind));
+  }
+  let (gy, mm) = parse_doc_date_yyyy_mm_dd(&p.doc_date)?;
+  let yy = buddhist_era_year_last2_digits(gy);
+  let letter = branch_letter(p.branch_id.as_deref());
+  let machine = p.machine.clamp(1, 99);
+  if kind == "retail" {
+    let key = retail_storage_key(machine, letter, yy, mm);
+    return Ok(ResolvedPosBillSeq {
+      key,
+      kind,
+      yy,
+      mm,
+      machine,
+      letter,
+      tax_prefix: None,
+    });
+  }
+  let prefix = tax_machine_prefix(letter, machine);
+  let key = tax_storage_key(&prefix, yy, mm);
+  Ok(ResolvedPosBillSeq {
+    key,
+    kind,
+    yy,
+    mm,
+    machine,
+    letter,
+    tax_prefix: Some(prefix),
+  })
+}
+
+async fn pos_bill_next_seq(pool: &PgPool, key: &str) -> Result<i32, String> {
+  let seq: i32 = sqlx::query_scalar(
+    r#"
+    INSERT INTO "PosBillSequenceCounter" (id, "lastSeq", "updatedAt")
+    VALUES ($1, 1, (now() AT TIME ZONE 'Asia/Bangkok'))
+    ON CONFLICT (id) DO UPDATE SET
+      "lastSeq" = "PosBillSequenceCounter"."lastSeq" + 1,
+      "updatedAt" = (now() AT TIME ZONE 'Asia/Bangkok')
+    RETURNING "lastSeq"
+    "#,
+  )
+  .bind(key)
+  .fetch_one(pool)
+  .await
+  .map_err(|e| format!("pos bill sequence bump failed: {e}"))?;
+  Ok(seq)
+}
+
+async fn pos_bill_peek_seq(pool: &PgPool, key: &str) -> Result<i32, String> {
+  let prev: Option<i32> = sqlx::query_scalar(r#"SELECT "lastSeq" FROM "PosBillSequenceCounter" WHERE id = $1"#)
+    .bind(key)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("pos bill sequence peek failed: {e}"))?;
+  Ok(prev.map(|v| v + 1).unwrap_or(1))
+}
+
+/// เลขบิล/ใบกำกับถัดไป (ยังไม่เพิ่มลำดับใน DB)
+#[tauri::command]
+pub async fn pos_bill_peek_next(payload: PosBillSeqPayload) -> Result<String, String> {
+  let pool = get_pool().await?;
+  let r = resolve_pos_bill_seq(&payload)?;
+  let seq = pos_bill_peek_seq(&pool, &r.key).await?;
+  if r.kind == "retail" {
+    return Ok(format_retail_bill(r.machine, r.letter, r.yy, r.mm, seq));
+  }
+  let prefix = r.tax_prefix.ok_or_else(|| "tax prefix missing".to_string())?;
+  Ok(format_tax_bill(&prefix, r.yy, r.mm, seq))
+}
+
+/// เพิ่มลำดับใน DB แล้วคืนเลขที่จัดรูปแบบแล้ว
+#[tauri::command]
+pub async fn pos_bill_next(payload: PosBillSeqPayload) -> Result<String, String> {
+  let pool = get_pool().await?;
+  let r = resolve_pos_bill_seq(&payload)?;
+  let seq = pos_bill_next_seq(&pool, &r.key).await?;
+  if r.kind == "retail" {
+    return Ok(format_retail_bill(r.machine, r.letter, r.yy, r.mm, seq));
+  }
+  let prefix = r.tax_prefix.ok_or_else(|| "tax prefix missing".to_string())?;
+  Ok(format_tax_bill(&prefix, r.yy, r.mm, seq))
 }

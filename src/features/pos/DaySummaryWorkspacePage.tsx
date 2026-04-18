@@ -1,10 +1,10 @@
-import type { PaymentMethodId } from '@/features/pos/data/placeholders'
 import {
   getTodaySalesSummary,
   loadRecentSales,
   POS_SALE_RECORDED_EVENT,
 } from '@/features/pos/data/posSalesHistory'
 import { loadPosDaySummaryAsync } from '@/features/pos/data/posSalesDb'
+import { localDateYYYYMMDD } from '@/features/pos/utils/posLocalDate'
 import { clsx } from 'clsx'
 import { Banknote } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
@@ -27,8 +27,9 @@ function isSameLocalDay(iso: string, ref: Date): boolean {
 }
 
 export function DaySummaryWorkspacePage({ className }: DaySummaryWorkspacePageProps) {
-  const today = useMemo(() => new Date(), [])
   const [tick, setTick] = useState(0)
+  const [dayPulse, setDayPulse] = useState(0)
+  const today = useMemo(() => new Date(), [tick, dayPulse])
   const [dbCount, setDbCount] = useState<number | null>(null)
   const [dbTotalBaht, setDbTotalBaht] = useState<number | null>(null)
   const [dbByPayment, setDbByPayment] = useState<Array<{ id: string; baht: number }> | null>(null)
@@ -40,7 +41,12 @@ export function DaySummaryWorkspacePage({ className }: DaySummaryWorkspacePagePr
   }, [])
 
   useEffect(() => {
-    const docDate = today.toISOString().slice(0, 10)
+    const id = window.setInterval(() => setDayPulse((p) => p + 1), 60_000)
+    return () => window.clearInterval(id)
+  }, [])
+
+  useEffect(() => {
+    const docDate = localDateYYYYMMDD(today)
     let alive = true
     void loadPosDaySummaryAsync(docDate)
       .then((res) => {
@@ -84,10 +90,11 @@ export function DaySummaryWorkspacePage({ className }: DaySummaryWorkspacePagePr
 
   const byPayment = useMemo(() => {
     if (dbByPayment) return dbByPayment
-    const map = new Map<PaymentMethodId, number>()
+    const map = new Map<string, number>()
     for (const s of loadRecentSales()) {
       if (!isSameLocalDay(s.at, today)) continue
-      map.set(s.paymentId, (map.get(s.paymentId) ?? 0) + s.total)
+      const key = String(s.paymentId)
+      map.set(key, (map.get(key) ?? 0) + s.total)
     }
     return [...map.entries()].sort((a, b) => b[1] - a[1]).map(([id, baht]) => ({ id, baht }))
   }, [dbByPayment, today, tick])

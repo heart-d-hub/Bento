@@ -1,4 +1,6 @@
 import { getStaffRole, getStaffUsername, getStoredBranch, isLoggedIn } from '@/features/auth/authSession'
+import { pingDatabase } from '@/features/desktop/databaseHealth'
+import { hydrateProductMasterFromDb } from '@/features/inventory/data/productMasterData'
 import { MainDashboard } from '@/features/main/components/MainDashboard'
 import { MainTopNav } from '@/features/main/components/MainTopNav'
 import { WorkspaceTabPanel } from '@/features/main/components/WorkspaceTabPanel'
@@ -7,7 +9,7 @@ import { useGlobalShortcuts } from '@/features/desktop/useGlobalShortcuts'
 import { PosCartProvider } from '@/features/pos/context/PosCartContext'
 import { HubAutoSync } from '@/features/sync/HubAutoSync'
 import { VehicleCatalogProvider } from '@/features/vehicle/context/VehicleCatalogContext'
-import { type ReactNode, useEffect } from 'react'
+import { type ReactNode, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 function workspacePageTitle(activeTabId: string | null): string | undefined {
@@ -32,6 +34,28 @@ function MainPageContent() {
   const branch = getStoredBranch()
   const staffRole = getStaffRole()
   const staffUsername = getStaffUsername()
+  const [dbBanner, setDbBanner] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    void pingDatabase().then((r) => {
+      if (cancelled || r.ok) return
+      setDbBanner(r.message)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    void hydrateProductMasterFromDb().then(() => {
+      if (cancelled) return
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   useGlobalShortcuts({
     'ui.close': () => {
@@ -59,6 +83,18 @@ function MainPageContent() {
 
   return (
     <div className="flex h-dvh max-h-dvh min-h-0 flex-col overflow-hidden bg-gradient-to-b from-slate-100 via-slate-50/95 to-slate-100">
+      {dbBanner ? (
+        <div
+          role="status"
+          className="shrink-0 border-b border-amber-300/90 bg-amber-50 px-3 py-2 text-center text-[11px] leading-snug text-amber-950 sm:px-4"
+        >
+          <span className="font-semibold">ฐานข้อมูลไม่พร้อม:</span> {dbBanner}
+          <span className="block text-amber-900/90 sm:inline sm:before:content-['\00a0—\00a0']">
+            ตั้งค่า <code className="rounded bg-amber-100/80 px-1 font-mono text-[10px]">DATABASE_URL</code> ในไฟล์{' '}
+            <code className="rounded bg-amber-100/80 px-1 font-mono text-[10px]">.env</code> ที่รากโปรเจกต์ แล้วรีสตาร์ทแอป
+          </span>
+        </div>
+      ) : null}
       <MainTopNav
         pageTitle={workspacePageTitle(activeTabId)}
         shopName={branch?.name ?? 'สมนึกอะไหล่'}

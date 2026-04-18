@@ -17,14 +17,3 @@ export type MemberItemTierOverride = {
   tier: MemberPriceTier
 }
 
-export type SalesStaff = {
-  id: string
-  displayName: string
-}
-
-export const MOCK_SALES_STAFF: SalesStaff[] = [
-  { id: 's1', displayName: 'พี่หนึ่ง (แคชเชียร์)' },
-  { id: 's2', displayName: 'พี่สอง (ช่าง)' },
-  { id: 's3', displayName: 'พี่สาม (ฝ่ายขาย)' },
-  { id: 's4', displayName: 'พี่สี่ (สต็อก)' },
-]

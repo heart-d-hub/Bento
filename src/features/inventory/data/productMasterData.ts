@@ -1,6 +1,8 @@
 /** รายละเอียดแฟ้มข้อมูลสินค้า + สต็อกข้ามคลัง (mock) */
 
 import type { BranchId } from '@/features/auth/branches'
+import { isTauri } from '@/features/desktop/isTauri'
+import { invoke } from '@tauri-apps/api/core'
 
 export type CrossBranchStockRow = {
   id: string
@@ -1074,6 +1076,88 @@ const PRODUCT_MASTER_LIST_LS_KEY = 'bento.inventory.productMasterList.v1'
 
 export const PRODUCT_MASTER_LIST_CHANGED_EVENT = 'bento-product-master-list-changed'
 
+/** เมื่อโหลดจาก Postgres แล้ว — ให้ getProductMasterList() ใช้ชุดนี้แทน localStorage */
+let productMasterMemoryCache: ProductMasterDetail[] | null = null
+
+export function clearProductMasterMemoryCache(): void {
+  productMasterMemoryCache = null
+}
+
+const PRODUCT_MASTER_DB_DEBOUNCE_MS = 1200
+
+let productMasterDbDebounceTimer: number | null = null
+let productMasterDbPending: ProductMasterDetail[] | null = null
+
+async function persistProductMasterListToDb(products: ProductMasterDetail[]): Promise<void> {
+  const rows = JSON.parse(JSON.stringify(products)) as unknown[]
+  await invoke('products_master_replace_all', { rows })
+}
+
+/** บังคับบันทึกลง Postgres ทันที (เช่น ก่อนออกจากหน้าแฟ้มสินค้า) */
+export function flushProductMasterDbSave(): Promise<void> {
+  if (productMasterDbDebounceTimer !== null) {
+    clearTimeout(productMasterDbDebounceTimer)
+    productMasterDbDebounceTimer = null
+  }
+  if (!isTauri() || !productMasterDbPending) {
+    productMasterDbPending = null
+    return Promise.resolve()
+  }
+  const snap = productMasterDbPending
+  productMasterDbPending = null
+  return persistProductMasterListToDb(snap).catch((e) => {
+    const msg = e instanceof Error ? e.message : String(e)
+    window.alert(`บันทึกแฟ้มสินค้าลงฐานข้อมูลไม่สำเร็จ\n${msg}`)
+    throw e
+  })
+}
+
+function schedulePersistProductMasterListToDb(products: ProductMasterDetail[]): void {
+  if (!isTauri()) return
+  productMasterDbPending = products
+  if (productMasterDbDebounceTimer !== null) {
+    clearTimeout(productMasterDbDebounceTimer)
+  }
+  productMasterDbDebounceTimer = window.setTimeout(() => {
+    productMasterDbDebounceTimer = null
+    const snap = productMasterDbPending
+    productMasterDbPending = null
+    if (!snap) return
+    void persistProductMasterListToDb(snap).catch((e) => {
+      const msg = e instanceof Error ? e.message : String(e)
+      window.alert(`บันทึกแฟ้มสินค้าลงฐานข้อมูลไม่สำเร็จ\n${msg}`)
+    })
+  }, PRODUCT_MASTER_DB_DEBOUNCE_MS)
+}
+
+/** โหลดแฟ้มสินค้าจาก Postgres (Tauri) — ถ้ามีข้อมูลจะอัปเดต cache + localStorage */
+export async function hydrateProductMasterFromDb(): Promise<ProductMasterDetail[]> {
+  if (!isTauri()) {
+    return getProductMasterList()
+  }
+  try {
+    const rows = await invoke<unknown[]>('products_master_load')
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return getProductMasterList()
+    }
+    const list = rows
+      .map((r) => r as ProductMasterDetail)
+      .filter((p) => p && typeof p.id === 'string' && typeof p.sku === 'string')
+    const normalized = migrateLegacyHoseProductTag(list)
+    productMasterMemoryCache = normalized
+    try {
+      localStorage.setItem(PRODUCT_MASTER_LIST_LS_KEY, JSON.stringify(normalized))
+    } catch {
+      /* ignore */
+    }
+    window.dispatchEvent(new CustomEvent(PRODUCT_MASTER_LIST_CHANGED_EVENT))
+    return normalized
+  } catch (e) {
+    console.error('[product-master] hydrateProductMasterFromDb failed', e)
+    return getProductMasterList()
+  }
+}
+
 /** รายการสินค้าที่ใช้ในระบบ — ถ้ามีข้อมูลใน localStorage ใช้ชุดนั้น ไม่เช่นนั้นใช้ชุดตัวอย่างในตัวโปรแกรม */
 function migrateLegacyHoseProductTag(list: ProductMasterDetail[]): ProductMasterDetail[] {
   let dirty = false
@@ -1092,6 +1176,9 @@ function migrateLegacyHoseProductTag(list: ProductMasterDetail[]): ProductMaster
 }
 
 export function getProductMasterList(): ProductMasterDetail[] {
+  if (productMasterMemoryCache !== null) {
+    return productMasterMemoryCache
+  }
   try {
     const raw = localStorage.getItem(PRODUCT_MASTER_LIST_LS_KEY)
     if (!raw) return [...PRODUCT_MASTER_DETAILS]
@@ -1107,13 +1194,22 @@ export function saveProductMasterList(
   products: ProductMasterDetail[],
   opts?: { notify?: boolean },
 ): void {
-  localStorage.setItem(PRODUCT_MASTER_LIST_LS_KEY, JSON.stringify(products))
+  productMasterMemoryCache = products
+  try {
+    localStorage.setItem(PRODUCT_MASTER_LIST_LS_KEY, JSON.stringify(products))
+  } catch {
+    /* ignore */
+  }
   if (opts?.notify !== false) {
     window.dispatchEvent(new CustomEvent(PRODUCT_MASTER_LIST_CHANGED_EVENT))
+  }
+  if (isTauri()) {
+    schedulePersistProductMasterListToDb(products)
   }
 }
 
 export function clearProductMasterListOverride(): void {
+  productMasterMemoryCache = null
   localStorage.removeItem(PRODUCT_MASTER_LIST_LS_KEY)
   window.dispatchEvent(new CustomEvent(PRODUCT_MASTER_LIST_CHANGED_EVENT))
 }

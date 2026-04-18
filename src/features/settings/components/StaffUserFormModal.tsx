@@ -22,6 +22,8 @@ export type StaffUserFormValues = {
   photoDataUrl: string | null
   password: string
   role: string
+  /** สิทธิ์ครบทุกเมนู (ระดับ admin) */
+  isAdmin: boolean
   startDate: string
   status: StaffStatus
 }
@@ -42,6 +44,7 @@ function emptyForm(): StaffUserFormValues {
     photoDataUrl: null,
     password: '',
     role: '',
+    isAdmin: false,
     startDate: new Date().toISOString().slice(0, 10),
     status: 'active',
   }
@@ -55,6 +58,7 @@ function toForm(u: StaffUser): StaffUserFormValues {
     photoDataUrl: u.photoDataUrl,
     password: u.password.includes('•') ? '' : u.password,
     role: u.role,
+    isAdmin: Boolean(u.isAdmin),
     startDate: u.startDate,
     status: u.status,
   }
@@ -109,8 +113,8 @@ export function StaffUserFormModal({
     if (!form.username.trim() || !form.displayNamePos.trim()) return
     if (mode === 'create' && !form.password.trim()) return
     const nid = normalizeNationalIdDigits(form.nationalId)
-    if (!isValidNationalIdDigits(nid)) {
-      setNationalIdError('กรอกเลขบัตรประชาชนไม่ครบ 13 หลัก')
+    if (nid.length > 0 && !isValidNationalIdDigits(nid)) {
+      setNationalIdError('กรอกให้ครบ 13 หลัก หรือเว้นว่าง')
       return
     }
     setNationalIdError(null)
@@ -168,19 +172,35 @@ export function StaffUserFormModal({
               </label>
               <input
                 id="su-password"
-                type="password"
+                type="text"
                 value={form.password}
                 onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
                 className={inputClass}
                 placeholder={mode === 'edit' ? 'เว้นว่างถ้าไม่เปลี่ยน' : ''}
-                autoComplete={mode === 'create' ? 'new-password' : 'current-password'}
+                autoComplete="off"
+                spellCheck={false}
                 required={mode === 'create'}
               />
               <p className="mt-1 text-[11px] text-slate-500">
-                ตัวอย่างนี้เก็บใน mock เท่านั้น — ระบบจริงต้องเข้ารหัส
+                แสดงแบบอ่านได้ใน mock — ระบบจริงต้องเข้ารหัสและไม่แสดง plain text
               </p>
             </div>
           </div>
+
+          <label className="flex cursor-pointer items-start gap-2.5 rounded-xl border border-slate-200 bg-slate-50/90 px-3 py-2.5 transition hover:bg-slate-100/90">
+            <input
+              type="checkbox"
+              className="mt-0.5 size-4 shrink-0 rounded border-slate-300 text-slate-900 focus:ring-slate-400"
+              checked={form.isAdmin}
+              onChange={(e) => setForm((f) => ({ ...f, isAdmin: e.target.checked }))}
+            />
+            <span className="min-w-0">
+              <span className="block text-sm font-medium text-slate-900">ผู้ดูแลระบบ (Admin)</span>
+              <span className="mt-0.5 block text-[11px] leading-snug text-slate-600">
+                เปิดเมื่อต้องการสิทธิ์ครบทุกเมนูเหมือน admin — ใช้เพิ่มบัญชีผู้ดูแลระบบได้
+              </span>
+            </span>
+          </label>
 
           <div>
             <label className={labelClass} htmlFor="su-display">
@@ -198,7 +218,7 @@ export function StaffUserFormModal({
 
           <div>
             <label className={labelClass} htmlFor="su-national-id">
-              เลขบัตรประชาชน <span className="text-slate-600">*</span>
+              เลขบัตรประชาชน <span className="font-normal text-slate-400">(ไม่บังคับ)</span>
             </label>
             <input
               id="su-national-id"
@@ -213,12 +233,13 @@ export function StaffUserFormModal({
                 }))
               }}
               className={clsx(inputClass, nationalIdError && 'border-slate-400 ring-1 ring-slate-300')}
-              placeholder="กรอกเลข 13 หลัก"
+              placeholder="เว้นว่างได้ — กรอกครบ 13 หลัก"
               maxLength={13}
-              required
               aria-invalid={!!nationalIdError}
             />
-            <p className="mt-1 text-[11px] text-slate-500">เก็บเฉพาะตัวเลข 13 หลัก (mock — ระบบจริงต้องเข้ารหัสตาม PDPA)</p>
+            <p className="mt-1 text-[11px] text-slate-500">
+              ไม่บังคับ — ถ้ากรอกต้องครบ 13 หลัก (mock — ระบบจริงต้องเข้ารหัสตาม PDPA)
+            </p>
             {nationalIdError && (
               <p className="mt-1 text-xs text-slate-600" role="alert">
                 {nationalIdError}

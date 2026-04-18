@@ -1,14 +1,14 @@
 import { StaffUserFormModal, type StaffUserFormValues } from '@/features/settings/components/StaffUserFormModal'
 import {
   formatNationalIdDisplay,
-  MOCK_STAFF_USERS,
   normalizeNationalIdDigits,
   STAFF_STATUS_LABELS,
   type StaffStatus,
   type StaffUser,
 } from '@/features/settings/data/mockStaffUsers'
+import { loadStaffUsers, saveStaffUsers } from '@/features/settings/data/staffUsersStore'
 import { clsx } from 'clsx'
-import { Plus, Search } from 'lucide-react'
+import { Plus, Search, Trash2 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 
 function statusBadge(s: StaffStatus) {
@@ -24,7 +24,7 @@ function statusBadge(s: StaffStatus) {
 }
 
 export function UsersManagementPanel() {
-  const [rows, setRows] = useState<StaffUser[]>(() => [...MOCK_STAFF_USERS])
+  const [rows, setRows] = useState<StaffUser[]>(() => loadStaffUsers())
   const [q, setQ] = useState('')
   const [modalOpen, setModalOpen] = useState(false)
   const [mode, setMode] = useState<'create' | 'edit'>('create')
@@ -60,23 +60,26 @@ export function UsersManagementPanel() {
   const handleSubmit = (v: StaffUserFormValues) => {
     if (mode === 'create') {
       const id = `staff-${Date.now()}`
-      setRows((prev) => [
-        {
-          id,
-          username: v.username.trim(),
-          displayNamePos: v.displayNamePos.trim(),
-          nationalId: normalizeNationalIdDigits(v.nationalId),
-          photoDataUrl: v.photoDataUrl,
-          password: v.password,
-          role: v.role.trim(),
-          startDate: v.startDate,
-          status: v.status,
-        },
-        ...prev,
-      ])
+      const newRow: StaffUser = {
+        id,
+        username: v.username.trim(),
+        displayNamePos: v.displayNamePos.trim(),
+        nationalId: normalizeNationalIdDigits(v.nationalId),
+        photoDataUrl: v.photoDataUrl,
+        password: v.password,
+        role: v.role.trim(),
+        isAdmin: v.isAdmin,
+        startDate: v.startDate,
+        status: v.status,
+      }
+      setRows((prev) => {
+        const next = [newRow, ...prev]
+        queueMicrotask(() => saveStaffUsers(next))
+        return next
+      })
     } else if (editing) {
-      setRows((prev) =>
-        prev.map((r) =>
+      setRows((prev) => {
+        const next = prev.map((r) =>
           r.id === editing.id
             ? {
                 ...r,
@@ -85,12 +88,36 @@ export function UsersManagementPanel() {
                 photoDataUrl: v.photoDataUrl,
                 password: v.password.trim() ? v.password : r.password,
                 role: v.role.trim(),
+                isAdmin: v.isAdmin,
                 startDate: v.startDate,
                 status: v.status,
               }
             : r,
-        ),
-      )
+        )
+        queueMicrotask(() => saveStaffUsers(next))
+        return next
+      })
+    }
+  }
+
+  const handleDelete = (u: StaffUser) => {
+    if (rows.length <= 1) {
+      window.alert('ต้องมีพนักงานอย่างน้อย 1 คนในระบบ')
+      return
+    }
+    if (
+      !window.confirm(`ลบพนักงาน "${u.displayNamePos}" (${u.username}) ใช่หรือไม่?\nการลบไม่สามารถย้อนกลับได้`)
+    ) {
+      return
+    }
+    setRows((prev) => {
+      const next = prev.filter((x) => x.id !== u.id)
+      queueMicrotask(() => saveStaffUsers(next))
+      return next
+    })
+    if (editing?.id === u.id) {
+      setModalOpen(false)
+      setEditing(null)
     }
   }
 
@@ -158,17 +185,35 @@ export function UsersManagementPanel() {
                 <td className="whitespace-nowrap px-3 py-2.5 font-mono text-xs text-slate-700">
                   {formatNationalIdDisplay(r.nationalId)}
                 </td>
-                <td className="whitespace-nowrap px-3 py-2.5 text-slate-700">{r.role || '—'}</td>
+                <td className="px-3 py-2.5 text-slate-700">
+                  <span className="whitespace-nowrap">{r.role || '—'}</span>
+                  {r.isAdmin ? (
+                    <span className="ml-1.5 inline-flex rounded-md border border-violet-200 bg-violet-50 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-800">
+                      Admin
+                    </span>
+                  ) : null}
+                </td>
                 <td className="whitespace-nowrap px-3 py-2.5 text-slate-600">{r.startDate}</td>
                 <td className="px-3 py-2.5">{statusBadge(r.status)}</td>
                 <td className="whitespace-nowrap px-3 py-2.5 text-right">
-                  <button
-                    type="button"
-                    onClick={() => openEdit(r)}
-                    className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-800 hover:bg-slate-50"
-                  >
-                    แก้ไข
-                  </button>
+                  <div className="inline-flex flex-wrap items-center justify-end gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => openEdit(r)}
+                      className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-800 hover:bg-slate-50"
+                    >
+                      แก้ไข
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDelete(r)}
+                      className="inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-white px-2.5 py-1 text-xs font-medium text-rose-700 hover:bg-rose-50"
+                      aria-label={`ลบ ${r.username}`}
+                    >
+                      <Trash2 className="size-3.5 shrink-0" aria-hidden />
+                      ลบ
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}

@@ -150,6 +150,13 @@ model ProductPriceLevel {
   @@unique([productId, levelCode, unitIndex])
 }
 
+/** แฟ้มข้อมูลสินค้า (มาสเตอร์) — payload = ProductMasterDetail แบบ JSON */
+model ProductMasterRow {
+  id        String   @id
+  payload   Json
+  updatedAt DateTime @updatedAt
+}
+
 model Sale {
   id             String          @id @default(cuid())
   billNo         String          @unique
@@ -166,6 +173,8 @@ model Sale {
   remark         String?
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
+  /// Prisma Studio: ข้อความจาก createdAt — DB เติมด้วย trigger (ไม่มี suffix Z); ไม่ต้องส่งตอน create
+  createdAtBangkokDisplay String?
 
   branchId String?
   branch   Branch? @relation(fields: [branchId], references: [id], onDelete: SetNull)
@@ -178,6 +187,13 @@ model Sale {
   @@index([docDate])
   @@index([paymentType])
   @@index([branchId, docDate])
+}
+
+/** ลำดับเลขบิล POS (retail) / ใบกำกับ (tax) — คีย์ = ตามแอป (เครื่อง+สาขา+พ.ศ. 2 หลัก+เดือน) */
+model PosBillSequenceCounter {
+  id        String   @id
+  lastSeq   Int
+  updatedAt DateTime @updatedAt
 }
 
 model SaleLine {
