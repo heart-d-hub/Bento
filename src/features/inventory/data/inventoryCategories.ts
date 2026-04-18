@@ -1,8 +1,13 @@
 import { MOCK_PRODUCTS } from '@/features/inventory/data/mockInventory'
+import { isTauri } from '@/features/desktop/isTauri'
 import { getProductMasterList } from '@/features/inventory/data/productMasterData'
+import { invoke } from '@tauri-apps/api/core'
 
 const LEGACY_LIST_KEY = 'bento_inventory_category_list_v1'
 const TREE_KEY = 'bento_inventory_category_tree_v2'
+const CATEGORY_TREE_DB_DEBOUNCE_MS = 800
+let categoryTreeDbDebounceTimer: number | null = null
+let categoryTreeDbPending: MainCategory[] | null = null
 
 /** สถานะแสดง/ใช้งานหมวด (เช่น ซ่อนจากเมนูเว็บเมื่อ inactive) */
 export type CategoryStatus = 'active' | 'inactive'
@@ -371,7 +376,47 @@ export const INVENTORY_CATEGORIES_UPDATED_EVENT = 'bento-inventory-categories-up
 
 export function saveCategoryTree(tree: MainCategory[]) {
   localStorage.setItem(TREE_KEY, JSON.stringify(tree))
+  if (isTauri()) {
+    categoryTreeDbPending = tree
+    if (categoryTreeDbDebounceTimer !== null) {
+      clearTimeout(categoryTreeDbDebounceTimer)
+    }
+    categoryTreeDbDebounceTimer = window.setTimeout(() => {
+      categoryTreeDbDebounceTimer = null
+      const snap = categoryTreeDbPending
+      categoryTreeDbPending = null
+      if (!snap) return
+      void invoke('inventory_categories_replace_all', { payload: snap }).catch((e) => {
+        console.error('[inventory-categories] persist to db failed', e)
+      })
+    }, CATEGORY_TREE_DB_DEBOUNCE_MS)
+  }
   window.dispatchEvent(new CustomEvent(INVENTORY_CATEGORIES_UPDATED_EVENT))
+}
+
+export async function hydrateCategoryTreeFromDb(): Promise<MainCategory[]> {
+  const local = loadCategoryTree()
+  if (!isTauri()) return local
+  try {
+    const row = await invoke<unknown | null>('inventory_categories_load')
+    if (!row) {
+      if (local.length > 0) {
+        void invoke('inventory_categories_replace_all', { payload: local }).catch((e) => {
+          console.error('[inventory-categories] bootstrap db failed', e)
+        })
+      }
+      return local
+    }
+    const normalizedDb = normalizeCategoryTree(row)
+    if (normalizedDb.length === 0) return local
+    const merged = mergeMissingMainCategoriesFromMaster(normalizedDb)
+    localStorage.setItem(TREE_KEY, JSON.stringify(merged))
+    window.dispatchEvent(new CustomEvent(INVENTORY_CATEGORIES_UPDATED_EVENT))
+    return merged
+  } catch (e) {
+    console.error('[inventory-categories] hydrate from db failed', e)
+    return local
+  }
 }
 
 /**

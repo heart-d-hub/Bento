@@ -1,5 +1,6 @@
 import { getStaffRole, getStaffUsername, getStoredBranch, isLoggedIn } from '@/features/auth/authSession'
 import { pingDatabase } from '@/features/desktop/databaseHealth'
+import { hydrateCategoryTreeFromDb } from '@/features/inventory/data/inventoryCategories'
 import { hydrateProductMasterFromDb } from '@/features/inventory/data/productMasterData'
 import { MainDashboard } from '@/features/main/components/MainDashboard'
 import { MainTopNav } from '@/features/main/components/MainTopNav'
@@ -50,6 +51,16 @@ function MainPageContent() {
   useEffect(() => {
     let cancelled = false
     void hydrateProductMasterFromDb().then(() => {
+      if (cancelled) return
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    void hydrateCategoryTreeFromDb().then(() => {
       if (cancelled) return
     })
     return () => {

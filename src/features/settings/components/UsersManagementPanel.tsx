@@ -6,10 +6,15 @@ import {
   type StaffStatus,
   type StaffUser,
 } from '@/features/settings/data/mockStaffUsers'
-import { loadStaffUsers, saveStaffUsers } from '@/features/settings/data/staffUsersStore'
+import {
+  flushStaffUsersDbSave,
+  hydrateStaffUsersFromDb,
+  loadStaffUsers,
+  saveStaffUsers,
+} from '@/features/settings/data/staffUsersStore'
 import { clsx } from 'clsx'
 import { Plus, Search, Trash2 } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 function statusBadge(s: StaffStatus) {
   const cls =
@@ -29,6 +34,12 @@ export function UsersManagementPanel() {
   const [modalOpen, setModalOpen] = useState(false)
   const [mode, setMode] = useState<'create' | 'edit'>('create')
   const [editing, setEditing] = useState<StaffUser | null>(null)
+
+  useEffect(() => {
+    void hydrateStaffUsersFromDb().then((users) => {
+      setRows(users)
+    })
+  }, [])
 
   const filtered = useMemo(() => {
     const term = q.trim().toLowerCase()
@@ -59,14 +70,21 @@ export function UsersManagementPanel() {
 
   const handleSubmit = (v: StaffUserFormValues) => {
     if (mode === 'create') {
+      const normalizedUsername = v.username.trim()
+      if (!normalizedUsername) return
+      const hasDuplicate = rows.some((r) => r.username.trim().toLowerCase() === normalizedUsername.toLowerCase())
+      if (hasDuplicate) {
+        window.alert(`มี username "${normalizedUsername}" อยู่แล้ว กรุณาใช้ชื่ออื่น`)
+        return
+      }
       const id = `staff-${Date.now()}`
       const newRow: StaffUser = {
         id,
-        username: v.username.trim(),
+        username: normalizedUsername,
         displayNamePos: v.displayNamePos.trim(),
         nationalId: normalizeNationalIdDigits(v.nationalId),
         photoDataUrl: v.photoDataUrl,
-        password: v.password,
+        password: v.password.trim(),
         role: v.role.trim(),
         isAdmin: v.isAdmin,
         startDate: v.startDate,
@@ -74,7 +92,10 @@ export function UsersManagementPanel() {
       }
       setRows((prev) => {
         const next = [newRow, ...prev]
-        queueMicrotask(() => saveStaffUsers(next))
+        queueMicrotask(() => {
+          saveStaffUsers(next)
+          void flushStaffUsersDbSave()
+        })
         return next
       })
     } else if (editing) {
@@ -94,7 +115,10 @@ export function UsersManagementPanel() {
               }
             : r,
         )
-        queueMicrotask(() => saveStaffUsers(next))
+        queueMicrotask(() => {
+          saveStaffUsers(next)
+          void flushStaffUsersDbSave()
+        })
         return next
       })
     }
@@ -112,7 +136,10 @@ export function UsersManagementPanel() {
     }
     setRows((prev) => {
       const next = prev.filter((x) => x.id !== u.id)
-      queueMicrotask(() => saveStaffUsers(next))
+      queueMicrotask(() => {
+        saveStaffUsers(next)
+        void flushStaffUsersDbSave()
+      })
       return next
     })
     if (editing?.id === u.id) {

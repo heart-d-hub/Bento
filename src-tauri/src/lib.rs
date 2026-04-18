@@ -1,13 +1,17 @@
+mod inventory_categories_db;
 mod members_db;
 mod postgres_pool;
 mod products_db;
 mod sales_db;
+mod staff_users_db;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
     .invoke_handler(tauri::generate_handler![
       show_system_print_dialog,
+      inventory_categories_db::inventory_categories_load,
+      inventory_categories_db::inventory_categories_replace_all,
       members_db::members_load,
       members_db::members_upsert,
       members_db::members_delete,
@@ -19,7 +23,9 @@ pub fn run() {
       sales_db::sales_history_list,
       sales_db::sales_get_by_bill_no,
       sales_db::pos_bill_peek_next,
-      sales_db::pos_bill_next
+      sales_db::pos_bill_next,
+      staff_users_db::staff_users_load,
+      staff_users_db::staff_users_replace_all
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

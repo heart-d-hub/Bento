@@ -6,7 +6,10 @@ import {
   setStaffUsername,
   setStoredBranch,
 } from '@/features/auth/authSession'
-import { loadStaffUsers } from '@/features/settings/data/staffUsersStore'
+import {
+  hydrateStaffUsersFromDb,
+  loadStaffUsers,
+} from '@/features/settings/data/staffUsersStore'
 import { clsx } from 'clsx'
 import { Lock, User } from 'lucide-react'
 import { type FormEvent, useEffect, useId, useState } from 'react'
@@ -31,11 +34,13 @@ export function LoginPage() {
     }
   }, [navigate])
 
-  const handleSubmit = (e: FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
     setError(null)
     if (!username.trim() || !password.trim()) return
+    await hydrateStaffUsersFromDb()
     const u = username.trim()
+    const p = password.trim()
     const staff = loadStaffUsers().find((s) => s.username.toLowerCase() === u.toLowerCase()) ?? null
     if (!staff) {
       setError('ไม่พบผู้ใช้นี้ในระบบ')
@@ -45,7 +50,7 @@ export function LoginPage() {
       setError('บัญชีนี้ถูกระงับการใช้งาน')
       return
     }
-    if (staff.password !== password) {
+    if (staff.password.trim() !== p) {
       setError('รหัสผ่านไม่ถูกต้อง')
       return
     }
@@ -146,7 +151,7 @@ export function LoginPage() {
         </div>
       </div>
 
-      <p className="relative z-10 mt-6 text-[10px] text-slate-400">Bento — ล็อกอินในเครื่อง (รายชื่อผู้ใช้ตั้งค่าในโค้ดจนกว่าจะเชื่อมเซิร์ฟเวอร์)</p>
+      <p className="relative z-10 mt-6 text-[10px] text-slate-400">Bento — ล็อกอินในเครื่อง</p>
     </div>
   )
 }
