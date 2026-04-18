@@ -11,7 +11,12 @@ import type { Member } from '@/features/members/data/mockMembers'
 import { loadMembers, loadMembersAsync, MEMBERS_CHANGED_EVENT } from '@/features/members/data/membersStore'
 import { BRANCHES } from '@/features/auth/branches'
 import { getStoredBranch } from '@/features/auth/authSession'
-import { getProductMasterBySku, masterSearchExtrasForSku } from '@/features/inventory/data/productMasterData'
+import {
+  getProductMasterBySku,
+  getProductMasterList,
+  masterSearchExtrasForSku,
+  type VehicleFitmentRef,
+} from '@/features/inventory/data/productMasterData'
 import { loadProductTagsRegistry } from '@/features/inventory/data/productTagsRegistry'
 import { getPosCatalogProducts } from '@/features/pos/data/posCatalogMerge'
 import { mergeInventoryProductsWithLiveStock } from '@/features/pos/data/posLiveStock'
@@ -25,7 +30,11 @@ import { getStlBoltPairForMaleProduct } from '@/features/promotions/stlBoltPairR
 import { computeStlVolumePromo } from '@/features/promotions/stlVolumePromo'
 import { createPosSaleAsync } from '@/features/pos/data/posSalesDb'
 import { POS_SALE_RECORDED_EVENT } from '@/features/pos/data/posSalesHistory'
+import { printPosReceipt } from '@/features/pos/utils/posPrintReceipt'
 import { localDateYYYYMMDD, parseLocalYYYYMMDD } from '@/features/pos/utils/posLocalDate'
+import { buildTaxInvoiceFormPrintHtml, printTaxInvoiceHtmlPreferSystemDialog, type TaxInvoiceLineItemRow } from '@/features/inventory/data/taxInvoiceFormCanvasShared'
+import { getActiveTaxInvoiceForm, loadTaxInvoiceFormDesignerState } from '@/features/inventory/data/taxInvoiceFormDesignerStore'
+import { MOCK_STORE_PROFILE } from '@/features/settings/data/mockStoreProfile'
 import { INITIAL_VEHICLE_CATALOG } from '@/features/vehicle/data/mockCatalog'
 import { normalizeCatalog } from '@/features/vehicle/data/normalizeCatalog'
 import { VEHICLE_CATALOG_STORAGE_KEY } from '@/features/vehicle/data/vehicleCatalogStorageKeys'
@@ -189,6 +198,20 @@ type VehicleFacetRow = {
   yearRangeLabel: string
 }
 
+type PosFitmentBadge = {
+  label: string
+  matchedRows: string[]
+}
+
+function parseYearRangeFromText(text: string): { from: number; to: number } | null {
+  const m = text.match(/(\d{4})\s*[-–]\s*(\d{4})/)
+  if (!m) return null
+  const from = Number(m[1])
+  const to = Number(m[2])
+  if (!Number.isFinite(from) || !Number.isFinite(to) || from > to) return null
+  return { from, to }
+}
+
 function normalizeSearchText(s: string): string {
   return s
     .toLowerCase()
@@ -202,6 +225,30 @@ function tokenizeSearch(q: string): string[] {
     .split(/\s+/g)
     .map((t) => normalizeSearchText(t))
     .filter(Boolean)
+}
+
+function parseYearRangeText(text: string): { from: number; to: number } | null {
+  const m = text.match(/(\d{4})\s*[-–]\s*(\d{4})/)
+  if (!m) return null
+  const from = Number(m[1])
+  const to = Number(m[2])
+  if (!Number.isFinite(from) || !Number.isFinite(to) || from > to) return null
+  return { from, to }
+}
+
+function fitmentYearLabel(f: VehicleFitmentRef): string {
+  if (f.yearFrom != null && f.yearTo != null) return `${f.yearFrom}-${f.yearTo}`
+  const y = f.yearRangeText?.trim()
+  if (y) return y
+  const fromEngineLabel = f.engineLabel.match(/(\d{4}\s*[-–]\s*\d{4})/)
+  return fromEngineLabel?.[1] ?? '-'
+}
+
+function buildFitmentSummary(f: VehicleFitmentRef): string {
+  const engine = f.engineText?.trim() || f.engineLabel?.trim() || '-'
+  const year = fitmentYearLabel(f)
+  const brake = f.brakePosition === 'front' ? ' · เบรกหน้า' : f.brakePosition === 'rear' ? ' · เบรกหลัง' : ''
+  return `${f.brandName} ${f.modelName} · ${engine} (${year})${brake}`
 }
 
 function displayPriceLevelLabel(levelIndex: number, fallbackLabel: string): string {
@@ -251,6 +298,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   const [showPickingModal, setShowPickingModal] = useState(false)
   const [showQuotationModal, setShowQuotationModal] = useState(false)
   const [showQRModal, setShowQRModal] = useState(false)
+  const [fitmentPreviewSku, setFitmentPreviewSku] = useState<string | null>(null)
   const [checkoutPaymentType, setCheckoutPaymentType] = useState<CheckoutPaymentType>('cash')
   const [isSavingCheckout, setIsSavingCheckout] = useState(false)
 
@@ -418,6 +466,10 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
 
   const vehicleFacetRows = useMemo<VehicleFacetRow[]>(() => {
     const out: VehicleFacetRow[] = []
+    const pushRow = (row: VehicleFacetRow) => {
+      if (!row.brandName || !row.modelName || !row.engineSize || !row.yearRangeLabel) return
+      out.push(row)
+    }
     for (const cat of vehicleCatalog.categories) {
       const data = vehicleCatalog.byCategory[cat.id]
       if (!data) continue
@@ -430,7 +482,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
             if (!engineSize) continue
             for (const v of eng.variants ?? []) {
               const yearTo = v.yearTo >= 2099 ? 'ปัจจุบัน' : String(v.yearTo)
-              out.push({
+              pushRow({
                 brandName: brand.name,
                 modelName: model.name,
                 engineSize,
@@ -439,6 +491,23 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
             }
           }
         }
+      }
+    }
+    for (const p of getProductMasterList()) {
+      for (const f of p.vehicleFitments ?? []) {
+        const engineSize = (f.engineText ?? '').trim() || (f.engineLabel ?? '').trim()
+        const yearLabel =
+          f.yearFrom != null && f.yearTo != null
+            ? `${f.yearFrom}-${f.yearTo}`
+            : (f.yearRangeText?.trim() ?? '')
+        const parsed = yearLabel ? parseYearRangeFromText(yearLabel) : parseYearRangeFromText(f.engineLabel ?? '')
+        const yearRangeLabel = parsed ? `${parsed.from}-${parsed.to}` : yearLabel
+        pushRow({
+          brandName: f.brandName,
+          modelName: f.modelName,
+          engineSize,
+          yearRangeLabel,
+        })
       }
     }
     return out
@@ -643,7 +712,10 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   const hasVehicleFacetForProduct = (p: Product): boolean => {
     const m = getProductMasterBySku(p.code)
     if (!m?.vehicleFitments?.length) return false
-    return m.vehicleFitments.some((f) => vehicleVariantIdSet.has(f.engineId))
+    return m.vehicleFitments.some((f) => {
+      if (vehicleVariantIdSet.has(f.engineId)) return true
+      return Boolean(f.engineText?.trim() || f.yearRangeText?.trim() || (f.yearFrom != null && f.yearTo != null))
+    })
   }
 
   const mappedQuickProducts = useMemo(
@@ -758,6 +830,46 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     quickEngineOptions,
     quickYearOptions,
   ])
+
+  const fitmentBadgeBySku = useMemo(() => {
+    const map = new Map<string, PosFitmentBadge>()
+    const norm = (v: string) => v.trim().toLocaleLowerCase()
+    const yearFilterValue = quickFilterYear === 'ทั้งหมด' ? '' : quickFilterYear.trim()
+    const yearFilterRange = parseYearRangeText(yearFilterValue)
+    const yearFilterSingle = Number(yearFilterValue)
+    for (const p of quickSuggestProducts) {
+      const master = getProductMasterBySku(p.code)
+      if (!master?.vehicleFitments?.length) continue
+      const matched = master.vehicleFitments.filter((f) => {
+        if (quickFilterCarBrand !== 'ทั้งหมด' && norm(f.brandName) !== norm(quickFilterCarBrand)) return false
+        if (quickFilterCarModel !== 'ทั้งหมด' && norm(f.modelName) !== norm(quickFilterCarModel)) return false
+        if (quickFilterEngine !== 'ทั้งหมด') {
+          const engineHay = norm([f.engineText ?? '', f.engineLabel ?? '', f.engineCode ?? ''].join(' '))
+          if (!engineHay.includes(norm(quickFilterEngine))) return false
+        }
+        if (!yearFilterValue) return true
+        const fitLabel = fitmentYearLabel(f)
+        if (fitLabel === yearFilterValue) return true
+        if (f.yearFrom != null && f.yearTo != null) {
+          if (yearFilterRange) return f.yearFrom <= yearFilterRange.to && f.yearTo >= yearFilterRange.from
+          if (Number.isFinite(yearFilterSingle)) return yearFilterSingle >= f.yearFrom && yearFilterSingle <= f.yearTo
+        }
+        return false
+      })
+      if (!matched.length) continue
+      const firstYear = fitmentYearLabel(matched[0])
+      map.set(p.code, {
+        label: `match ปี ${firstYear}`,
+        matchedRows: matched.map(buildFitmentSummary),
+      })
+    }
+    return map
+  }, [quickSuggestProducts, quickFilterCarBrand, quickFilterCarModel, quickFilterEngine, quickFilterYear])
+
+  const fitmentPreviewRows = useMemo(() => {
+    if (!fitmentPreviewSku) return []
+    return fitmentBadgeBySku.get(fitmentPreviewSku)?.matchedRows ?? []
+  }, [fitmentBadgeBySku, fitmentPreviewSku])
 
   const pricedCart = useMemo(() => {
     const next = cart.map((l) => ({ ...l }))
@@ -1201,6 +1313,61 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
           ? 'กรุงไทย'
           : code
 
+  const printCheckoutDocument = async (issuedDocNo: string, payLabel: string): Promise<void> => {
+    if (mode === 'retail') {
+      const receiptLines = pricedCart.map((line, idx) => ({
+        lineId: `print-${issuedDocNo}-${idx + 1}`,
+        productId: line.productId ?? line.code,
+        sku: line.code,
+        name: line.name,
+        qty: line.qty,
+        unitPrice: line.price,
+        unitLabel: line.unit,
+        unitIndex: line.unitIndex ?? 0,
+        unitBaseUnits: 1,
+        priceLevelIndex: line.priceLevelIndex ?? 0,
+        priceLevelLabel: line.priceLevel || 'ราคา 1',
+      }))
+      printPosReceipt({
+        billNo: issuedDocNo,
+        lines: receiptLines,
+        grandTotal: totals.grandTotal,
+        paymentLabel: payLabel,
+      })
+      return
+    }
+
+    const lineRows: TaxInvoiceLineItemRow[] = pricedCart.map((line, idx) => {
+      const base = line.qty * line.price
+      const discountPct = base > 0 ? (line.discount / base) * 100 : 0
+      return {
+        lineSeq: String(idx + 1),
+        factoryCode: '',
+        sku: line.code,
+        productName: line.name,
+        quantity: line.qty.toLocaleString('th-TH'),
+        unit: line.unit,
+        unitPrice: line.price.toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+        discountPct:
+          line.discount > 0
+            ? discountPct.toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+            : '',
+        discountTotal:
+          line.discount > 0
+            ? line.discount.toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+            : '',
+        lineTotal: (line.price * line.qty - line.discount).toLocaleString('th-TH', {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        }),
+      }
+    })
+    const state = loadTaxInvoiceFormDesignerState()
+    const activeForm = getActiveTaxInvoiceForm(state)
+    const html = buildTaxInvoiceFormPrintHtml(activeForm, MOCK_STORE_PROFILE, { lineRows })
+    await printTaxInvoiceHtmlPreferSystemDialog(html)
+  }
+
   const handleConfirmCheckout = async () => {
     if (isSavingCheckout) return
     if (!cart.length) return
@@ -1310,6 +1477,12 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
             : ''),
       )
       window.dispatchEvent(new CustomEvent(POS_SALE_RECORDED_EVENT))
+      try {
+        await printCheckoutDocument(issuedDocNo, payLabel)
+      } catch (error) {
+        console.error('[pos] print checkout document failed', error)
+        window.alert('บันทึกบิลสำเร็จ แต่พิมพ์เอกสารไม่สำเร็จ')
+      }
 
       if (isTauri()) {
         try {
@@ -1768,7 +1941,35 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                               className="grid w-full grid-cols-12 items-center gap-2 border-b border-slate-100 px-2 py-1.5 text-left hover:bg-slate-50 dark:border-[#1c1f2e] dark:hover:bg-[#1a1f35]"
                             >
                               <span className="col-span-3 font-mono text-[10px] font-black text-blue-700 dark:text-cyan-300">{p.code}</span>
-                              <span className="col-span-7 truncate text-[11px] font-semibold text-slate-700 dark:text-slate-200">{p.name}</span>
+                              <span className="col-span-7 min-w-0">
+                                <span className="block truncate text-[11px] font-semibold text-slate-700 dark:text-slate-200">{p.name}</span>
+                                {fitmentBadgeBySku.get(p.code) ? (
+                                  <span className="mt-0.5 flex max-w-full items-center gap-1">
+                                    <span className="inline-flex max-w-full items-center rounded border border-emerald-200 bg-emerald-50 px-1 py-0.5 text-[9px] text-emerald-700 dark:border-emerald-700/60 dark:bg-emerald-900/20 dark:text-emerald-300">
+                                      <span className="truncate">{fitmentBadgeBySku.get(p.code)!.label}</span>
+                                    </span>
+                                    <span
+                                      role="button"
+                                      tabIndex={0}
+                                      onClick={(ev) => {
+                                        ev.preventDefault()
+                                        ev.stopPropagation()
+                                        setFitmentPreviewSku(p.code)
+                                      }}
+                                      onKeyDown={(ev) => {
+                                        if (ev.key === 'Enter' || ev.key === ' ') {
+                                          ev.preventDefault()
+                                          ev.stopPropagation()
+                                          setFitmentPreviewSku(p.code)
+                                        }
+                                      }}
+                                      className="shrink-0 rounded border border-slate-200 bg-white px-1 py-0.5 text-[9px] text-slate-600 hover:bg-slate-100 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-slate-300"
+                                    >
+                                      ดูรุ่น
+                                    </span>
+                                  </span>
+                                ) : null}
+                              </span>
                               <span className="col-span-2 text-right font-mono text-[10px] text-slate-500 dark:text-slate-400">{p.stock}</span>
                             </button>
                           ))}
@@ -2482,6 +2683,50 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                     </div>
                   </div>
                 ))}
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
+
+      {fitmentPreviewSku &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-[345] flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-sm dark:bg-black/70"
+            onMouseDown={(e) => {
+              if (e.target === e.currentTarget) setFitmentPreviewSku(null)
+            }}
+          >
+            <div className="w-full max-w-2xl overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-[#2a2d3e] dark:bg-[#0d0f17]">
+              <div className="flex items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3 dark:border-[#2a2d3e] dark:bg-[#12141c]">
+                <h3 className="text-sm font-black uppercase tracking-widest text-slate-800 dark:text-slate-100">
+                  รุ่นที่รองรับ · {fitmentPreviewSku}
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setFitmentPreviewSku(null)}
+                  className="rounded-full p-1 text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-[#1a1f35]"
+                  aria-label="ปิด"
+                >
+                  <X className="size-5" />
+                </button>
+              </div>
+              <div className="max-h-[60vh] space-y-1 overflow-auto p-3">
+                {fitmentPreviewRows.length > 0 ? (
+                  fitmentPreviewRows.map((row, idx) => (
+                    <p
+                      key={`fitment-preview-${fitmentPreviewSku}-${idx}`}
+                      className="rounded border border-slate-200 bg-slate-50 px-2 py-1.5 text-[11px] text-slate-700 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-slate-200"
+                    >
+                      {row}
+                    </p>
+                  ))
+                ) : (
+                  <p className="rounded border border-slate-200 bg-slate-50 px-2 py-1.5 text-[11px] text-slate-500 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-slate-400">
+                    ไม่มีข้อมูลรุ่นรถที่ตรงเงื่อนไข
+                  </p>
+                )}
               </div>
             </div>
           </div>,

@@ -24,8 +24,8 @@ function VehicleWorkspaceInner({ className }: VehicleWorkspaceInnerProps) {
         </h2>
         <p className="mt-1 text-xs leading-relaxed text-slate-500">
           {panel === 'search'
-            ? 'เลือกยี่ห้อ → รุ่น → variant (เครื่อง · โฉม · ช่วงปี) แล้วดูสินค้าที่ผูกในแฟ้มมาสเตอร์'
-            : 'ลงต้นไม้: ประเภท → ยี่ห้อ → รุ่น → เครื่อง → ช่วงปีต่อแถว — รหัส variant ใช้ผูกสินค้า (engineId) ให้นิยามปีเดียวกันทั้งร้าน'}
+            ? 'เลือกประเภท → ยี่ห้อ → รุ่น แล้วกรอกเครื่อง/ปี เพื่อค้นหาสินค้าที่ผูกในแฟ้มมาสเตอร์'
+            : 'จัดการโครงหลัก: ประเภท → ยี่ห้อ → รุ่น (ข้อมูลเครื่องและปีให้กำหนดตอนเพิ่มสินค้า)'}
         </p>
       </header>
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden p-4 sm:p-5 lg:p-6">

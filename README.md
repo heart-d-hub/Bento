@@ -1,3 +1,59 @@
+# Bento Startup Guide (Windows)
+
+## Daily Use (No Cursor Needed)
+
+Open PowerShell once and run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ".\scripts\start-bento.ps1"
+```
+
+What it does:
+- Ensures PostgreSQL service is running
+- Launches `app.exe` (auto-detect common paths)
+- You can work in Bento immediately
+
+If your `app.exe` is in another location:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ".\scripts\start-bento.ps1" -AppPath "D:\path\to\app.exe"
+```
+
+Optional: open pgAdmin too:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ".\scripts\start-bento.ps1" -OpenPgAdmin
+```
+
+## Owner/Admin Mode
+
+For setup/checking data tools (pgAdmin + Prisma Studio):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ".\scripts\start-bento-admin.ps1"
+```
+
+- This still opens Bento app
+- Also opens pgAdmin4 and Prisma Studio
+
+## Create Desktop Shortcut (Recommended)
+
+Create a shortcut to this target:
+
+```text
+powershell.exe -ExecutionPolicy Bypass -File "D:\Bento\Bento\scripts\start-bento.ps1"
+```
+
+Then staff can just double-click one icon after boot.
+
+## One-Click Launchers
+
+- Staff daily use: `.\scripts\start-bento.bat`
+- Admin/dev use: `.\scripts\start-bento-admin.bat`
+- Thai quick guide: `.\docs\STARTUP_GUIDE_TH.md`
+
+---
+
 # React + TypeScript + Vite
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.

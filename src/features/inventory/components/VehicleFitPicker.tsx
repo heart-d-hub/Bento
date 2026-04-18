@@ -1,10 +1,4 @@
 import { useVehicleCatalog } from '@/features/vehicle/context/VehicleCatalogContext'
-import {
-  findEngineDefForVariant,
-  flattenVariantOptions,
-  formatVariantFitPickerCompact,
-} from '@/features/vehicle/data/vehicleCatalogUtils'
-import { powertrainLabel } from '@/features/vehicle/data/powertrainOptions'
 import { clsx } from 'clsx'
 import { Plus, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
@@ -19,6 +13,10 @@ export type VehicleFitRow = {
   modelName: string
   engineId: string
   engineLabel: string
+  engineText?: string
+  yearRangeText?: string
+  yearFrom?: number
+  yearTo?: number
   engineCode?: string
   /** เว้นว่าง = ไม่ระบุ (กรอง/ของทั่วไป) — ใช้กับผ้าเบรก/ดิสก์ */
   brakePosition?: '' | 'front' | 'rear'
@@ -29,10 +27,6 @@ const inputCls =
 
 const dropdownPanelClass =
   'absolute z-[60] mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-slate-200 bg-white p-1 shadow-lg'
-
-/** กว้างอย่างน้อยเท่าช่อง input แต่ขยายตามข้อความยาวสุด — ไม่ตัด ... ในบรรทัดเดียว */
-const variantDropdownPanelClass =
-  'absolute left-0 z-[60] mt-1 max-h-56 min-w-full w-max max-w-[min(36rem,calc(100vw-1.5rem))] overflow-x-auto overflow-y-auto rounded-md border border-slate-200 bg-white p-1 shadow-lg'
 
 const alignedLabelCls = 'mb-0.5 flex min-h-[1.75rem] items-end text-[10px] font-medium leading-snug text-slate-600'
 
@@ -45,17 +39,6 @@ type SearchModelOption = {
   categoryId: string
   categoryLabel: string
 }
-type SearchVariantOption = ReturnType<typeof flattenVariantOptions>[number] & {
-  /** แสดงในช่องค้นหา เช่น 1.6FD(2000-2012) — `label` ยังเป็นข้อความเต็มสำหรับ tooltip / บันทึก */
-  inputCompact: string
-  brandId: string
-  brandName: string
-  modelId: string
-  modelName: string
-  categoryId: string
-  categoryLabel: string
-}
-
 type Props = {
   rows: VehicleFitRow[]
   onAdd: (row: VehicleFitRow) => void
@@ -90,6 +73,18 @@ function compactEngineLabel(label: string): string {
   return `${parts.join(' · ')} · (${yearPart})`
 }
 
+function parseYearInput(value: string): number | undefined {
+  const n = Number(value.trim())
+  if (!Number.isFinite(n)) return undefined
+  const y = Math.round(n)
+  if (y < 1900 || y > 2100) return undefined
+  return y
+}
+
+function normalizeManualText(value: string): string {
+  return value.trim().replace(/\s+/g, ' ')
+}
+
 export function VehicleFitPicker({
   rows,
   onAdd,
@@ -104,7 +99,6 @@ export function VehicleFitPicker({
   const [catId, setCatId] = useState('')
   const [brandId, setBrandId] = useState('')
   const [modelId, setModelId] = useState('')
-  const [engineId, setEngineId] = useState('')
   const [brakePos, setBrakePos] = useState<'' | 'front' | 'rear'>('')
 
   const [categoryQuery, setCategoryQuery] = useState('')
@@ -119,14 +113,13 @@ export function VehicleFitPicker({
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false)
   const [modelHighlightedIndex, setModelHighlightedIndex] = useState(-1)
 
-  const [variantQuery, setVariantQuery] = useState('')
-  const [variantDropdownOpen, setVariantDropdownOpen] = useState(false)
-  const [variantHighlightedIndex, setVariantHighlightedIndex] = useState(-1)
+  const [manualEngineText, setManualEngineText] = useState('')
+  const [manualYearFrom, setManualYearFrom] = useState('')
+  const [manualYearTo, setManualYearTo] = useState('')
 
   const categoryDropdownRef = useRef<HTMLDivElement | null>(null)
   const brandDropdownRef = useRef<HTMLDivElement | null>(null)
   const modelDropdownRef = useRef<HTMLDivElement | null>(null)
-  const variantDropdownRef = useRef<HTMLDivElement | null>(null)
 
   const visibleCategories = useMemo(
     () =>
@@ -139,7 +132,6 @@ export function VehicleFitPicker({
   const aggregated = useMemo(() => {
     const brands: SearchBrandOption[] = []
     const models: SearchModelOption[] = []
-    const variants: SearchVariantOption[] = []
     for (const vc of visibleCategories) {
       const catData = catalog.byCategory[vc.id]
       if (!catData) continue
@@ -159,38 +151,18 @@ export function VehicleFitPicker({
             categoryId: vc.id,
             categoryLabel: vc.label,
           })
-          const engines = catData.enginesByModelId[model.id] ?? []
-          for (const v of flattenVariantOptions(engines)) {
-            const found = findEngineDefForVariant(engines, v.id)
-            const inputCompact = found
-              ? formatVariantFitPickerCompact(found.engine, found.variant)
-              : v.label
-            variants.push({
-              ...v,
-              inputCompact,
-              brandId: brand.id,
-              brandName: brand.name,
-              modelId: model.id,
-              modelName: model.name,
-              categoryId: vc.id,
-              categoryLabel: vc.label,
-            })
-          }
         }
       }
     }
     brands.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
     models.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
-    return { brands, models, variants }
+    return { brands, models }
   }, [visibleCategories, catalog])
 
   const allBrands = aggregated.brands
   const allModels = aggregated.models
-  const allVariants = aggregated.variants
-
   const selectedBrand = allBrands.find((b) => b.id === brandId && b.categoryId === catId)
   const selectedModel = allModels.find((m) => m.id === modelId && m.categoryId === catId)
-  const selectedEngine = allVariants.find((v) => v.id === engineId)
 
   const filteredCategories = useMemo(() => {
     const q = categoryQuery.trim().toLocaleLowerCase()
@@ -204,47 +176,35 @@ export function VehicleFitPicker({
     const base = allBrands.filter(
       (b) =>
         (!catId || b.categoryId === catId) &&
-        (!selectedModel || (b.id === selectedModel.brandId && b.categoryId === selectedModel.categoryId)) &&
-        (!selectedEngine || (b.id === selectedEngine.brandId && b.categoryId === selectedEngine.categoryId)),
+        (!selectedModel || (b.id === selectedModel.brandId && b.categoryId === selectedModel.categoryId)),
     )
     if (!q) return base
     return base.filter((b) => b.name.toLocaleLowerCase().includes(q))
-  }, [allBrands, brandQuery, catId, selectedEngine, selectedModel])
+  }, [allBrands, brandQuery, catId, selectedModel])
 
   const filteredModels = useMemo(() => {
     const q = modelQuery.trim().toLocaleLowerCase()
     const base = allModels.filter(
       (m) =>
         (!catId || m.categoryId === catId) &&
-        (!brandId || (m.brandId === brandId && m.categoryId === catId)) &&
-        (!selectedEngine || m.id === selectedEngine.modelId),
+        (!brandId || (m.brandId === brandId && m.categoryId === catId)),
     )
     if (!q) return base
     return base.filter((m) => m.name.toLocaleLowerCase().includes(q))
-  }, [allModels, brandId, catId, modelQuery, selectedEngine])
-
-  const filteredVariants = useMemo(() => {
-    const q = variantQuery.trim().toLocaleLowerCase()
-    const base = allVariants.filter(
-      (v) =>
-        (!catId || v.categoryId === catId) &&
-        (!brandId || (v.brandId === brandId && v.categoryId === catId)) &&
-        (!modelId || (v.modelId === modelId && v.categoryId === catId)),
-    )
-    if (!q) return base
-    return base.filter((v) =>
-      `${v.label} ${v.inputCompact} ${v.engineSummary} ${v.searchText} ${powertrainLabel(v.powertrain_type)}`
-        .toLocaleLowerCase()
-        .includes(q),
-    )
-  }, [allVariants, brandId, catId, modelId, variantQuery])
+  }, [allModels, brandId, catId, modelQuery])
 
   const categoryLabel = visibleCategories.find((c) => c.id === catId)?.label ?? ''
-  const brandName = selectedBrand?.name ?? selectedModel?.brandName ?? selectedEngine?.brandName ?? ''
-  const modelName = selectedModel?.name ?? selectedEngine?.modelName ?? ''
-  const engineLabel = selectedEngine?.label ?? allVariants.find((v) => v.id === engineId)?.label ?? ''
-
-  const canAdd = Boolean(catId && brandId && modelId && engineId)
+  const brandName = selectedBrand?.name ?? selectedModel?.brandName ?? ''
+  const modelName = selectedModel?.name ?? ''
+  const parsedYearFrom = parseYearInput(manualYearFrom)
+  const parsedYearTo = parseYearInput(manualYearTo)
+  const hasManualSpec = Boolean(
+    normalizeManualText(manualEngineText) &&
+      parsedYearFrom !== undefined &&
+      parsedYearTo !== undefined &&
+      parsedYearFrom <= parsedYearTo,
+  )
+  const canAddResolved = Boolean(catId && brandId && modelId && hasManualSpec)
 
   function clearCategorySelection() {
     setCatId('')
@@ -252,9 +212,10 @@ export function VehicleFitPicker({
     setBrandQuery('')
     setModelId('')
     setModelQuery('')
-    setEngineId('')
-    setVariantQuery('')
     setBrakePos('')
+    setManualEngineText('')
+    setManualYearFrom('')
+    setManualYearTo('')
   }
 
   function onSelectCategory(id: string) {
@@ -265,9 +226,10 @@ export function VehicleFitPicker({
     setBrandQuery('')
     setModelId('')
     setModelQuery('')
-    setEngineId('')
-    setVariantQuery('')
     setBrakePos('')
+    setManualEngineText('')
+    setManualYearFrom('')
+    setManualYearTo('')
     setCategoryDropdownOpen(false)
   }
 
@@ -278,9 +240,10 @@ export function VehicleFitPicker({
     setBrandQuery(b.name)
     setModelId('')
     setModelQuery('')
-    setEngineId('')
-    setVariantQuery('')
     setBrakePos('')
+    setManualEngineText('')
+    setManualYearFrom('')
+    setManualYearTo('')
   }
 
   function onModelPick(m: SearchModelOption) {
@@ -290,21 +253,10 @@ export function VehicleFitPicker({
     setBrandQuery(m.brandName)
     setModelId(m.id)
     setModelQuery(m.name)
-    setEngineId('')
-    setVariantQuery('')
     setBrakePos('')
-  }
-
-  function onVariantPick(v: SearchVariantOption) {
-    setCatId(v.categoryId)
-    setCategoryQuery(v.categoryLabel)
-    setBrandId(v.brandId)
-    setBrandQuery(v.brandName)
-    setModelId(v.modelId)
-    setModelQuery(v.modelName)
-    setEngineId(v.id)
-    setVariantQuery(v.inputCompact)
-    setBrakePos('')
+    setManualEngineText('')
+    setManualYearFrom('')
+    setManualYearTo('')
   }
 
   function clearBrandSelection() {
@@ -312,23 +264,19 @@ export function VehicleFitPicker({
     setBrandQuery('')
     setModelId('')
     setModelQuery('')
-    setEngineId('')
-    setVariantQuery('')
     setBrakePos('')
+    setManualEngineText('')
+    setManualYearFrom('')
+    setManualYearTo('')
   }
 
   function clearModelSelection() {
     setModelId('')
     setModelQuery('')
-    setEngineId('')
-    setVariantQuery('')
     setBrakePos('')
-  }
-
-  function clearVariantSelection() {
-    setEngineId('')
-    setVariantQuery('')
-    setBrakePos('')
+    setManualEngineText('')
+    setManualYearFrom('')
+    setManualYearTo('')
   }
 
   useEffect(() => {
@@ -351,14 +299,6 @@ export function VehicleFitPicker({
     }
     setModelQuery(selectedModel?.name ?? '')
   }, [modelId, catId, selectedModel])
-
-  useEffect(() => {
-    if (!engineId) {
-      setVariantQuery('')
-      return
-    }
-    setVariantQuery(selectedEngine?.inputCompact ?? '')
-  }, [engineId, selectedEngine])
 
   useEffect(() => {
     setCategoryHighlightedIndex((prev) => {
@@ -385,14 +325,6 @@ export function VehicleFitPicker({
   }, [filteredModels])
 
   useEffect(() => {
-    setVariantHighlightedIndex((prev) => {
-      if (filteredVariants.length === 0) return -1
-      if (prev < 0) return 0
-      return Math.min(prev, filteredVariants.length - 1)
-    })
-  }, [filteredVariants])
-
-  useEffect(() => {
     if (!categoryDropdownOpen || categoryHighlightedIndex < 0) return
     const el = categoryDropdownRef.current?.querySelector<HTMLElement>(
       `[data-cat-index="${categoryHighlightedIndex}"]`,
@@ -412,23 +344,25 @@ export function VehicleFitPicker({
     el?.scrollIntoView({ block: 'nearest' })
   }, [modelDropdownOpen, modelHighlightedIndex])
 
-  useEffect(() => {
-    if (!variantDropdownOpen || variantHighlightedIndex < 0) return
-    const el = variantDropdownRef.current?.querySelector<HTMLElement>(
-      `[data-variant-index="${variantHighlightedIndex}"]`,
-    )
-    el?.scrollIntoView({ block: 'nearest' })
-  }, [variantDropdownOpen, variantHighlightedIndex])
-
   function handleAdd() {
-    if (!canAdd) return
+    if (!canAddResolved) return
     const bp = brakePos || ''
+    const engineText = normalizeManualText(manualEngineText)
+    const yearFrom = parsedYearFrom
+    const yearTo = parsedYearTo
+    const manualYearLabel =
+      engineText && yearFrom !== undefined && yearTo !== undefined ? `${engineText} (${yearFrom}-${yearTo})` : ''
+    const resolvedEngineId = manualYearLabel
+      ? `manual:${catId}:${brandId}:${modelId}:${manualYearLabel.toLowerCase().replace(/\s+/g, '-')}`
+      : ''
+    const resolvedEngineLabel = manualYearLabel
+    if (!resolvedEngineId || !resolvedEngineLabel) return
     const dup = rows.some(
       (r) =>
         r.categoryId === catId &&
         r.brandId === brandId &&
         r.modelId === modelId &&
-        r.engineId === engineId &&
+        r.engineId === resolvedEngineId &&
         (r.brakePosition ?? '') === bp,
     )
     if (dup) return
@@ -440,14 +374,18 @@ export function VehicleFitPicker({
       brandName,
       modelId,
       modelName,
-      engineId,
-      engineLabel,
-      ...(selectedEngine?.engineCode ? { engineCode: selectedEngine.engineCode } : {}),
+      engineId: resolvedEngineId,
+      engineLabel: resolvedEngineLabel,
+      ...(engineText ? { engineText } : {}),
+      ...(manualYearLabel ? { yearRangeText: `${yearFrom}-${yearTo}` } : {}),
+      ...(yearFrom !== undefined ? { yearFrom } : {}),
+      ...(yearTo !== undefined ? { yearTo } : {}),
       brakePosition: brakePos || undefined,
     })
-    setEngineId('')
-    setVariantQuery('')
     setBrakePos('')
+    setManualEngineText('')
+    setManualYearFrom('')
+    setManualYearTo('')
   }
 
   return (
@@ -601,7 +539,7 @@ export function VehicleFitPicker({
                         setBrandDropdownOpen(false)
                       }}
                       className={clsx(
-                        'flex w-full items-center justify-between gap-1 rounded px-1.5 py-1 text-left text-[11px] transition',
+                        'flex w-full items-center gap-1 rounded px-1.5 py-1 text-left text-[11px] transition',
                         brandId === b.id && catId === b.categoryId
                           ? 'bg-slate-900 text-white'
                           : idx === brandHighlightedIndex
@@ -610,16 +548,6 @@ export function VehicleFitPicker({
                       )}
                     >
                       <span className="truncate">{b.name}</span>
-                      {!catId ? (
-                        <span
-                          className={clsx(
-                            'shrink-0 text-[10px]',
-                            brandId === b.id && catId === b.categoryId ? 'text-slate-200' : 'text-slate-500',
-                          )}
-                        >
-                          {b.categoryLabel}
-                        </span>
-                      ) : null}
                     </button>
                   ))
                 )}
@@ -687,7 +615,7 @@ export function VehicleFitPicker({
                         setModelDropdownOpen(false)
                       }}
                       className={clsx(
-                        'flex w-full items-center justify-between gap-1 rounded px-1.5 py-1 text-left text-[11px] transition',
+                        'flex w-full items-center gap-1 rounded px-1.5 py-1 text-left text-[11px] transition',
                         modelId === m.id && catId === m.categoryId
                           ? 'bg-slate-900 text-white'
                           : idx === modelHighlightedIndex
@@ -696,15 +624,6 @@ export function VehicleFitPicker({
                       )}
                     >
                       <span className="truncate">{m.name}</span>
-                      <span
-                        className={clsx(
-                          'shrink-0 text-[10px]',
-                          modelId === m.id && catId === m.categoryId ? 'text-slate-200' : 'text-slate-500',
-                        )}
-                      >
-                        {m.brandName}
-                        {!catId ? ` · ${m.categoryLabel}` : ''}
-                      </span>
                     </button>
                   ))
                 )}
@@ -713,100 +632,36 @@ export function VehicleFitPicker({
           </div>
         </label>
 
-        <label className="block min-w-0 max-w-[min(26rem,100%)] justify-self-start">
-          <span className={clsx(labelClass, alignedLabelCls)}>เครื่อง · โฉม · ช่วงปี</span>
-          <div className="relative w-full">
-            <input
-              className={inputCls}
-              value={variantQuery}
-              title={
-                selectedEngine
-                  ? `${selectedEngine.categoryLabel} · ${selectedEngine.brandName} ${selectedEngine.modelName} — ${selectedEngine.label}`
-                  : undefined
-              }
-              onFocus={() => {
-                setVariantDropdownOpen(true)
-                const idx = filteredVariants.findIndex((v) => v.id === engineId)
-                setVariantHighlightedIndex(idx >= 0 ? idx : 0)
-              }}
-              onBlur={() => window.setTimeout(() => setVariantDropdownOpen(false), 120)}
-              onChange={(e) => {
-                setVariantDropdownOpen(true)
-                setVariantQuery(e.target.value)
-                setVariantHighlightedIndex(0)
-                if (engineId) clearVariantSelection()
-              }}
-              onKeyDown={(e) => {
-                if (e.key === 'ArrowDown') {
-                  e.preventDefault()
-                  setVariantDropdownOpen(true)
-                  setVariantHighlightedIndex((prev) => moveHighlightIndex(prev, filteredVariants.length, 1))
-                  return
-                }
-                if (e.key === 'ArrowUp') {
-                  e.preventDefault()
-                  setVariantDropdownOpen(true)
-                  setVariantHighlightedIndex((prev) => moveHighlightIndex(prev, filteredVariants.length, -1))
-                  return
-                }
-                if (e.key === 'Escape') setVariantDropdownOpen(false)
-                if (e.key === 'Enter' && filteredVariants.length > 0) {
-                  e.preventDefault()
-                  const pickIndex = variantHighlightedIndex >= 0 ? variantHighlightedIndex : 0
-                  onVariantPick(filteredVariants[pickIndex])
-                  setVariantDropdownOpen(false)
-                }
-              }}
-              disabled={!visibleCategories.length || !allVariants.length}
-              placeholder="..."
-            />
-            {variantDropdownOpen && visibleCategories.length > 0 && allVariants.length > 0 ? (
-              <div ref={variantDropdownRef} className={variantDropdownPanelClass}>
-                {filteredVariants.length === 0 ? (
-                  <p className="px-1.5 py-1 text-[11px] text-slate-500">ไม่พบรายการ</p>
-                ) : (
-                  filteredVariants.map((v, idx) => (
-                    <button
-                      key={`${v.categoryId}-${v.id}`}
-                      type="button"
-                      data-variant-index={idx}
-                      title={`${v.brandName} ${v.modelName} — ${v.label}`}
-                      onMouseDown={(ev) => ev.preventDefault()}
-                      onMouseEnter={() => setVariantHighlightedIndex(idx)}
-                      onClick={() => {
-                        onVariantPick(v)
-                        setVariantDropdownOpen(false)
-                      }}
-                      className={clsx(
-                        'block w-full min-w-max whitespace-nowrap rounded px-1.5 py-1 text-left text-[11px] font-medium transition',
-                        engineId === v.id
-                          ? 'bg-slate-900 text-white'
-                          : idx === variantHighlightedIndex
-                            ? 'bg-slate-100 text-slate-800'
-                            : 'text-slate-700 hover:bg-slate-100',
-                      )}
-                    >
-                      <span className="flex items-center gap-1.5">
-                        <span>{v.inputCompact}</span>
-                        {v.engineCode ? (
-                          <span
-                            className={clsx(
-                              'rounded border px-1 py-0.5 font-mono text-[9px]',
-                              engineId === v.id
-                                ? 'border-white/30 bg-white/10 text-slate-100'
-                                : 'border-sky-200 bg-sky-50 text-sky-900',
-                            )}
-                          >
-                            {v.engineCode}
-                          </span>
-                        ) : null}
-                      </span>
-                    </button>
-                  ))
-                )}
-              </div>
-            ) : null}
-          </div>
+        <label className="block min-w-0">
+          <span className={clsx(labelClass, alignedLabelCls)}>เครื่อง</span>
+          <input
+            className={inputCls}
+            value={manualEngineText}
+            onChange={(e) => setManualEngineText(e.target.value)}
+            placeholder="เช่น 2.0, 1KD, 4JA1"
+          />
+        </label>
+
+        <label className="block min-w-0">
+          <span className={clsx(labelClass, alignedLabelCls)}>ปีเริ่ม</span>
+          <input
+            className={inputCls}
+            inputMode="numeric"
+            value={manualYearFrom}
+            onChange={(e) => setManualYearFrom(e.target.value)}
+            placeholder="เช่น 1995"
+          />
+        </label>
+
+        <label className="block min-w-0">
+          <span className={clsx(labelClass, alignedLabelCls)}>ปีสิ้นสุด</span>
+          <input
+            className={inputCls}
+            inputMode="numeric"
+            value={manualYearTo}
+            onChange={(e) => setManualYearTo(e.target.value)}
+            placeholder="เช่น 2015"
+          />
         </label>
 
         <label className="block min-w-0 sm:col-span-2 xl:col-span-1">
@@ -814,7 +669,7 @@ export function VehicleFitPicker({
           <select
             className={inputCls}
             value={brakePos}
-            disabled={!engineId}
+            disabled={!hasManualSpec}
             onChange={(e) => setBrakePos(e.target.value as '' | 'front' | 'rear')}
           >
             <option value="">—</option>
@@ -826,11 +681,11 @@ export function VehicleFitPicker({
 
       <button
         type="button"
-        disabled={!canAdd}
+        disabled={!canAddResolved}
         onClick={handleAdd}
         className={clsx(
           'mt-1.5 inline-flex w-full items-center justify-center gap-1.5 rounded-md border px-2 py-1 text-[11px] font-medium transition sm:w-auto',
-          canAdd
+          canAddResolved
             ? 'border-sky-300 bg-sky-50 text-sky-900 hover:bg-sky-100'
             : 'cursor-not-allowed border-slate-200 bg-slate-50 text-slate-400',
         )}

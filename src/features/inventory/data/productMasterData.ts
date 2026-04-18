@@ -77,6 +77,13 @@ export type VehicleFitmentRef = {
   modelName: string
   engineId: string
   engineLabel: string
+  /** เครื่องที่กรอกตรงตอนเพิ่มสินค้า (เช่น 2.0, 1KD, 4JA1) */
+  engineText?: string
+  /** ช่วงปีที่กรอกตรงตอนเพิ่มสินค้า (เช่น 1990-2018) */
+  yearRangeText?: string
+  /** ปีเริ่ม/สิ้นสุดสำหรับกรองแบบตัวเลขจริงที่ POS */
+  yearFrom?: number
+  yearTo?: number
   engineCode?: string
   /** เฉพาะผ้าเบรก/ดิสก์ — ไม่ระบุ = ชิ้นทั่วไปที่ไม่แยกหน้า-หลัง */
   brakePosition?: 'front' | 'rear'
@@ -1236,11 +1243,26 @@ export function masterSearchExtrasForSku(sku: string): string {
   const m = getProductMasterBySku(sku)
   if (!m) return ''
   const parts: string[] = []
+  const yearTokens = new Set<string>()
   for (const f of m.vehicleFitments ?? []) {
     parts.push(`${f.categoryLabel} ${f.brandName} ${f.modelName} ${f.engineLabel}`)
+    if (f.engineText?.trim()) parts.push(f.engineText.trim())
+    if (f.yearRangeText?.trim()) parts.push(f.yearRangeText.trim())
+    if (f.yearFrom != null && f.yearTo != null && Number.isFinite(f.yearFrom) && Number.isFinite(f.yearTo)) {
+      const from = Math.max(1900, Math.round(f.yearFrom))
+      const to = Math.min(2100, Math.round(f.yearTo))
+      if (from <= to) {
+        for (let y = from; y <= to; y++) {
+          yearTokens.add(String(y))
+        }
+      }
+    }
     if (f.engineCode?.trim()) parts.push(f.engineCode.trim())
     if (f.brakePosition === 'front') parts.push('เบรกหน้า')
     else if (f.brakePosition === 'rear') parts.push('เบรกหลัง')
+  }
+  for (const y of yearTokens) {
+    parts.push(y)
   }
   for (const line of m.carModels ?? []) {
     const t = line.trim()
