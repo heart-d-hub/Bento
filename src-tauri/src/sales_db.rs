@@ -325,6 +325,49 @@ pub async fn sales_get_by_bill_no(bill_no: String) -> Result<Option<SalesHistory
   Ok(row)
 }
 
+#[tauri::command]
+pub async fn sales_history_by_member(member_code: String, limit: Option<i64>) -> Result<Vec<SalesHistoryRow>, String> {
+  let pool = get_pool().await?;
+  let lim = limit.unwrap_or(5).clamp(1, 50);
+  let rows = sqlx::query_as::<_, SalesHistoryRow>(
+    r#"
+    SELECT
+      s.id,
+      s."billNo" as bill_no,
+      to_char(s."docDate", 'YYYY-MM-DD"T"HH24:MI:SS') as at,
+      s."grandTotal" as total,
+      s."paymentType"::text as payment_id,
+      COUNT(sl.id)::bigint as line_count,
+      COALESCE(
+        jsonb_agg(
+          jsonb_build_object(
+            'productId', p.id,
+            'sku', p.sku,
+            'name', p.name,
+            'qty', sl.qty,
+            'unitPrice', sl."unitPrice"
+          )
+        ) FILTER (WHERE sl.id IS NOT NULL),
+        '[]'::jsonb
+      ) as lines
+    FROM "Sale" s
+    JOIN "Member" m ON m.id = s."memberId"
+    LEFT JOIN "SaleLine" sl ON sl."saleId" = s.id
+    LEFT JOIN "Product" p ON p.id = sl."productId"
+    WHERE m."memberCode" = $1
+    GROUP BY s.id
+    ORDER BY s."docDate" DESC, s."createdAt" DESC
+    LIMIT $2
+    "#,
+  )
+  .bind(member_code)
+  .bind(lim)
+  .fetch_all(&pool)
+  .await
+  .map_err(|e| format!("query sales by member failed: {e}"))?;
+  Ok(rows)
+}
+
 // --- POS bill / tax invoice sequence (Postgres, แทน localStorage) ---
 
 #[derive(Debug, Deserialize)]

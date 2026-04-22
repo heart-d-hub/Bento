@@ -84,6 +84,8 @@ export type VehicleFitmentRef = {
   /** ปีเริ่ม/สิ้นสุดสำหรับกรองแบบตัวเลขจริงที่ POS */
   yearFrom?: number
   yearTo?: number
+  /** ระบบขับเคลื่อน เช่น 2WD, 4WD, AWD */
+  driveType?: string
   engineCode?: string
   /** เฉพาะผ้าเบรก/ดิสก์ — ไม่ระบุ = ชิ้นทั่วไปที่ไม่แยกหน้า-หลัง */
   brakePosition?: 'front' | 'rear'
@@ -158,15 +160,26 @@ export function masterProductsForEngine(
   })
 }
 
+/** ดึงช่วงปีสำหรับใช้เป็น key ในตัวกรอง เช่น "2009-2015", "2016+", "ถึง 2010" */
+export function fitmentYearRangeKey(f: VehicleFitmentRef): string {
+  if (f.yearFrom != null && f.yearTo != null) return `${f.yearFrom}-${f.yearTo}`
+  if (f.yearFrom != null) return `${f.yearFrom}+`
+  if (f.yearTo != null) return `ถึง ${f.yearTo}`
+  const t = f.yearRangeText?.trim()
+  if (t) return t
+  const m = (f.engineLabel ?? '').match(/(\d{4}\s*[-–]\s*\d{4})/)
+  return m?.[1] ?? ''
+}
+
 /** ใช้กับแฟ้มข้อมูลสินค้า — กรองยี่ห้อ/รุ่น/เครื่อง-ปี จาก vehicleFitments หรือฟิลด์สรุปเดิม */
 export function productMatchesInventoryCarFilters(
   p: ProductMasterDetail,
-  opts: { brand: string; carBrand: string; carModel: string; year: string },
+  opts: { brand: string; carBrand: string; carModel: string; year: string; driveType?: string },
   filterAll: string,
 ): boolean {
-  const { brand, carBrand, carModel, year } = opts
+  const { brand, carBrand, carModel, year, driveType } = opts
   if (brand !== filterAll && p.brand !== brand) return false
-  if (carBrand === filterAll && carModel === filterAll && year === filterAll) return true
+  if (carBrand === filterAll && carModel === filterAll && year === filterAll && (!driveType || driveType === filterAll)) return true
 
   const matchLegacy = (): boolean => {
     if (carBrand !== filterAll && p.carBrand !== carBrand) return false
@@ -179,36 +192,60 @@ export function productMatchesInventoryCarFilters(
   if (!fits?.length) return matchLegacy()
 
   const anyFit = fits.some((f) => {
+    if (!f) return false
     if (carBrand !== filterAll && f.brandName !== carBrand) return false
     if (carModel !== filterAll && f.modelName !== carModel) return false
-    if (year !== filterAll && f.engineLabel !== year) return false
+    if (year !== filterAll && fitmentYearRangeKey(f) !== year) return false
+    if (driveType && driveType !== filterAll && (f.driveType ?? '').toUpperCase() !== driveType.toUpperCase()) return false
     return true
   })
   return anyFit || matchLegacy()
 }
 
-export function collectInventoryCarFilterOptions(products: ProductMasterDetail[]): {
+export function collectInventoryCarFilterOptions(
+  products: ProductMasterDetail[],
+  filters?: { carBrand?: string; carModel?: string; filterAll?: string },
+): {
   carBrands: string[]
   models: string[]
   years: string[]
+  driveTypes: string[]
 } {
+  const fa = filters?.filterAll ?? 'ทั้งหมด'
+  const activeBrand = filters?.carBrand && filters.carBrand !== fa ? filters.carBrand : null
+  const activeModel = filters?.carModel && filters.carModel !== fa ? filters.carModel : null
+
   const carBrands = new Set<string>()
   const models = new Set<string>()
   const years = new Set<string>()
+  const driveTypes = new Set<string>()
   for (const p of products) {
     if (p.carBrand && p.carBrand !== '—') carBrands.add(p.carBrand)
-    if (p.carModelLabel && p.carModelLabel !== '—') models.add(p.carModelLabel)
-    if (p.yearLabel && p.yearLabel !== '—') years.add(p.yearLabel)
     for (const f of p.vehicleFitments ?? []) {
+      if (!f) continue
       if (f.brandName) carBrands.add(f.brandName)
-      if (f.modelName) models.add(f.modelName)
-      if (f.engineLabel) years.add(f.engineLabel)
+      // cascade: models only from matching brand
+      if (!activeBrand || f.brandName === activeBrand) {
+        if (f.modelName) models.add(f.modelName)
+      }
+      // cascade: years & driveTypes only from matching brand+model
+      if ((!activeBrand || f.brandName === activeBrand) && (!activeModel || f.modelName === activeModel)) {
+        const yr = fitmentYearRangeKey(f)
+        if (yr) years.add(yr)
+        if (f.driveType?.trim()) driveTypes.add(f.driveType.trim().toUpperCase())
+      }
+    }
+    // legacy fields for models/years without fitments
+    if (!p.vehicleFitments?.length) {
+      if (p.carModelLabel && p.carModelLabel !== '—') models.add(p.carModelLabel)
+      if (p.yearLabel && p.yearLabel !== '—') years.add(p.yearLabel)
     }
   }
   return {
     carBrands: [...carBrands].sort((a, b) => a.localeCompare(b, 'th')),
     models: [...models].sort((a, b) => a.localeCompare(b, 'th')),
     years: [...years].sort((a, b) => a.localeCompare(b, 'th')),
+    driveTypes: [...driveTypes].sort(),
   }
 }
 
@@ -252,6 +289,8 @@ export type ProductMasterDetail = {
   scheme: string
   avgCost: number
   sellPrice: number
+  /** สถานะ VAT ของสินค้า (ไม่ระบุ = มี VAT ตามค่าเริ่มต้น) */
+  vatMode?: 'vat' | 'no_vat'
   /** แท้ (OEM แท้) */
   isGenuine?: boolean
   /** หน่วยขายหลายแบบ (แทนรูปแบบหน่วยย่อย/ใหญ่เดิม) */
@@ -1085,9 +1124,11 @@ export const PRODUCT_MASTER_LIST_CHANGED_EVENT = 'bento-product-master-list-chan
 
 /** เมื่อโหลดจาก Postgres แล้ว — ให้ getProductMasterList() ใช้ชุดนี้แทน localStorage */
 let productMasterMemoryCache: ProductMasterDetail[] | null = null
+let productMasterSkuMap: Map<string, ProductMasterDetail> | null = null
 
 export function clearProductMasterMemoryCache(): void {
   productMasterMemoryCache = null
+  productMasterSkuMap = null
 }
 
 const PRODUCT_MASTER_DB_DEBOUNCE_MS = 1200
@@ -1095,7 +1136,7 @@ const PRODUCT_MASTER_DB_DEBOUNCE_MS = 1200
 let productMasterDbDebounceTimer: number | null = null
 let productMasterDbPending: ProductMasterDetail[] | null = null
 
-async function persistProductMasterListToDb(products: ProductMasterDetail[]): Promise<void> {
+export async function persistProductMasterListToDb(products: ProductMasterDetail[]): Promise<void> {
   const rows = JSON.parse(JSON.stringify(products)) as unknown[]
   await invoke('products_master_replace_all', { rows })
 }
@@ -1145,13 +1186,30 @@ export async function hydrateProductMasterFromDb(): Promise<ProductMasterDetail[
   try {
     const rows = await invoke<unknown[]>('products_master_load')
     if (!Array.isArray(rows) || rows.length === 0) {
+      // DB ว่าง — ถ้า localStorage มีข้อมูลจริง (user เคยบันทึก) ให้ push ขึ้น DB ทันที
+      const hasLocalSave = localStorage.getItem(PRODUCT_MASTER_LIST_LS_KEY) !== null
+      if (hasLocalSave) {
+        const localList = getProductMasterList()
+        void persistProductMasterListToDb(localList).catch((e) => {
+          console.error('[product-master] auto-push local→db failed', e)
+        })
+        console.info(`[product-master] DB empty — pushing ${localList.length} rows from localStorage to DB`)
+      }
       return getProductMasterList()
     }
     const list = rows
       .map((r) => r as ProductMasterDetail)
       .filter((p) => p && typeof p.id === 'string' && typeof p.sku === 'string')
-    const normalized = migrateLegacyHoseProductTag(list)
+    const afterHose = migrateLegacyHoseProductTag(list)
+    const oemFix = migrateSkuDuplicateFromOemToFactory(afterHose)
+    const normalized = oemFix.list
+    if (oemFix.dirty) {
+      void persistProductMasterListToDb(normalized).catch((e) => {
+        console.error('[product-master] migrate SKU→factory persist failed', e)
+      })
+    }
     productMasterMemoryCache = normalized
+    productMasterSkuMap = null
     try {
       localStorage.setItem(PRODUCT_MASTER_LIST_LS_KEY, JSON.stringify(normalized))
     } catch {
@@ -1182,6 +1240,31 @@ function migrateLegacyHoseProductTag(list: ProductMasterDetail[]): ProductMaster
   return next
 }
 
+/**
+ * ย้ายเบอร์ที่ซ้ำกับรหัสสินค้า (SKU) ออกจาก oemTags → factoryNo เมื่อช่องโรงงานว่าง
+ * (กรณีกรอกเบอร์โรงงานผิดช่องไปที่ «เบอร์แท้ (OEM)»)
+ */
+function migrateSkuDuplicateFromOemToFactory(list: ProductMasterDetail[]): {
+  list: ProductMasterDetail[]
+  dirty: boolean
+} {
+  let dirty = false
+  const next = list.map((p) => {
+    const sku = (p.sku ?? '').trim()
+    if (!sku) return p
+    if ((p.factoryNo ?? '').trim()) return p
+    const tags = (p.oemTags ?? []).map((t) => String(t).trim()).filter(Boolean)
+    if (tags.length === 0) return p
+    const skuLower = sku.toLowerCase()
+    const matchSku = tags.filter((t) => t.toLowerCase() === skuLower)
+    if (matchSku.length === 0) return p
+    dirty = true
+    const rest = tags.filter((t) => t.toLowerCase() !== skuLower)
+    return { ...p, factoryNo: matchSku[0], oemTags: rest }
+  })
+  return { list: next, dirty }
+}
+
 export function getProductMasterList(): ProductMasterDetail[] {
   if (productMasterMemoryCache !== null) {
     return productMasterMemoryCache
@@ -1191,7 +1274,19 @@ export function getProductMasterList(): ProductMasterDetail[] {
     if (!raw) return [...PRODUCT_MASTER_DETAILS]
     const parsed = JSON.parse(raw) as unknown
     if (!Array.isArray(parsed) || parsed.length === 0) return [...PRODUCT_MASTER_DETAILS]
-    return migrateLegacyHoseProductTag(parsed as ProductMasterDetail[])
+    const afterHose = migrateLegacyHoseProductTag(parsed as ProductMasterDetail[])
+    const oemFix = migrateSkuDuplicateFromOemToFactory(afterHose)
+    if (oemFix.dirty) {
+      try {
+        localStorage.setItem(PRODUCT_MASTER_LIST_LS_KEY, JSON.stringify(oemFix.list))
+      } catch {
+        /* ignore */
+      }
+      if (isTauri()) {
+        schedulePersistProductMasterListToDb(oemFix.list)
+      }
+    }
+    return oemFix.list
   } catch {
     return [...PRODUCT_MASTER_DETAILS]
   }
@@ -1202,6 +1297,7 @@ export function saveProductMasterList(
   opts?: { notify?: boolean },
 ): void {
   productMasterMemoryCache = products
+  productMasterSkuMap = null
   try {
     localStorage.setItem(PRODUCT_MASTER_LIST_LS_KEY, JSON.stringify(products))
   } catch {
@@ -1217,6 +1313,7 @@ export function saveProductMasterList(
 
 export function clearProductMasterListOverride(): void {
   productMasterMemoryCache = null
+  productMasterSkuMap = null
   localStorage.removeItem(PRODUCT_MASTER_LIST_LS_KEY)
   window.dispatchEvent(new CustomEvent(PRODUCT_MASTER_LIST_CHANGED_EVENT))
 }
@@ -1228,7 +1325,12 @@ export function getProductMasterById(id: string): ProductMasterDetail | undefine
 export function getProductMasterBySku(sku: string): ProductMasterDetail | undefined {
   const key = sku.trim().toLowerCase()
   if (!key) return undefined
-  return getProductMasterList().find((p) => p.sku.trim().toLowerCase() === key)
+  if (productMasterSkuMap === null) {
+    productMasterSkuMap = new Map(
+      getProductMasterList().map((p) => [p.sku.trim().toLowerCase(), p]),
+    )
+  }
+  return productMasterSkuMap.get(key)
 }
 
 /** POS / MOCK สินค้า — ถ้าไม่มีแถวมาสเตอร์ให้ผ่าน (ของเดโมเก่า) */
@@ -1244,13 +1346,18 @@ export function masterSearchExtrasForSku(sku: string): string {
   if (!m) return ''
   const parts: string[] = []
   const yearTokens = new Set<string>()
+  const nowYear = new Date().getFullYear()
   for (const f of m.vehicleFitments ?? []) {
+    if (!f) continue
     parts.push(`${f.categoryLabel} ${f.brandName} ${f.modelName} ${f.engineLabel}`)
     if (f.engineText?.trim()) parts.push(f.engineText.trim())
+    if (f.driveType?.trim()) parts.push(f.driveType.trim())
     if (f.yearRangeText?.trim()) parts.push(f.yearRangeText.trim())
-    if (f.yearFrom != null && f.yearTo != null && Number.isFinite(f.yearFrom) && Number.isFinite(f.yearTo)) {
-      const from = Math.max(1900, Math.round(f.yearFrom))
-      const to = Math.min(2100, Math.round(f.yearTo))
+    const hasFrom = f.yearFrom != null && Number.isFinite(f.yearFrom)
+    const hasTo = f.yearTo != null && Number.isFinite(f.yearTo)
+    if (hasFrom || hasTo) {
+      const from = Math.max(1900, Math.round(hasFrom ? (f.yearFrom as number) : 1900))
+      const to = Math.min(2100, Math.round(hasTo ? (f.yearTo as number) : nowYear))
       if (from <= to) {
         for (let y = from; y <= to; y++) {
           yearTokens.add(String(y))

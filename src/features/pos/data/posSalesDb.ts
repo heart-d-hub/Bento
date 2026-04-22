@@ -87,6 +87,19 @@ export async function loadPosSalesHistoryAsync(limit = 200): Promise<PosSalesHis
   }))
 }
 
+export async function loadPosSalesHistoryByMemberAsync(memberCode: string, limit = 5): Promise<PosSalesHistoryRow[]> {
+  if (!isTauri()) return []
+  const rows = await invoke<Array<Omit<PosSalesHistoryRow, 'lineCount'> & { lineCount: number | string }>>(
+    'sales_history_by_member',
+    { memberCode, limit },
+  )
+  return (rows ?? []).map((r) => ({
+    ...r,
+    lineCount: Number(r.lineCount) || 0,
+    lines: Array.isArray(r.lines) ? r.lines : [],
+  }))
+}
+
 export async function getPosSaleByBillNoAsync(billNo: string): Promise<PosSalesHistoryRow | null> {
   if (!isTauri()) return null
   const row = await invoke<(Omit<PosSalesHistoryRow, 'lineCount'> & { lineCount: number | string }) | null>(

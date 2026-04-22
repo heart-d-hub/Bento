@@ -114,6 +114,26 @@ function parseSellTierPercentBasisCell(raw: string | undefined): 'list_discount'
   return undefined
 }
 
+function parseVatModeCell(raw: string | undefined): 'vat' | 'no_vat' | undefined {
+  const t = (raw ?? '').trim().toLowerCase()
+  if (!t) return undefined
+  if (t === 'no_vat' || t === 'novat' || t === 'no-vat' || t === 'ไม่มีvat' || t === 'ไม่มี') return 'no_vat'
+  if (t === 'vat' || t === 'มีvat' || t === 'มี') return 'vat'
+  return undefined
+}
+
+/** ค่าว่าง / ขีดกลาง (ข้อมูลเก่า) → 1+0 ให้สอดคล้องกับฟอร์มแฟ้มมาสเตอร์ที่ต้องการ X+Y */
+function normalizeSchemeForImport(raw: string | undefined): string {
+  const t = (raw ?? '').trim()
+  if (!t || t === '—') return '1+0'
+  const m = t.match(/^(\d+)\s*\+\s*(\d+)$/)
+  if (!m) return t
+  const buy = Number(m[1])
+  const free = Number(m[2])
+  if (!Number.isFinite(buy) || buy <= 0 || !Number.isFinite(free) || free < 0) return t
+  return `${buy}+${free}`
+}
+
 /** แถว CSV ↔ Google Sheets — หัวคอลัมภาษาอังกฤษเพื่อความเสถียร */
 export type ProductMasterCsvRow = Record<string, string>
 
@@ -139,6 +159,7 @@ export function productToCsvRow(p: ProductMasterDetail): ProductMasterCsvRow {
     costPrice: String(p.costPrice),
     avgCost: String(p.avgCost),
     sellPrice: String(p.sellPrice),
+    vatMode: p.vatMode === 'no_vat' ? 'no_vat' : 'vat',
     scheme: p.scheme,
     notes: p.notes ?? '',
     posDisplayNote: p.posDisplayNote ?? '',
@@ -163,6 +184,9 @@ export function productToCsvRow(p: ProductMasterDetail): ProductMasterCsvRow {
     piecesPerBox: p.piecesPerBox != null ? String(p.piecesPerBox) : '',
     splitSale: p.splitSale ? '1' : '0',
     productTagIdsJson: JSON.stringify(p.productTagIds ?? []),
+    stlBoltPairNutSku: p.stlBoltPairNutSku ?? '',
+    stlBoltPairWasherSku: p.stlBoltPairWasherSku ?? '',
+    stlBoltPairMaleSkusJson: JSON.stringify(p.stlBoltPairMaleSkus ?? []),
   }
 }
 
@@ -224,7 +248,8 @@ export function csvRowToProduct(
     costPrice: num(row.costPrice, 0),
     avgCost: num(row.avgCost, 0),
     sellPrice: num(row.sellPrice, 0),
-    scheme: (row.scheme ?? '').trim() || '—',
+    vatMode: parseVatModeCell(row.vatMode) === 'no_vat' ? 'no_vat' : undefined,
+    scheme: normalizeSchemeForImport(row.scheme),
     notes: (row.notes ?? '').trim() || undefined,
     posDisplayNote: (row.posDisplayNote ?? '').trim() || undefined,
     inStoreCatalog: (() => {
@@ -263,6 +288,18 @@ export function csvRowToProduct(
       )
       return tagIds.length > 0 ? { productTagIds: tagIds } : {}
     })(),
+    ...(() => {
+      const nutSku = (row.stlBoltPairNutSku ?? '').trim()
+      const washerSku = (row.stlBoltPairWasherSku ?? '').trim()
+      const maleSkus = parseJson<string[]>(row.stlBoltPairMaleSkusJson, []).filter(
+        (x): x is string => typeof x === 'string' && x.trim().length > 0,
+      )
+      return {
+        ...(nutSku ? { stlBoltPairNutSku: nutSku } : {}),
+        ...(washerSku ? { stlBoltPairWasherSku: washerSku } : {}),
+        ...(maleSkus.length > 0 ? { stlBoltPairMaleSkus: maleSkus } : {}),
+      }
+    })(),
   }
 
   return { product, warnings }
@@ -287,8 +324,12 @@ const CSV_TEMPLATE_FITMENTS: VehicleFitmentRef[] = [
     modelId: 'm-civic',
     modelName: 'CIVIC',
     engineId: 'e-h-civ-1',
-    engineLabel: '1.5 Turbo · FC · 2016–2025',
+    engineLabel: '1.5 Turbo (2016-2025)',
+    engineText: '1.5 Turbo',
     engineCode: 'L15B7',
+    yearFrom: 2016,
+    yearTo: 2025,
+    yearRangeText: '2016-2025',
   },
 ]
 const CSV_TEMPLATE_VEHICLE_SUMMARY = deriveVehicleSummaryFromFitments(CSV_TEMPLATE_FITMENTS)
@@ -310,7 +351,7 @@ const CSV_TEMPLATE_EXAMPLE_ROW: ProductMasterDetail = {
   costPrice: 0,
   avgCost: 0,
   sellPrice: 0,
-  scheme: '—',
+  scheme: '1+0',
   crossBranch: defaultCross('tpl-example'),
 }
 

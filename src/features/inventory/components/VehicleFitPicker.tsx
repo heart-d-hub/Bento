@@ -1,6 +1,6 @@
 import { useVehicleCatalog } from '@/features/vehicle/context/VehicleCatalogContext'
 import { clsx } from 'clsx'
-import { Plus, X } from 'lucide-react'
+import { Copy, Pencil, Plus, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
 export type VehicleFitRow = {
@@ -17,6 +17,7 @@ export type VehicleFitRow = {
   yearRangeText?: string
   yearFrom?: number
   yearTo?: number
+  driveType?: string
   engineCode?: string
   /** เว้นว่าง = ไม่ระบุ (กรอง/ของทั่วไป) — ใช้กับผ้าเบรก/ดิสก์ */
   brakePosition?: '' | 'front' | 'rear'
@@ -42,6 +43,7 @@ type SearchModelOption = {
 type Props = {
   rows: VehicleFitRow[]
   onAdd: (row: VehicleFitRow) => void
+  onUpdate: (id: string, row: VehicleFitRow) => void
   onRemove: (id: string) => void
   labelClass: string
   sectionClass: string
@@ -85,9 +87,84 @@ function normalizeManualText(value: string): string {
   return value.trim().replace(/\s+/g, ' ')
 }
 
+function buildYearRangeLabel(yearFrom?: number, yearTo?: number): string {
+  if (yearFrom !== undefined && yearTo !== undefined) return `${yearFrom}-${yearTo}`
+  if (yearFrom === undefined && yearTo !== undefined) return `ถึง ${yearTo}`
+  if (yearFrom !== undefined && yearTo === undefined) return `${yearFrom}-ปัจจุบัน`
+  return ''
+}
+
+function parseYearRangeFromText(text: string): { yearFrom?: number; yearTo?: number } {
+  const t = text.trim()
+  if (!t) return {}
+  const mRange = t.match(/(\d{4})\s*[-–]\s*(\d{4})/)
+  if (mRange) {
+    const from = parseYearInput(mRange[1])
+    const to = parseYearInput(mRange[2])
+    if (from !== undefined || to !== undefined) return { yearFrom: from, yearTo: to }
+  }
+  const mTo = t.match(/ถึง\s*(\d{4})/)
+  if (mTo) {
+    const to = parseYearInput(mTo[1])
+    return { yearTo: to }
+  }
+  const mFromNow = t.match(/(\d{4})\s*[-–]\s*ปัจจุบัน/i)
+  if (mFromNow) {
+    const from = parseYearInput(mFromNow[1])
+    return { yearFrom: from }
+  }
+  return {}
+}
+
+function extractEngineTextFromLabel(label: string): string {
+  const t = label.trim()
+  if (!t) return ''
+  const yearLike = '(?:ถึง\\s*\\d{4}|\\d{4}\\s*[-–]\\s*\\d{4}|\\d{4}\\s*[-–]\\s*ปัจจุบัน|ปี\\s*\\d{4}(?:\\s*[-–]\\s*(?:\\d{4}|ปัจจุบัน))?)'
+  // ตัดท้ายรูปแบบ "(2001-2010)" / "(ถึง 2010)" / "(2001-ปัจจุบัน)"
+  const withoutParenYear = t.replace(
+    new RegExp(`\\s*\\(\\s*${yearLike}\\s*\\)\\s*$`, 'i'),
+    '',
+  )
+  // ตัดท้ายรูปแบบ "· (2001-2010)" ที่เคยจัดรูปไว้
+  const withoutDotYear = withoutParenYear.replace(
+    new RegExp(`\\s*[·•]\\s*\\(\\s*${yearLike}\\s*\\)\\s*$`, 'i'),
+    '',
+  )
+  // ตัดท้ายรูปแบบไม่ใส่วงเล็บ เช่น "1KD 2001-2010", "1KD ถึง 2010", "1KD 2001-ปัจจุบัน", "1KD ปี 2001-2010"
+  const withoutPlainYearSuffix = withoutDotYear.replace(
+    new RegExp(`\\s+${yearLike}\\s*$`, 'i'),
+    '',
+  )
+  // ตัดท้ายแบบมีตัวคั่น "· ปี 2005-2010" / "- 2005-2010"
+  const withoutSeparatedYearSuffix = withoutPlainYearSuffix.replace(
+    new RegExp(`\\s*(?:[·•\\-–:]|ปี)\\s*${yearLike}\\s*$`, 'i'),
+    '',
+  )
+  // เก็บงานตัวคั่นค้างท้าย เช่น "1KD ·" หลังตัดปีออก
+  const cleaned = withoutSeparatedYearSuffix.replace(/\s*[·•:\-–]+\s*$/, '').trim()
+  // กรณีเป็น label สั้น "ปี 2001-2010" ให้ถือว่าไม่มีเครื่อง
+  if (
+    /^ปี\s*(?:\d{4}\s*[-–]\s*\d{4}|ถึง\s*\d{4}|\d{4}\s*[-–]\s*ปัจจุบัน)$/i.test(
+      cleaned,
+    )
+  ) {
+    return ''
+  }
+  return cleaned.replace(/\s*[·•:\-–]?\s*\b(\d{1,2}WD|AWD|FWD|RWD)\b\s*$/i, '').trim()
+}
+
+function extractDriveTypeFromLabel(label: string): string {
+  const t = label.trim()
+  if (!t) return ''
+  const m = t.match(/\b(\d{1,2}WD|AWD|FWD|RWD)\b/i)
+  if (!m?.[1]) return ''
+  return m[1].toUpperCase()
+}
+
 export function VehicleFitPicker({
   rows,
   onAdd,
+  onUpdate,
   onRemove,
   labelClass,
   sectionClass,
@@ -114,8 +191,10 @@ export function VehicleFitPicker({
   const [modelHighlightedIndex, setModelHighlightedIndex] = useState(-1)
 
   const [manualEngineText, setManualEngineText] = useState('')
+  const [manualDriveType, setManualDriveType] = useState('')
   const [manualYearFrom, setManualYearFrom] = useState('')
   const [manualYearTo, setManualYearTo] = useState('')
+  const [editingRowId, setEditingRowId] = useState<string | null>(null)
 
   const categoryDropdownRef = useRef<HTMLDivElement | null>(null)
   const brandDropdownRef = useRef<HTMLDivElement | null>(null)
@@ -196,15 +275,28 @@ export function VehicleFitPicker({
   const categoryLabel = visibleCategories.find((c) => c.id === catId)?.label ?? ''
   const brandName = selectedBrand?.name ?? selectedModel?.brandName ?? ''
   const modelName = selectedModel?.name ?? ''
+  const manualEngineTextTrim = normalizeManualText(manualEngineText)
   const parsedYearFrom = parseYearInput(manualYearFrom)
   const parsedYearTo = parseYearInput(manualYearTo)
-  const hasManualSpec = Boolean(
-    normalizeManualText(manualEngineText) &&
-      parsedYearFrom !== undefined &&
-      parsedYearTo !== undefined &&
-      parsedYearFrom <= parsedYearTo,
-  )
-  const canAddResolved = Boolean(catId && brandId && modelId && hasManualSpec)
+  const hasYearFromInput = manualYearFrom.trim().length > 0
+  const hasYearToInput = manualYearTo.trim().length > 0
+  const hasYearInputError =
+    (hasYearFromInput && parsedYearFrom === undefined) || (hasYearToInput && parsedYearTo === undefined)
+  const hasYearRangeError =
+    parsedYearFrom !== undefined &&
+    parsedYearTo !== undefined &&
+    parsedYearFrom > parsedYearTo
+  const hasManualSpec = !hasYearInputError && !hasYearRangeError
+  const canAddResolved = Boolean(catId && (brandId || brandQuery.trim()) && (modelId || modelQuery.trim()) && hasManualSpec)
+
+  function resetFormState() {
+    setBrakePos('')
+    setManualEngineText('')
+    setManualDriveType('')
+    setManualYearFrom('')
+    setManualYearTo('')
+    setEditingRowId(null)
+  }
 
   function clearCategorySelection() {
     setCatId('')
@@ -212,10 +304,6 @@ export function VehicleFitPicker({
     setBrandQuery('')
     setModelId('')
     setModelQuery('')
-    setBrakePos('')
-    setManualEngineText('')
-    setManualYearFrom('')
-    setManualYearTo('')
   }
 
   function onSelectCategory(id: string) {
@@ -226,10 +314,6 @@ export function VehicleFitPicker({
     setBrandQuery('')
     setModelId('')
     setModelQuery('')
-    setBrakePos('')
-    setManualEngineText('')
-    setManualYearFrom('')
-    setManualYearTo('')
     setCategoryDropdownOpen(false)
   }
 
@@ -240,10 +324,6 @@ export function VehicleFitPicker({
     setBrandQuery(b.name)
     setModelId('')
     setModelQuery('')
-    setBrakePos('')
-    setManualEngineText('')
-    setManualYearFrom('')
-    setManualYearTo('')
   }
 
   function onModelPick(m: SearchModelOption) {
@@ -253,10 +333,6 @@ export function VehicleFitPicker({
     setBrandQuery(m.brandName)
     setModelId(m.id)
     setModelQuery(m.name)
-    setBrakePos('')
-    setManualEngineText('')
-    setManualYearFrom('')
-    setManualYearTo('')
   }
 
   function clearBrandSelection() {
@@ -264,19 +340,51 @@ export function VehicleFitPicker({
     setBrandQuery('')
     setModelId('')
     setModelQuery('')
-    setBrakePos('')
-    setManualEngineText('')
-    setManualYearFrom('')
-    setManualYearTo('')
   }
 
   function clearModelSelection() {
     setModelId('')
     setModelQuery('')
-    setBrakePos('')
+  }
+
+  function copyBrandModel(row: VehicleFitRow) {
+    setEditingRowId(null)
+    setCatId(row.categoryId)
+    setCategoryQuery(row.categoryLabel)
+    setBrandId(row.brandId)
+    setBrandQuery(row.brandName)
+    setModelId(row.modelId)
+    setModelQuery(row.modelName)
     setManualEngineText('')
+    setManualDriveType('')
     setManualYearFrom('')
     setManualYearTo('')
+    setBrakePos('')
+  }
+
+  function beginEdit(row: VehicleFitRow) {
+    const yearResolved =
+      row.yearFrom !== undefined || row.yearTo !== undefined
+        ? { yearFrom: row.yearFrom, yearTo: row.yearTo }
+        : parseYearRangeFromText(row.yearRangeText ?? row.engineLabel ?? '')
+    setEditingRowId(row.id)
+    setCatId(row.categoryId)
+    setCategoryQuery(row.categoryLabel)
+    setBrandId(row.brandId)
+    setBrandQuery(row.brandName)
+    setModelId(row.modelId)
+    setModelQuery(row.modelName)
+    setBrakePos((row.brakePosition ?? '') as '' | 'front' | 'rear')
+    const engineRaw = row.engineText ?? extractEngineTextFromLabel(row.engineLabel ?? '')
+    const cleanEngine = extractEngineTextFromLabel(engineRaw)
+    setManualEngineText(row.engineCode ? `${cleanEngine} [${row.engineCode}]` : cleanEngine)
+    setManualDriveType(
+      row.driveType ??
+        extractDriveTypeFromLabel(row.engineLabel ?? '') ??
+        extractDriveTypeFromLabel(row.engineText ?? ''),
+    )
+    setManualYearFrom(yearResolved.yearFrom != null ? String(yearResolved.yearFrom) : '')
+    setManualYearTo(yearResolved.yearTo != null ? String(yearResolved.yearTo) : '')
   }
 
   useEffect(() => {
@@ -286,19 +394,19 @@ export function VehicleFitPicker({
 
   useEffect(() => {
     if (!brandId || !catId) {
-      setBrandQuery('')
+      if (!editingRowId) setBrandQuery('')
       return
     }
-    setBrandQuery(selectedBrand?.name ?? '')
-  }, [brandId, catId, selectedBrand])
+    if (selectedBrand?.name) setBrandQuery(selectedBrand.name)
+  }, [brandId, catId, selectedBrand, editingRowId])
 
   useEffect(() => {
     if (!modelId || !catId) {
-      setModelQuery('')
+      if (!editingRowId) setModelQuery('')
       return
     }
-    setModelQuery(selectedModel?.name ?? '')
-  }, [modelId, catId, selectedModel])
+    if (selectedModel?.name) setModelQuery(selectedModel.name)
+  }, [modelId, catId, selectedModel, editingRowId])
 
   useEffect(() => {
     setCategoryHighlightedIndex((prev) => {
@@ -344,48 +452,92 @@ export function VehicleFitPicker({
     el?.scrollIntoView({ block: 'nearest' })
   }, [modelDropdownOpen, modelHighlightedIndex])
 
-  function handleAdd() {
+  useEffect(() => {
+    if (!editingRowId) return
+    if (!rows.some((r) => r.id === editingRowId)) {
+      setEditingRowId(null)
+    }
+  }, [rows, editingRowId])
+
+  function handleAddOrUpdate() {
     if (!canAddResolved) return
+    const editingRow = editingRowId ? rows.find((r) => r.id === editingRowId) : undefined
     const bp = brakePos || ''
-    const engineText = normalizeManualText(manualEngineText)
+    const engineCodeMatch = manualEngineTextTrim.match(/\[([^\]]*)\]\s*$/)
+    const engineCode = engineCodeMatch ? engineCodeMatch[1].trim() : ''
+    const engineText = engineCodeMatch
+      ? manualEngineTextTrim.slice(0, manualEngineTextTrim.lastIndexOf('[')).trim()
+      : manualEngineTextTrim
+    const driveType = normalizeManualText(manualDriveType)
     const yearFrom = parsedYearFrom
     const yearTo = parsedYearTo
-    const manualYearLabel =
-      engineText && yearFrom !== undefined && yearTo !== undefined ? `${engineText} (${yearFrom}-${yearTo})` : ''
-    const resolvedEngineId = manualYearLabel
-      ? `manual:${catId}:${brandId}:${modelId}:${manualYearLabel.toLowerCase().replace(/\s+/g, '-')}`
-      : ''
-    const resolvedEngineLabel = manualYearLabel
+    const yearRangeLabel = buildYearRangeLabel(yearFrom, yearTo)
+    const resolvedEngineLabel = (() => {
+      if (engineText && yearRangeLabel) return `${engineText} (${yearRangeLabel})`
+      if (engineText) return engineText
+      if (yearRangeLabel) return `ปี ${yearRangeLabel}`
+      return 'ไม่ระบุเครื่อง/ปี'
+    })()
+    const yearRangeKey = yearRangeLabel || 'no-year'
+    const engineKey = engineText ? engineText.toLowerCase().replace(/\s+/g, '-') : 'no-engine'
+    const resolvedBrandId = brandId || `manual-brand:${brandQuery.trim().toLowerCase().replace(/\s+/g, '-')}`
+    const resolvedModelId = modelId || `manual-model:${modelQuery.trim().toLowerCase().replace(/\s+/g, '-')}`
+    const resolvedEngineId =
+      editingRow && !editingRow.engineId.startsWith('manual:')
+        ? editingRow.engineId
+        : `manual:${catId}:${resolvedBrandId}:${resolvedModelId}:${engineKey}:${yearRangeKey
+            .toLowerCase()
+            .replace(/\s+/g, '-')}`
+    const resolvedCategoryLabel = categoryLabel || categoryQuery.trim() || editingRow?.categoryLabel || ''
+    const resolvedBrandName = brandName || brandQuery.trim() || editingRow?.brandName || ''
+    const resolvedModelName = modelName || modelQuery.trim() || editingRow?.modelName || ''
     if (!resolvedEngineId || !resolvedEngineLabel) return
     const dup = rows.some(
       (r) =>
+        r.id !== editingRowId &&
         r.categoryId === catId &&
-        r.brandId === brandId &&
-        r.modelId === modelId &&
+        r.brandId === resolvedBrandId &&
+        r.modelId === resolvedModelId &&
         r.engineId === resolvedEngineId &&
+        (r.driveType ?? '') === driveType &&
         (r.brakePosition ?? '') === bp,
     )
     if (dup) return
-    onAdd({
-      id: newRowId(),
+    const keepExistingEngineDetail =
+      Boolean(editingRow) &&
+      manualEngineTextTrim.length === 0 &&
+      manualYearFrom.trim().length === 0 &&
+      manualYearTo.trim().length === 0
+    const rowPayload: VehicleFitRow = {
+      id: editingRowId ?? newRowId(),
       categoryId: catId,
-      categoryLabel,
-      brandId,
-      brandName,
-      modelId,
-      modelName,
+      categoryLabel: resolvedCategoryLabel,
+      brandId: resolvedBrandId,
+      brandName: resolvedBrandName,
+      modelId: resolvedModelId,
+      modelName: resolvedModelName,
       engineId: resolvedEngineId,
-      engineLabel: resolvedEngineLabel,
-      ...(engineText ? { engineText } : {}),
-      ...(manualYearLabel ? { yearRangeText: `${yearFrom}-${yearTo}` } : {}),
-      ...(yearFrom !== undefined ? { yearFrom } : {}),
-      ...(yearTo !== undefined ? { yearTo } : {}),
+      engineLabel: keepExistingEngineDetail && editingRow ? editingRow.engineLabel : resolvedEngineLabel,
+      ...(keepExistingEngineDetail && editingRow
+        ? {
+            ...(editingRow.engineText ? { engineText: editingRow.engineText } : {}),
+            ...(editingRow.yearRangeText ? { yearRangeText: editingRow.yearRangeText } : {}),
+            ...(editingRow.yearFrom !== undefined ? { yearFrom: editingRow.yearFrom } : {}),
+            ...(editingRow.yearTo !== undefined ? { yearTo: editingRow.yearTo } : {}),
+          }
+        : {
+            ...(engineText ? { engineText } : {}),
+            ...(yearRangeLabel ? { yearRangeText: yearRangeLabel } : {}),
+            ...(yearFrom !== undefined ? { yearFrom } : {}),
+            ...(yearTo !== undefined ? { yearTo } : {}),
+          }),
+      ...(driveType ? { driveType } : {}),
+      ...(engineCode ? { engineCode } : {}),
       brakePosition: brakePos || undefined,
-    })
-    setBrakePos('')
-    setManualEngineText('')
-    setManualYearFrom('')
-    setManualYearTo('')
+    }
+    if (editingRowId) onUpdate(editingRowId, rowPayload)
+    else onAdd(rowPayload)
+    resetFormState()
   }
 
   return (
@@ -423,7 +575,11 @@ export function VehicleFitPicker({
                 setCategoryDropdownOpen(true)
                 setCategoryQuery(e.target.value)
                 setCategoryHighlightedIndex(0)
-                if (catId) clearCategorySelection()
+                if (catId) {
+                  setCatId('')
+                  setBrandId('')
+                  setModelId('')
+                }
               }}
               onKeyDown={(e) => {
                 if (e.key === 'ArrowDown') {
@@ -496,7 +652,10 @@ export function VehicleFitPicker({
                 setBrandDropdownOpen(true)
                 setBrandQuery(e.target.value)
                 setBrandHighlightedIndex(0)
-                if (brandId) clearBrandSelection()
+                if (brandId) {
+                  setBrandId('')
+                  setModelId('')
+                }
               }}
               onKeyDown={(e) => {
                 if (e.key === 'ArrowDown') {
@@ -572,7 +731,7 @@ export function VehicleFitPicker({
                 setModelDropdownOpen(true)
                 setModelQuery(e.target.value)
                 setModelHighlightedIndex(0)
-                if (modelId) clearModelSelection()
+                if (modelId) setModelId('')
               }}
               onKeyDown={(e) => {
                 if (e.key === 'ArrowDown') {
@@ -641,6 +800,15 @@ export function VehicleFitPicker({
             placeholder="เช่น 2.0, 1KD, 4JA1"
           />
         </label>
+        <label className="block min-w-0">
+          <span className={clsx(labelClass, alignedLabelCls)}>ขับเคลื่อน</span>
+          <input
+            className={inputCls}
+            value={manualDriveType}
+            onChange={(e) => setManualDriveType(e.target.value.toUpperCase())}
+            placeholder="เช่น 4WD, AWD"
+          />
+        </label>
 
         <label className="block min-w-0">
           <span className={clsx(labelClass, alignedLabelCls)}>ปีเริ่ม</span>
@@ -651,6 +819,9 @@ export function VehicleFitPicker({
             onChange={(e) => setManualYearFrom(e.target.value)}
             placeholder="เช่น 1995"
           />
+          {hasYearFromInput && parsedYearFrom === undefined ? (
+            <span className="mt-0.5 block text-[10px] text-rose-700">กรอกปีเริ่มเป็นตัวเลข 1900-2100</span>
+          ) : null}
         </label>
 
         <label className="block min-w-0">
@@ -662,6 +833,9 @@ export function VehicleFitPicker({
             onChange={(e) => setManualYearTo(e.target.value)}
             placeholder="เช่น 2015"
           />
+          {hasYearToInput && parsedYearTo === undefined ? (
+            <span className="mt-0.5 block text-[10px] text-rose-700">กรอกปีสิ้นสุดเป็นตัวเลข 1900-2100</span>
+          ) : null}
         </label>
 
         <label className="block min-w-0 sm:col-span-2 xl:col-span-1">
@@ -678,11 +852,17 @@ export function VehicleFitPicker({
           </select>
         </label>
       </div>
+      {hasYearRangeError ? (
+        <p className="mt-1 text-[10px] text-rose-700">ปีเริ่มต้องน้อยกว่าหรือเท่าปีสิ้นสุด</p>
+      ) : null}
+      <p className="mt-1 text-[10px] text-slate-500">
+        กติกาปี: ใส่เฉพาะปีสิ้นสุด = ถึงปีนั้น, ใส่เฉพาะปีเริ่ม = ถึงปัจจุบัน, ไม่ใส่ทั้งคู่ = ไม่มีข้อมูลปี
+      </p>
 
       <button
         type="button"
         disabled={!canAddResolved}
-        onClick={handleAdd}
+        onClick={handleAddOrUpdate}
         className={clsx(
           'mt-1.5 inline-flex w-full items-center justify-center gap-1.5 rounded-md border px-2 py-1 text-[11px] font-medium transition sm:w-auto',
           canAddResolved
@@ -691,8 +871,17 @@ export function VehicleFitPicker({
         )}
       >
         <Plus className="size-3.5" />
-        เพิ่มชุดนี้
+        {editingRowId ? 'บันทึกการแก้ไขชุดนี้' : 'เพิ่มชุดนี้'}
       </button>
+      {editingRowId ? (
+        <button
+          type="button"
+          onClick={resetFormState}
+          className="ml-1.5 mt-1.5 inline-flex w-full items-center justify-center rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50 sm:w-auto"
+        >
+          ยกเลิกแก้ไข
+        </button>
+      ) : null}
 
       {rows.length > 0 ? (
         <ul className="mt-1.5 max-h-20 overflow-y-auto rounded-md border border-slate-200 bg-white p-1.5">
@@ -704,12 +893,31 @@ export function VehicleFitPicker({
               <span className="truncate">
                 {r.modelName} {compactEngineLabel(r.engineLabel)}
                 {r.engineCode ? ` [${r.engineCode}]` : ''}
+                {r.driveType ? ` · ${r.driveType}` : ''}
                 {r.brakePosition === 'front'
                   ? ' · เบรกหน้า'
                   : r.brakePosition === 'rear'
                     ? ' · เบรกหลัง'
                     : ''}
               </span>
+              <button
+                type="button"
+                onClick={() => copyBrandModel(r)}
+                className="shrink-0 rounded p-0.5 text-slate-400 hover:bg-emerald-50 hover:text-emerald-700"
+                aria-label="ใช้ยี่ห้อ/รุ่นเดิม"
+                title="ใช้ยี่ห้อ/รุ่นเดิม (เพิ่มเครื่องใหม่)"
+              >
+                <Copy className="size-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => beginEdit(r)}
+                className="shrink-0 rounded p-0.5 text-slate-400 hover:bg-sky-50 hover:text-sky-700"
+                aria-label="แก้ไขรายการ"
+                title="แก้ไข"
+              >
+                <Pencil className="size-3.5" />
+              </button>
               <button
                 type="button"
                 onClick={() => onRemove(r.id)}

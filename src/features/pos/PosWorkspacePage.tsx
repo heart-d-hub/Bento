@@ -13,13 +13,27 @@ import { BRANCHES } from '@/features/auth/branches'
 import { getStoredBranch } from '@/features/auth/authSession'
 import {
   getProductMasterBySku,
-  getProductMasterList,
   masterSearchExtrasForSku,
   type VehicleFitmentRef,
 } from '@/features/inventory/data/productMasterData'
 import { loadProductTagsRegistry } from '@/features/inventory/data/productTagsRegistry'
 import { getPosCatalogProducts } from '@/features/pos/data/posCatalogMerge'
-import { mergeInventoryProductsWithLiveStock } from '@/features/pos/data/posLiveStock'
+import {
+  mergeInventoryProductsWithLiveStock,
+  loadLiveStock,
+  saveLiveStock,
+  loadRollStock,
+  saveRollStock,
+  loadBoxPieceStock,
+  saveBoxPieceStock,
+  deductStock,
+  deductRollKg,
+  deductFullRolls,
+  deductBoxPieces,
+  isBoxPieceProduct,
+  posProductUsesRollShelfStock,
+  posRollNominalForProduct,
+} from '@/features/pos/data/posLiveStock'
 import {
   getPosSellConfig,
   pickDefaultPosUnitAndPrice,
@@ -28,20 +42,19 @@ import {
 } from '@/features/pos/data/posUnitPricing'
 import { getStlBoltPairForMaleProduct } from '@/features/promotions/stlBoltPairRegistry'
 import { computeStlVolumePromo } from '@/features/promotions/stlVolumePromo'
-import { createPosSaleAsync } from '@/features/pos/data/posSalesDb'
+import { createPosSaleAsync, loadPosSalesHistoryByMemberAsync, type PosSalesHistoryRow } from '@/features/pos/data/posSalesDb'
 import { POS_SALE_RECORDED_EVENT } from '@/features/pos/data/posSalesHistory'
 import { printPosReceipt } from '@/features/pos/utils/posPrintReceipt'
 import { localDateYYYYMMDD, parseLocalYYYYMMDD } from '@/features/pos/utils/posLocalDate'
 import { buildTaxInvoiceFormPrintHtml, printTaxInvoiceHtmlPreferSystemDialog, type TaxInvoiceLineItemRow } from '@/features/inventory/data/taxInvoiceFormCanvasShared'
 import { getActiveTaxInvoiceForm, loadTaxInvoiceFormDesignerState } from '@/features/inventory/data/taxInvoiceFormDesignerStore'
 import { MOCK_STORE_PROFILE } from '@/features/settings/data/mockStoreProfile'
-import { INITIAL_VEHICLE_CATALOG } from '@/features/vehicle/data/mockCatalog'
-import { normalizeCatalog } from '@/features/vehicle/data/normalizeCatalog'
-import { VEHICLE_CATALOG_STORAGE_KEY } from '@/features/vehicle/data/vehicleCatalogStorageKeys'
 import { useThemePreference } from '@/features/settings/themePreference'
+import { ProductImage } from '@/features/inventory/components/ProductImage'
 import { clsx } from 'clsx'
 import {
   Activity,
+  AlertTriangle,
   Banknote,
   BookOpen,
   CheckCircle2,
@@ -67,7 +80,7 @@ import {
   X,
 } from 'lucide-react'
 import { createPortal } from 'react-dom'
-import { useEffect, useMemo, useState } from 'react'
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 
 type PosWorkspacePageProps = {
   className?: string
@@ -113,11 +126,25 @@ type Product = {
   unit: string
   price: number
   stock: number
+  category?: string
+  brand?: string
+  location?: string
   carBrand?: string
   carModelLabel?: string
   yearLabel?: string
   factoryOem?: string
   genuineNo?: string
+  dimensions?: { innerDiameterMm?: number; innerDiameterSecondaryMm?: number; outerDiameterMm?: number; heightMm?: number }
+}
+
+function formatDims(d: Product['dimensions']): string {
+  if (!d) return ''
+  const parts: string[] = []
+  if (d.innerDiameterMm) parts.push(`A:${d.innerDiameterMm}`)
+  if (d.innerDiameterSecondaryMm) parts.push(`A₂:${d.innerDiameterSecondaryMm}`)
+  if (d.outerDiameterMm) parts.push(`B:${d.outerDiameterMm}`)
+  if (d.heightMm) parts.push(`C:${d.heightMm}`)
+  return parts.length ? parts.join(' ') + ' mm' : ''
 }
 
 const WALK_IN_CUSTOMER: Customer = {
@@ -191,25 +218,31 @@ function isSuspendedAwaitTransfer(b: SuspendedBill): boolean {
   return (b.suspendKind ?? 'hold') === 'await_transfer'
 }
 
-type VehicleFacetRow = {
-  brandName: string
-  modelName: string
-  engineSize: string
-  yearRangeLabel: string
-}
-
 type PosFitmentBadge = {
   label: string
   matchedRows: string[]
 }
 
-function parseYearRangeFromText(text: string): { from: number; to: number } | null {
-  const m = text.match(/(\d{4})\s*[-–]\s*(\d{4})/)
-  if (!m) return null
-  const from = Number(m[1])
-  const to = Number(m[2])
-  if (!Number.isFinite(from) || !Number.isFinite(to) || from > to) return null
-  return { from, to }
+function stripYearFromEngineLabel(label: string): string {
+  return label.replace(/\s*\(\d{4}\)\s*$/, '').trim()
+}
+
+function parseYearsFromLabel(label: string): number[] {
+  const current = new Date().getFullYear()
+  const mRange = label.match(/(\d{4})\s*[-–]\s*(\d{4})/)
+  if (mRange) {
+    const from = Number(mRange[1])
+    const to = Number(mRange[2])
+    return Array.from({ length: to - from + 1 }, (_, i) => from + i)
+  }
+  const mFrom = label.match(/(\d{4})\s*\+/)
+  if (mFrom) {
+    const from = Number(mFrom[1])
+    return Array.from({ length: current - from + 1 }, (_, i) => from + i)
+  }
+  const mSingle = label.match(/\b(\d{4})\b/)
+  if (mSingle) return [Number(mSingle[1])]
+  return []
 }
 
 function normalizeSearchText(s: string): string {
@@ -227,28 +260,34 @@ function tokenizeSearch(q: string): string[] {
     .filter(Boolean)
 }
 
-function parseYearRangeText(text: string): { from: number; to: number } | null {
-  const m = text.match(/(\d{4})\s*[-–]\s*(\d{4})/)
-  if (!m) return null
-  const from = Number(m[1])
-  const to = Number(m[2])
-  if (!Number.isFinite(from) || !Number.isFinite(to) || from > to) return null
-  return { from, to }
-}
-
 function fitmentYearLabel(f: VehicleFitmentRef): string {
   if (f.yearFrom != null && f.yearTo != null) return `${f.yearFrom}-${f.yearTo}`
+  if (f.yearFrom != null && f.yearTo == null) return `${f.yearFrom}-ปัจจุบัน`
+  if (f.yearFrom == null && f.yearTo != null) return `ถึง ${f.yearTo}`
   const y = f.yearRangeText?.trim()
   if (y) return y
   const fromEngineLabel = f.engineLabel.match(/(\d{4}\s*[-–]\s*\d{4})/)
   return fromEngineLabel?.[1] ?? '-'
 }
 
+function getFitmentEngineName(f: VehicleFitmentRef): string {
+  if (f.engineText?.trim()) return f.engineText.trim()
+  const label = f.engineLabel?.trim() || ''
+  if (!label || label === 'ไม่ระบุเครื่อง/ปี') return ''
+  // Strip trailing "(YYYY-YYYY)" or "(YYYY-ปัจจุบัน)"
+  const stripped = label.replace(/\s*\(\s*\d{4}[\s\S]*?\)\s*$/, '').trim()
+  // If what remains is a year range or "ปี" prefix, it's not engine info
+  if (/^ปี\s*\d/.test(stripped) || /^\d{4}\s*[-–]/.test(stripped) || /^\d{4}$/.test(stripped)) return ''
+  return stripped
+}
+
 function buildFitmentSummary(f: VehicleFitmentRef): string {
-  const engine = f.engineText?.trim() || f.engineLabel?.trim() || '-'
+  const engine = getFitmentEngineName(f)
   const year = fitmentYearLabel(f)
   const brake = f.brakePosition === 'front' ? ' · เบรกหน้า' : f.brakePosition === 'rear' ? ' · เบรกหลัง' : ''
-  return `${f.brandName} ${f.modelName} · ${engine} (${year})${brake}`
+  const engPart = engine ? ` · ${engine}` : ''
+  const yrPart = year !== '-' ? ` (ปี ${year})` : ''
+  return `${f.brandName} ${f.modelName}${engPart}${yrPart}${brake}`
 }
 
 function displayPriceLevelLabel(levelIndex: number, fallbackLabel: string): string {
@@ -282,14 +321,13 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
 
   const [memberSearchQuery, setMemberSearchQuery] = useState('')
   const [barcodeInput, setBarcodeInput] = useState('')
+  const [suggestHighlightIndex, setSuggestHighlightIndex] = useState(-1)
+  const suggestDropdownRef = useRef<HTMLDivElement | null>(null)
   const [productSearchQuery, setProductSearchQuery] = useState('')
-  const [productFilterCarBrand, setProductFilterCarBrand] = useState('ทั้งหมด')
-  const [productFilterCarModel, setProductFilterCarModel] = useState('ทั้งหมด')
-  const [productFilterYear, setProductFilterYear] = useState('ทั้งหมด')
-  const [quickFilterCarBrand, setQuickFilterCarBrand] = useState('ทั้งหมด')
-  const [quickFilterCarModel, setQuickFilterCarModel] = useState('ทั้งหมด')
-  const [quickFilterEngine, setQuickFilterEngine] = useState('ทั้งหมด')
-  const [quickFilterYear, setQuickFilterYear] = useState('ทั้งหมด')
+  const [productModalCategory, setProductModalCategory] = useState<string | null>(null)
+  const [productModalMake, setProductModalMake] = useState('ทั้งหมด')
+  const [productModalModel, setProductModalModel] = useState('ทั้งหมด')
+  const [selectedModalProduct, setSelectedModalProduct] = useState<Product | null>(null)
   const [showMemberModal, setShowMemberModal] = useState(false)
   const [showProductModal, setShowProductModal] = useState(false)
   const [showCheckoutModal, setShowCheckoutModal] = useState(false)
@@ -353,6 +391,15 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   const walkInCustomer = useMemo(() => mockMembers.find((m) => m.accountCode === 'WK-00001') ?? WALK_IN_CUSTOMER, [mockMembers])
 
   const [customer, setCustomer] = useState<Customer>(WALK_IN_CUSTOMER)
+  const [memberHistory, setMemberHistory] = useState<PosSalesHistoryRow[]>([])
+
+  useEffect(() => {
+    if (customer.accountCode === WALK_IN_CUSTOMER.accountCode) {
+      setMemberHistory([])
+      return
+    }
+    loadPosSalesHistoryByMemberAsync(customer.accountCode, 5).then(setMemberHistory).catch(() => setMemberHistory([]))
+  }, [customer.accountCode])
 
   const [docInfo, setDocInfo] = useState(() => {
     const d = new Date()
@@ -408,6 +455,9 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   }, [docInfo.docDate])
 
   const [cart, setCart] = useState<CartLine[]>([])
+  const [stockVersion, setStockVersion] = useState(0)
+
+  const LOW_STOCK_THRESHOLD = 3
 
   const mockProducts: Product[] = useMemo(
     () =>
@@ -418,13 +468,17 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
         unit: p.stockMode === 'kg_roll' ? 'กก.' : p.stockMode === 'meter_roll' ? 'เมตร' : 'ชิ้น',
         price: 0,
         stock: p.stock,
+        category: p.category || undefined,
+        brand: p.brand || undefined,
+        location: p.location || undefined,
         carBrand: p.carBrand,
         carModelLabel: p.carModelLabel,
         yearLabel: p.yearLabel,
         factoryOem: p.factoryOem,
         genuineNo: p.genuineNo,
+        dimensions: getProductMasterBySku(p.sku)?.physicalDimensions,
       })),
-    [],
+    [stockVersion],
   )
   const productTagRegistry = useMemo(() => loadProductTagsRegistry(), [])
   const priceTypeLabelForLine = (line: CartLine): string => {
@@ -452,86 +506,6 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     }
     return defaultLinePriceTypeLabel(line)
   }
-  const vehicleCatalog = useMemo(() => {
-    try {
-      const raw = localStorage.getItem(VEHICLE_CATALOG_STORAGE_KEY)
-      if (!raw) return INITIAL_VEHICLE_CATALOG
-      const parsed = JSON.parse(raw)
-      if (!parsed || typeof parsed !== 'object') return INITIAL_VEHICLE_CATALOG
-      return normalizeCatalog(parsed)
-    } catch {
-      return INITIAL_VEHICLE_CATALOG
-    }
-  }, [])
-
-  const vehicleFacetRows = useMemo<VehicleFacetRow[]>(() => {
-    const out: VehicleFacetRow[] = []
-    const pushRow = (row: VehicleFacetRow) => {
-      if (!row.brandName || !row.modelName || !row.engineSize || !row.yearRangeLabel) return
-      out.push(row)
-    }
-    for (const cat of vehicleCatalog.categories) {
-      const data = vehicleCatalog.byCategory[cat.id]
-      if (!data) continue
-      for (const brand of data.brands) {
-        const models = data.modelsByBrandId[brand.id] ?? []
-        for (const model of models) {
-          const engines = data.enginesByModelId[model.id] ?? []
-          for (const eng of engines) {
-            const engineSize = (eng.engine_size ?? '').trim()
-            if (!engineSize) continue
-            for (const v of eng.variants ?? []) {
-              const yearTo = v.yearTo >= 2099 ? 'ปัจจุบัน' : String(v.yearTo)
-              pushRow({
-                brandName: brand.name,
-                modelName: model.name,
-                engineSize,
-                yearRangeLabel: `${v.yearFrom}-${yearTo}`,
-              })
-            }
-          }
-        }
-      }
-    }
-    for (const p of getProductMasterList()) {
-      for (const f of p.vehicleFitments ?? []) {
-        const engineSize = (f.engineText ?? '').trim() || (f.engineLabel ?? '').trim()
-        const yearLabel =
-          f.yearFrom != null && f.yearTo != null
-            ? `${f.yearFrom}-${f.yearTo}`
-            : (f.yearRangeText?.trim() ?? '')
-        const parsed = yearLabel ? parseYearRangeFromText(yearLabel) : parseYearRangeFromText(f.engineLabel ?? '')
-        const yearRangeLabel = parsed ? `${parsed.from}-${parsed.to}` : yearLabel
-        pushRow({
-          brandName: f.brandName,
-          modelName: f.modelName,
-          engineSize,
-          yearRangeLabel,
-        })
-      }
-    }
-    return out
-  }, [vehicleCatalog])
-  const vehicleVariantIdSet = useMemo(() => {
-    const ids = new Set<string>()
-    for (const cat of vehicleCatalog.categories) {
-      const data = vehicleCatalog.byCategory[cat.id]
-      if (!data) continue
-      for (const brand of data.brands) {
-        const models = data.modelsByBrandId[brand.id] ?? []
-        for (const model of models) {
-          const engines = data.enginesByModelId[model.id] ?? []
-          for (const eng of engines) {
-            for (const v of eng.variants ?? []) {
-              if (v.id) ids.add(v.id)
-            }
-          }
-        }
-      }
-    }
-    return ids
-  }, [vehicleCatalog])
-
   const isWalkIn = customer.accountCode === 'WK-00001'
 
   const creditBar = useMemo(() => {
@@ -571,305 +545,111 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     return base
   }, [memberSearchQuery, mockMembers, mode])
 
-  const carBrandOptions = useMemo(
-    () => [
-      'ทั้งหมด',
-      ...new Set(
-        mockProducts
-          .filter((p) => productFilterCarModel === 'ทั้งหมด' || p.carModelLabel === productFilterCarModel)
-          .filter((p) => productFilterYear === 'ทั้งหมด' || p.yearLabel === productFilterYear)
-          .map((p) => p.carBrand)
-          .filter(Boolean) as string[],
-      ),
-    ],
-    [mockProducts, productFilterCarModel, productFilterYear],
-  )
-  const carModelOptions = useMemo(
-    () => [
-      'ทั้งหมด',
-      ...new Set(
-        mockProducts
-          .filter((p) => productFilterCarBrand === 'ทั้งหมด' || p.carBrand === productFilterCarBrand)
-          .filter((p) => productFilterYear === 'ทั้งหมด' || p.yearLabel === productFilterYear)
-          .map((p) => p.carModelLabel)
-          .filter(Boolean) as string[],
-      ),
-    ],
-    [mockProducts, productFilterCarBrand, productFilterYear],
-  )
-  const yearOptions = useMemo(
-    () => [
-      'ทั้งหมด',
-      ...new Set(
-        mockProducts
-          .filter((p) => productFilterCarBrand === 'ทั้งหมด' || p.carBrand === productFilterCarBrand)
-          .filter((p) => productFilterCarModel === 'ทั้งหมด' || p.carModelLabel === productFilterCarModel)
-          .map((p) => p.yearLabel)
-          .filter(Boolean) as string[],
-      ),
-    ],
-    [mockProducts, productFilterCarBrand, productFilterCarModel],
-  )
+  const productHaystackMap = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const p of mockProducts) {
+      map.set(
+        p.code,
+        normalizeSearchText(
+          [p.code, p.name, p.factoryOem ?? '', p.genuineNo ?? '', p.brand ?? '', p.category ?? '', p.carBrand ?? '', p.carModelLabel ?? '', p.yearLabel ?? '', masterSearchExtrasForSku(p.code)].join(' '),
+        ),
+      )
+    }
+    return map
+  }, [mockProducts])
+
+  const deferredProductSearchQuery = useDeferredValue(productSearchQuery)
+  const deferredBarcodeInput = useDeferredValue(barcodeInput)
+
+  const modalCategoryOptions = useMemo(() => {
+    const seen = new Set<string>()
+    for (const p of mockProducts) {
+      if (p.category) seen.add(p.category)
+    }
+    return [...seen].sort((a, b) => a.localeCompare(b, 'th'))
+  }, [mockProducts])
+
+  const modalMakeOptions = useMemo(() => {
+    const seen = new Set<string>()
+    for (const p of mockProducts) {
+      if (p.carBrand) seen.add(p.carBrand)
+    }
+    return ['ทั้งหมด', ...[...seen].sort((a, b) => a.localeCompare(b, 'th'))]
+  }, [mockProducts])
+
+  const modalModelOptions = useMemo(() => {
+    if (productModalMake === 'ทั้งหมด') return ['ทั้งหมด']
+    const seen = new Set<string>()
+    for (const p of mockProducts) {
+      if (p.carBrand === productModalMake && p.carModelLabel) seen.add(p.carModelLabel)
+    }
+    return ['ทั้งหมด', ...[...seen].sort((a, b) => a.localeCompare(b, 'th'))]
+  }, [mockProducts, productModalMake])
 
   const filteredProducts = useMemo(() => {
-    const tokens = tokenizeSearch(productSearchQuery)
+    const tokens = tokenizeSearch(deferredProductSearchQuery)
+    const hasMakeFilter = productModalMake !== 'ทั้งหมด'
+    const hasModelFilter = productModalModel !== 'ทั้งหมด'
+    const hasTextFilter = tokens.length > 0
+    if (!productModalCategory && !hasMakeFilter && !hasTextFilter) return mockProducts.slice(0, 150)
     return mockProducts
-      .filter((p) => productFilterCarBrand === 'ทั้งหมด' || p.carBrand === productFilterCarBrand)
-      .filter((p) => productFilterCarModel === 'ทั้งหมด' || p.carModelLabel === productFilterCarModel)
-      .filter((p) => productFilterYear === 'ทั้งหมด' || p.yearLabel === productFilterYear)
       .filter((p) => {
-        if (!tokens.length) return true
-        const hay = normalizeSearchText(
-          [
-          p.code,
-          p.name,
-          p.factoryOem ?? '',
-          p.genuineNo ?? '',
-          p.carBrand ?? '',
-          p.carModelLabel ?? '',
-          p.yearLabel ?? '',
-          masterSearchExtrasForSku(p.code),
-        ]
-            .join(' '),
-        )
-        return tokens.every((t) => hay.includes(t))
+        if (productModalCategory && p.category !== productModalCategory) return false
+        if (hasMakeFilter && p.carBrand !== productModalMake) return false
+        if (hasModelFilter && p.carModelLabel !== productModalModel) return false
+        if (hasTextFilter) {
+          const hay = productHaystackMap.get(p.code) ?? ''
+          if (!tokens.every((t) => hay.includes(t))) return false
+        }
+        return true
       })
-      .slice(0, 120)
-  }, [mockProducts, productSearchQuery, productFilterCarBrand, productFilterCarModel, productFilterYear])
+      .slice(0, 200)
+  }, [mockProducts, productHaystackMap, deferredProductSearchQuery, productModalCategory, productModalMake, productModalModel])
 
-  const quickSuggestProducts = useMemo(() => {
-    const tokens = tokenizeSearch(barcodeInput)
-    if (!tokens.length) return []
-    const textMatched = mockProducts
-      .filter((p) => {
-        const hay = normalizeSearchText(
-          [
-          p.code,
-          p.name,
-          p.factoryOem ?? '',
-          p.genuineNo ?? '',
-          p.carBrand ?? '',
-          p.carModelLabel ?? '',
-          p.yearLabel ?? '',
-          masterSearchExtrasForSku(p.code),
-        ]
-            .join(' '),
-        )
-        return tokens.every((t) => hay.includes(t))
-      })
-    const filtered = textMatched
-      .filter((p) => quickFilterCarBrand === 'ทั้งหมด' || p.carBrand === quickFilterCarBrand)
-      .filter((p) => quickFilterCarModel === 'ทั้งหมด' || p.carModelLabel === quickFilterCarModel)
-      .filter((p) => {
-        if (quickFilterEngine === 'ทั้งหมด') return true
-        const rows = vehicleFacetRows.filter(
-          (r) =>
-            (!p.carBrand || r.brandName === p.carBrand) &&
-            (!p.carModelLabel || p.carModelLabel === r.modelName || p.carModelLabel.includes(r.modelName)),
-        )
-        return rows.some((r) => r.engineSize === quickFilterEngine)
-      })
-      .filter((p) => {
-        if (quickFilterYear === 'ทั้งหมด') return true
-        const rows = vehicleFacetRows.filter(
-          (r) =>
-            (!p.carBrand || r.brandName === p.carBrand) &&
-            (!p.carModelLabel || p.carModelLabel === r.modelName || p.carModelLabel.includes(r.modelName)),
-        )
-        return rows.some((r) => r.yearRangeLabel === quickFilterYear)
-      })
-    return filtered.slice(0, 8)
-  }, [
-    barcodeInput,
-    mockProducts,
-    quickFilterCarBrand,
-    quickFilterCarModel,
-    quickFilterEngine,
-    quickFilterYear,
-    vehicleFacetRows,
-  ])
+  useEffect(() => {
+    if (!showProductModal) return
+    if (selectedModalProduct && filteredProducts.some((p) => p.id === selectedModalProduct.id)) return
+    setSelectedModalProduct(filteredProducts[0] ?? null)
+  }, [filteredProducts, showProductModal])
 
   const quickTextMatchedProducts = useMemo(() => {
-    const tokens = tokenizeSearch(barcodeInput)
+    const tokens = tokenizeSearch(deferredBarcodeInput)
     if (!tokens.length) return []
     return mockProducts.filter((p) => {
-      const hay = normalizeSearchText(
-        [
-          p.code,
-          p.name,
-          p.factoryOem ?? '',
-          p.genuineNo ?? '',
-          p.carBrand ?? '',
-          p.carModelLabel ?? '',
-          p.yearLabel ?? '',
-          masterSearchExtrasForSku(p.code),
-        ].join(' '),
-      )
+      const hay = productHaystackMap.get(p.code) ?? ''
       return tokens.every((t) => hay.includes(t))
     })
-  }, [barcodeInput, mockProducts])
+  }, [deferredBarcodeInput, mockProducts, productHaystackMap])
 
-  const hasVehicleFacetForProduct = (p: Product): boolean => {
-    const m = getProductMasterBySku(p.code)
-    if (!m?.vehicleFitments?.length) return false
-    return m.vehicleFitments.some((f) => {
-      if (vehicleVariantIdSet.has(f.engineId)) return true
-      return Boolean(f.engineText?.trim() || f.yearRangeText?.trim() || (f.yearFrom != null && f.yearTo != null))
-    })
-  }
-
-  const mappedQuickProducts = useMemo(
-    () => quickTextMatchedProducts.filter((p) => hasVehicleFacetForProduct(p)),
-    [quickTextMatchedProducts, vehicleVariantIdSet],
+  const quickSuggestProducts = useMemo(
+    () => quickTextMatchedProducts.slice(0, 10),
+    [quickTextMatchedProducts],
   )
-
-  const quickCarBrandOptions = useMemo(
-    () => [
-      'ทั้งหมด',
-      ...new Set(
-        mappedQuickProducts
-          .filter((p) => quickFilterCarModel === 'ทั้งหมด' || p.carModelLabel === quickFilterCarModel)
-          .filter((p) => {
-            if (quickFilterEngine === 'ทั้งหมด') return true
-            const rows = vehicleFacetRows.filter(
-              (r) =>
-                (!p.carBrand || r.brandName === p.carBrand) &&
-                (!p.carModelLabel || p.carModelLabel === r.modelName || p.carModelLabel.includes(r.modelName)),
-            )
-            return rows.some((r) => r.engineSize === quickFilterEngine)
-          })
-          .filter((p) => {
-            if (quickFilterYear === 'ทั้งหมด') return true
-            const rows = vehicleFacetRows.filter(
-              (r) =>
-                (!p.carBrand || r.brandName === p.carBrand) &&
-                (!p.carModelLabel || p.carModelLabel === r.modelName || p.carModelLabel.includes(r.modelName)),
-            )
-            return rows.some((r) => r.yearRangeLabel === quickFilterYear)
-          })
-          .map((p) => p.carBrand)
-          .filter(Boolean) as string[],
-      ),
-    ],
-    [mappedQuickProducts, quickFilterCarModel, quickFilterEngine, quickFilterYear, vehicleFacetRows],
-  )
-
-  const quickCarModelOptions = useMemo(
-    () => [
-      'ทั้งหมด',
-      ...new Set(
-        mappedQuickProducts
-          .filter((p) => quickFilterCarBrand === 'ทั้งหมด' || p.carBrand === quickFilterCarBrand)
-          .filter((p) => {
-            if (quickFilterEngine === 'ทั้งหมด') return true
-            const rows = vehicleFacetRows.filter(
-              (r) =>
-                (!p.carBrand || r.brandName === p.carBrand) &&
-                (!p.carModelLabel || p.carModelLabel === r.modelName || p.carModelLabel.includes(r.modelName)),
-            )
-            return rows.some((r) => r.engineSize === quickFilterEngine)
-          })
-          .filter((p) => {
-            if (quickFilterYear === 'ทั้งหมด') return true
-            const rows = vehicleFacetRows.filter(
-              (r) =>
-                (!p.carBrand || r.brandName === p.carBrand) &&
-                (!p.carModelLabel || p.carModelLabel === r.modelName || p.carModelLabel.includes(r.modelName)),
-            )
-            return rows.some((r) => r.yearRangeLabel === quickFilterYear)
-          })
-          .map((p) => p.carModelLabel)
-          .filter(Boolean) as string[],
-      ),
-    ],
-    [mappedQuickProducts, quickFilterCarBrand, quickFilterEngine, quickFilterYear, vehicleFacetRows],
-  )
-
-  const quickEngineOptions = useMemo(
-    () => [
-      'ทั้งหมด',
-      ...new Set(
-        vehicleFacetRows
-          .filter((r) => quickFilterCarBrand === 'ทั้งหมด' || r.brandName === quickFilterCarBrand)
-          .filter((r) => quickFilterCarModel === 'ทั้งหมด' || r.modelName === quickFilterCarModel)
-          .filter((r) => quickFilterYear === 'ทั้งหมด' || r.yearRangeLabel === quickFilterYear)
-          .map((r) => r.engineSize)
-          .filter(Boolean),
-      ),
-    ],
-    [vehicleFacetRows, quickFilterCarBrand, quickFilterCarModel, quickFilterYear],
-  )
-
-  const quickYearOptions = useMemo(
-    () => [
-      'ทั้งหมด',
-      ...new Set(
-        vehicleFacetRows
-          .filter((r) => quickFilterCarBrand === 'ทั้งหมด' || r.brandName === quickFilterCarBrand)
-          .filter((r) => quickFilterCarModel === 'ทั้งหมด' || r.modelName === quickFilterCarModel)
-          .filter((r) => quickFilterEngine === 'ทั้งหมด' || r.engineSize === quickFilterEngine)
-          .map((r) => r.yearRangeLabel),
-      ),
-    ],
-    [vehicleFacetRows, quickFilterCarBrand, quickFilterCarModel, quickFilterEngine],
-  )
-
-  const showQuickCarFilters = useMemo(() => {
-    // แสดงเฉพาะเมื่อผลค้นหาปัจจุบันมีสินค้าที่ผูกรุ่นรถจริง
-    const hasMappedVehicle = mappedQuickProducts.length > 0
-    if (!hasMappedVehicle) return false
-    const hasBrand = quickCarBrandOptions.length > 1
-    const hasModel = quickCarModelOptions.length > 1
-    const hasEngine = quickEngineOptions.length > 1
-    const hasYear = quickYearOptions.length > 1
-    return hasBrand || hasModel || hasEngine || hasYear
-  }, [
-    mappedQuickProducts,
-    quickCarBrandOptions,
-    quickCarModelOptions,
-    quickEngineOptions,
-    quickYearOptions,
-  ])
 
   const fitmentBadgeBySku = useMemo(() => {
     const map = new Map<string, PosFitmentBadge>()
-    const norm = (v: string) => v.trim().toLocaleLowerCase()
-    const yearFilterValue = quickFilterYear === 'ทั้งหมด' ? '' : quickFilterYear.trim()
-    const yearFilterRange = parseYearRangeText(yearFilterValue)
-    const yearFilterSingle = Number(yearFilterValue)
     for (const p of quickSuggestProducts) {
       const master = getProductMasterBySku(p.code)
       if (!master?.vehicleFitments?.length) continue
-      const matched = master.vehicleFitments.filter((f) => {
-        if (quickFilterCarBrand !== 'ทั้งหมด' && norm(f.brandName) !== norm(quickFilterCarBrand)) return false
-        if (quickFilterCarModel !== 'ทั้งหมด' && norm(f.modelName) !== norm(quickFilterCarModel)) return false
-        if (quickFilterEngine !== 'ทั้งหมด') {
-          const engineHay = norm([f.engineText ?? '', f.engineLabel ?? '', f.engineCode ?? ''].join(' '))
-          if (!engineHay.includes(norm(quickFilterEngine))) return false
-        }
-        if (!yearFilterValue) return true
-        const fitLabel = fitmentYearLabel(f)
-        if (fitLabel === yearFilterValue) return true
-        if (f.yearFrom != null && f.yearTo != null) {
-          if (yearFilterRange) return f.yearFrom <= yearFilterRange.to && f.yearTo >= yearFilterRange.from
-          if (Number.isFinite(yearFilterSingle)) return yearFilterSingle >= f.yearFrom && yearFilterSingle <= f.yearTo
-        }
-        return false
-      })
-      if (!matched.length) continue
-      const firstYear = fitmentYearLabel(matched[0])
+      const firstYear = fitmentYearLabel(master.vehicleFitments[0])
       map.set(p.code, {
-        label: `match ปี ${firstYear}`,
-        matchedRows: matched.map(buildFitmentSummary),
+        label: `ปี ${firstYear}`,
+        matchedRows: master.vehicleFitments.map(buildFitmentSummary),
       })
     }
     return map
-  }, [quickSuggestProducts, quickFilterCarBrand, quickFilterCarModel, quickFilterEngine, quickFilterYear])
+  }, [quickSuggestProducts])
 
   const fitmentPreviewRows = useMemo(() => {
     if (!fitmentPreviewSku) return []
     return fitmentBadgeBySku.get(fitmentPreviewSku)?.matchedRows ?? []
   }, [fitmentBadgeBySku, fitmentPreviewSku])
+
+  useEffect(() => {
+    if (suggestHighlightIndex < 0 || !suggestDropdownRef.current) return
+    const el = suggestDropdownRef.current.querySelector<HTMLElement>(`[data-suggest-index="${suggestHighlightIndex}"]`)
+    el?.scrollIntoView({ block: 'nearest' })
+  }, [suggestHighlightIndex])
 
   const pricedCart = useMemo(() => {
     const next = cart.map((l) => ({ ...l }))
@@ -1192,15 +972,33 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   }
 
   const handleBarcodeKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Escape') {
+      setBarcodeInput('')
+      setSuggestHighlightIndex(-1)
+      return
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      setSuggestHighlightIndex((prev) => Math.min(prev + 1, quickSuggestProducts.length - 1))
+      return
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      setSuggestHighlightIndex((prev) => Math.max(prev - 1, -1))
+      return
+    }
     if (e.key !== 'Enter') return
     e.preventDefault()
     const code = barcodeInput.trim()
     if (!code) return
+    const highlighted = suggestHighlightIndex >= 0 ? quickSuggestProducts[suggestHighlightIndex] : undefined
     const found =
+      highlighted ??
       mockProducts.find((p) => p.code.toLowerCase() === code.toLowerCase()) ??
       quickSuggestProducts[0]
     if (found) addProductToCart(found)
     setBarcodeInput('')
+    setSuggestHighlightIndex(-1)
   }
 
   const clearCurrentBill = () => {
@@ -1328,7 +1126,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
         priceLevelIndex: line.priceLevelIndex ?? 0,
         priceLevelLabel: line.priceLevel || 'ราคา 1',
       }))
-      printPosReceipt({
+      await printPosReceipt({
         billNo: issuedDocNo,
         lines: receiptLines,
         grandTotal: totals.grandTotal,
@@ -1512,8 +1310,53 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
           }
         })
       }
+      // ตัดสต็อก
+      try {
+        const catalog = getPosCatalogProducts()
+        let pieceStock = loadLiveStock()
+        let rollStock = loadRollStock()
+        let boxStock = loadBoxPieceStock()
+        const pieceDeductions: { productId: string; qty: number }[] = []
+
+        for (const line of pricedCart) {
+          if (!line.productId) continue
+          const p = catalog.find((x) => x.id === line.productId)
+          if (!p) continue
+          const cfg = getPosSellConfig(line.productId)
+          const unitIdx = line.unitIndex ?? 0
+          const unit = cfg.units.find((u) => u.index === unitIdx) ?? cfg.units[0]
+          const baseUnits = Math.max(1, unit?.baseUnits ?? 1)
+          const isRoll = unit?.label === 'ม้วน'
+
+          if (isBoxPieceProduct(p)) {
+            boxStock = deductBoxPieces(boxStock, line.productId, line.qty * baseUnits, p.piecesPerBox!)
+          } else if (posProductUsesRollShelfStock(p)) {
+            const nominal = posRollNominalForProduct(p)
+            if (isRoll) {
+              rollStock = deductFullRolls(rollStock, line.productId, Math.floor(line.qty))
+            } else {
+              rollStock = deductRollKg(rollStock, line.productId, line.qty, nominal)
+            }
+          } else {
+            pieceDeductions.push({ productId: line.productId, qty: line.qty * baseUnits })
+          }
+        }
+
+        pieceStock = deductStock(pieceStock, pieceDeductions)
+        saveLiveStock(pieceStock)
+        saveRollStock(rollStock)
+        saveBoxPieceStock(boxStock)
+        setStockVersion((v) => v + 1)
+      } catch (stockErr) {
+        console.error('[pos] stock deduction failed', stockErr)
+      }
+
       closeCheckoutModal()
       clearCurrentBill()
+    } catch (error) {
+      console.error('[pos] checkout failed', error)
+      const msg = error instanceof Error ? error.message : String(error)
+      window.alert(`เกิดข้อผิดพลาด กรุณาลองใหม่\n\n${msg}`)
     } finally {
       setIsSavingCheckout(false)
     }
@@ -1845,139 +1688,183 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                 </div>
               )}
 
+              {!isWalkIn && memberHistory.length > 0 && (
+                <div className="mt-2 border-t border-slate-100 pt-2 dark:border-[#1e2233]">
+                  <div className="mb-1.5 flex items-center gap-1 text-[9px] font-black uppercase tracking-widest text-purple-700 dark:text-fuchsia-400">
+                    <Clock className="size-3 shrink-0" aria-hidden />
+                    ประวัติการซื้อ ({memberHistory.length} บิลล่าสุด)
+                  </div>
+                  <div className="space-y-1.5">
+                    {memberHistory.map((bill) => (
+                      <div
+                        key={bill.id}
+                        className="rounded border border-slate-100 bg-slate-50 px-2 py-1.5 dark:border-[#2a2d3e] dark:bg-[#0d0f17]"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-mono text-[9px] font-black text-blue-600 dark:text-cyan-400">
+                            {bill.billNo}
+                          </span>
+                          <span className="text-[9px] text-slate-400 dark:text-slate-500">
+                            {new Date(bill.at).toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: '2-digit' })}
+                          </span>
+                          <span className="shrink-0 font-mono text-[10px] font-black text-emerald-700 dark:text-emerald-400">
+                            {bill.total.toLocaleString('th-TH', { minimumFractionDigits: 0 })} ฿
+                          </span>
+                        </div>
+                        {bill.lines.slice(0, 3).map((line, i) => (
+                          <div key={i} className="mt-0.5 flex items-center gap-1 text-[9px] text-slate-600 dark:text-slate-400">
+                            <span className="truncate">{line.name}</span>
+                            <span className="shrink-0 tabular-nums text-slate-400">×{line.qty}</span>
+                          </div>
+                        ))}
+                        {bill.lines.length > 3 && (
+                          <div className="mt-0.5 text-[9px] text-slate-400 dark:text-slate-500">
+                            +{bill.lines.length - 3} รายการ
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
             </section>
 
             <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-slate-200 bg-white/90 shadow-sm backdrop-blur-md dark:border-[#2a2d3e] dark:bg-[#12141c]/80">
               <div className="flex shrink-0 items-center gap-2 border-b border-slate-200 bg-slate-100 px-2 py-2 dark:border-[#2a2d3e] dark:bg-[#0d0f17] pos-720p:py-1.5">
                 <div className="relative min-w-0 flex-1">
-                  <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3 -translate-y-1/2 text-slate-400 dark:text-cyan-500/60" />
+                  <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-slate-400 dark:text-cyan-500/60" />
                   <input
                     id="pos-product-search"
                     value={barcodeInput}
-                    onChange={(e) => {
-                      setBarcodeInput(e.target.value)
-                    }}
+                    onChange={(e) => { setBarcodeInput(e.target.value); setSuggestHighlightIndex(-1) }}
                     onKeyDown={handleBarcodeKeyDown}
-                    placeholder="สแกนบาร์โค้ด หรือ รหัสสินค้า..."
-                    className="w-full rounded border border-slate-200 bg-white py-1.5 pl-8 pr-2 text-xs font-semibold text-slate-800 outline-none placeholder:text-slate-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-cyan-50 dark:placeholder:text-slate-600 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30"
+                    placeholder="สแกนบาร์โค้ด / รหัส / ชื่อ / OEM..."
+                    className="w-full rounded-lg border border-slate-200 bg-white py-1.5 pl-8 pr-7 text-xs font-semibold text-slate-800 outline-none placeholder:font-normal placeholder:text-slate-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-cyan-50 dark:placeholder:text-slate-600 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30"
                   />
-                  {(tokenizeSearch(barcodeInput).length > 0 || quickSuggestProducts.length > 0) && (
-                    <div className="absolute left-0 right-0 top-[calc(100%+4px)] z-30 space-y-1 rounded border border-slate-200 bg-white p-2 shadow-lg dark:border-[#2a2d3e] dark:bg-[#12141c]">
-                      {showQuickCarFilters ? (
-                        <>
-                          <div className="grid grid-cols-2 gap-1 lg:grid-cols-4">
-                            <label className="space-y-0.5">
-                              <span className="block text-[9px] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">ยี่ห้อ</span>
-                              <select
-                                value={quickFilterCarBrand}
-                                onChange={(e) => setQuickFilterCarBrand(e.target.value)}
-                                className="w-full rounded border border-slate-200 bg-slate-50 px-1.5 py-1 text-[10px] dark:border-[#2a2d3e] dark:bg-[#050508]"
-                              >
-                                {quickCarBrandOptions.map((opt) => (
-                                  <option key={`q-brand-${opt}`} value={opt}>
-                                    {opt}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                            <label className="space-y-0.5">
-                              <span className="block text-[9px] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">รุ่น</span>
-                              <select
-                                value={quickFilterCarModel}
-                                onChange={(e) => setQuickFilterCarModel(e.target.value)}
-                                className="w-full rounded border border-slate-200 bg-slate-50 px-1.5 py-1 text-[10px] dark:border-[#2a2d3e] dark:bg-[#050508]"
-                              >
-                                {quickCarModelOptions.map((opt) => (
-                                  <option key={`q-model-${opt}`} value={opt}>
-                                    {opt}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                            <label className="space-y-0.5">
-                              <span className="block text-[9px] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">เครื่อง</span>
-                              <select
-                                value={quickFilterEngine}
-                                onChange={(e) => setQuickFilterEngine(e.target.value)}
-                                className="w-full rounded border border-slate-200 bg-slate-50 px-1.5 py-1 text-[10px] dark:border-[#2a2d3e] dark:bg-[#050508]"
-                              >
-                                {quickEngineOptions.map((opt) => (
-                                  <option key={`q-engine-${opt}`} value={opt}>
-                                    {opt}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                            <label className="space-y-0.5">
-                              <span className="block text-[9px] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">ปี</span>
-                              <select
-                                value={quickFilterYear}
-                                onChange={(e) => setQuickFilterYear(e.target.value)}
-                                className="w-full rounded border border-slate-200 bg-slate-50 px-1.5 py-1 text-[10px] dark:border-[#2a2d3e] dark:bg-[#050508]"
-                              >
-                                {quickYearOptions.map((opt) => (
-                                  <option key={`q-year-${opt}`} value={opt}>
-                                    {opt}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                          </div>
-                          <p className="text-[10px] text-slate-500 dark:text-slate-400">
-                            ฟิลเตอร์ช่วยถามลูกค้าต่อ: ยี่ห้อ / รุ่น / เครื่อง / ปี
-                          </p>
-                        </>
-                      ) : null}
+                  {barcodeInput && (
+                    <button
+                      type="button"
+                      onClick={() => { setBarcodeInput(''); setSuggestHighlightIndex(-1) }}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                    >
+                      <X className="size-3" />
+                    </button>
+                  )}
+                  {barcodeInput.trim() && (
+                    <div className="absolute left-0 right-0 top-[calc(100%+4px)] z-30 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl dark:border-[#2a2d3e] dark:bg-[#12141c]">
+                      {/* Header */}
+                      <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50 px-2.5 py-1 dark:border-[#1c1f2e] dark:bg-[#0a0c13]">
+                        <span className="text-[9px] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                          {quickSuggestProducts.length > 0
+                            ? `${quickSuggestProducts.length}${quickTextMatchedProducts.length > quickSuggestProducts.length ? `/${quickTextMatchedProducts.length}` : ''} รายการ`
+                            : 'ไม่พบสินค้า'}
+                        </span>
+                        <span className="text-[9px] text-slate-400 dark:text-slate-600">↑↓ เลื่อน · Enter เพิ่ม · Esc ล้าง</span>
+                      </div>
                       {quickSuggestProducts.length > 0 ? (
-                        <div className="max-h-56 overflow-auto rounded border border-slate-200 dark:border-[#2a2d3e]">
-                          {quickSuggestProducts.map((p) => (
-                            <button
-                              key={`quick-${p.id}`}
-                              type="button"
-                              onClick={() => {
-                                addProductToCart(p)
-                                setBarcodeInput('')
-                              }}
-                              className="grid w-full grid-cols-12 items-center gap-2 border-b border-slate-100 px-2 py-1.5 text-left hover:bg-slate-50 dark:border-[#1c1f2e] dark:hover:bg-[#1a1f35]"
-                            >
-                              <span className="col-span-3 font-mono text-[10px] font-black text-blue-700 dark:text-cyan-300">{p.code}</span>
-                              <span className="col-span-7 min-w-0">
-                                <span className="block truncate text-[11px] font-semibold text-slate-700 dark:text-slate-200">{p.name}</span>
-                                {fitmentBadgeBySku.get(p.code) ? (
-                                  <span className="mt-0.5 flex max-w-full items-center gap-1">
-                                    <span className="inline-flex max-w-full items-center rounded border border-emerald-200 bg-emerald-50 px-1 py-0.5 text-[9px] text-emerald-700 dark:border-emerald-700/60 dark:bg-emerald-900/20 dark:text-emerald-300">
-                                      <span className="truncate">{fitmentBadgeBySku.get(p.code)!.label}</span>
-                                    </span>
-                                    <span
-                                      role="button"
-                                      tabIndex={0}
-                                      onClick={(ev) => {
-                                        ev.preventDefault()
-                                        ev.stopPropagation()
-                                        setFitmentPreviewSku(p.code)
-                                      }}
-                                      onKeyDown={(ev) => {
-                                        if (ev.key === 'Enter' || ev.key === ' ') {
-                                          ev.preventDefault()
-                                          ev.stopPropagation()
-                                          setFitmentPreviewSku(p.code)
-                                        }
-                                      }}
-                                      className="shrink-0 rounded border border-slate-200 bg-white px-1 py-0.5 text-[9px] text-slate-600 hover:bg-slate-100 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-slate-300"
-                                    >
-                                      ดูรุ่น
-                                    </span>
+                        <div ref={suggestDropdownRef} className="max-h-[26rem] overflow-auto overscroll-contain">
+                          {quickSuggestProducts.map((p, idx) => {
+                            const stockColor =
+                              p.stock <= 0
+                                ? 'text-rose-500 dark:text-rose-400'
+                                : p.stock <= 5
+                                  ? 'text-amber-500 dark:text-amber-400'
+                                  : 'text-emerald-600 dark:text-emerald-400'
+                            const stockLabel = p.stock <= 0 ? 'หมด' : `${p.stock} ชิ้น`
+                            const carLine = [p.carBrand, p.carModelLabel, p.yearLabel].filter(Boolean).join(' · ')
+                            const oem = [p.factoryOem, p.genuineNo].filter(Boolean).join(' / ')
+                            const dims = formatDims(p.dimensions)
+                            const cfg = getPosSellConfig(p.id)
+                            const picked = pickDefaultPosUnitAndPrice(cfg)
+                            const displayPrice = picked != null ? cfg.getListUnitPrice(picked.unit.index, picked.level.index) : 0
+                            const fitBadge = fitmentBadgeBySku.get(p.code)
+                            const isHighlighted = idx === suggestHighlightIndex
+                            return (
+                              <button
+                                key={`quick-${p.id}`}
+                                data-suggest-index={idx}
+                                type="button"
+                                onClick={() => { addProductToCart(p); setBarcodeInput(''); setSuggestHighlightIndex(-1) }}
+                                onMouseEnter={() => setSuggestHighlightIndex(idx)}
+                                className={clsx(
+                                  'flex w-full items-start gap-3 border-b border-slate-100 px-3 py-2.5 text-left transition-colors dark:border-[#1c1f2e]',
+                                  isHighlighted
+                                    ? 'bg-blue-50 dark:bg-[#1a1f35]'
+                                    : 'hover:bg-slate-50 dark:hover:bg-[#1a1f35]/60',
+                                )}
+                              >
+                                {/* Thumbnail */}
+                                <ProductImage sku={p.code} size="sm" className="mt-0.5 shrink-0" />
+
+                                {/* Main info block */}
+                                <span className="min-w-0 flex-1">
+                                  {/* Row 1: code + brand badge */}
+                                  <span className="flex items-center gap-1.5">
+                                    <span className="font-mono text-[11px] font-black text-blue-700 dark:text-cyan-300">{p.code}</span>
+                                    {p.brand && (
+                                      <span className="rounded bg-blue-50 px-1.5 py-px text-[9px] font-bold uppercase tracking-wide text-blue-600 dark:bg-blue-900/30 dark:text-blue-300">{p.brand}</span>
+                                    )}
+                                    {p.category && (
+                                      <span className="rounded bg-slate-100 px-1.5 py-px text-[9px] font-semibold text-slate-500 dark:bg-[#1a1f35] dark:text-slate-400">{p.category}</span>
+                                    )}
                                   </span>
-                                ) : null}
-                              </span>
-                              <span className="col-span-2 text-right font-mono text-[10px] text-slate-500 dark:text-slate-400">{p.stock}</span>
-                            </button>
-                          ))}
+                                  {/* Row 2: name */}
+                                  <span className="mt-0.5 block truncate text-[12px] font-semibold text-slate-800 dark:text-slate-100">{p.name}</span>
+                                  {/* Row 3: car + fitment */}
+                                  {(carLine || fitBadge) && (
+                                    <span className="mt-0.5 flex flex-wrap items-center gap-1">
+                                      {carLine && (
+                                        <span className="truncate text-[10px] text-slate-500 dark:text-slate-400">🚗 {carLine}</span>
+                                      )}
+                                      {fitBadge && (
+                                        <span className="inline-flex items-center gap-1">
+                                          <span className="rounded border border-emerald-200 bg-emerald-50 px-1 py-px text-[9px] text-emerald-700 dark:border-emerald-700/60 dark:bg-emerald-900/20 dark:text-emerald-300">{fitBadge.label}</span>
+                                          <span
+                                            role="button"
+                                            tabIndex={0}
+                                            onClick={(ev) => { ev.preventDefault(); ev.stopPropagation(); setFitmentPreviewSku(p.code) }}
+                                            onKeyDown={(ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); ev.stopPropagation(); setFitmentPreviewSku(p.code) } }}
+                                            className="rounded border border-slate-200 bg-white px-1 py-px text-[9px] text-slate-500 hover:bg-slate-100 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-slate-400"
+                                          >ดูรุ่น</span>
+                                        </span>
+                                      )}
+                                    </span>
+                                  )}
+                                  {/* Row 4: OEM + dims + location */}
+                                  {(oem || dims || p.location) && (
+                                    <span className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5">
+                                      {oem && (
+                                        <span className="font-mono text-[10px] text-amber-700 dark:text-amber-400">OEM: {oem}</span>
+                                      )}
+                                      {dims && (
+                                        <span className="font-mono text-[10px] text-violet-600 dark:text-violet-400">{dims}</span>
+                                      )}
+                                      {p.location && (
+                                        <span className="text-[10px] text-slate-400 dark:text-slate-500">📍 {p.location}</span>
+                                      )}
+                                    </span>
+                                  )}
+                                </span>
+
+                                {/* Price + stock (right column) */}
+                                <span className="mt-0.5 shrink-0 text-right">
+                                  {displayPrice > 0 && (
+                                    <span className="block font-mono text-[12px] font-black text-slate-800 dark:text-slate-100">
+                                      ฿{displayPrice.toLocaleString('th-TH', { minimumFractionDigits: 2 })}
+                                    </span>
+                                  )}
+                                  <span className={clsx('block font-mono text-[11px] font-bold tabular-nums', stockColor)}>{stockLabel}</span>
+                                </span>
+                              </button>
+                            )
+                          })}
                         </div>
                       ) : (
-                        <p className="rounded border border-slate-200 px-2 py-1 text-[10px] text-slate-500 dark:border-[#2a2d3e] dark:text-slate-400">
-                          ไม่พบรายการที่ตรงเงื่อนไข
-                        </p>
+                        <div className="px-3 py-4 text-center">
+                          <p className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">ไม่พบสินค้าที่ตรงกัน</p>
+                          <p className="mt-0.5 text-[9px] text-slate-400 dark:text-slate-500">ลองค้นด้วย OEM หรือกดปุ่ม ค้นหาสินค้า</p>
+                        </div>
                       )}
                     </div>
                   )}
@@ -2004,6 +1891,10 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                 {pricedCart.map((item) => {
                   const total = item.price * item.qty - item.discount
                   const itemProductId = item.productId ?? mockProducts.find((p) => p.code === item.code)?.id
+                  const itemProduct = mockProducts.find((p) => p.id === itemProductId)
+                  const remainingStock = itemProduct ? itemProduct.stock - item.qty : null
+                  const isLowStock = remainingStock !== null && remainingStock >= 0 && remainingStock <= LOW_STOCK_THRESHOLD
+                  const isOverStock = remainingStock !== null && remainingStock < 0
                   const canAddBoltNut = !item.stlBoltRole && Boolean(itemProductId && getStlBoltPairForMaleProduct(itemProductId))
                   const sellCfg = item.productId ? getPosSellConfig(item.productId) : null
                   const unitOptions = sellCfg ? posUnitsWithSellPrice(sellCfg) : []
@@ -2028,6 +1919,17 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                         <span className="truncate text-xs font-semibold text-slate-700 group-hover:text-slate-900 dark:text-slate-300 dark:group-hover:text-white">
                           {item.name}
                         </span>
+                        {isOverStock ? (
+                          <div className="mt-0.5 flex items-center gap-1 rounded bg-rose-100 px-1.5 py-0.5 text-[9px] font-black text-rose-700 dark:bg-rose-900/30 dark:text-rose-400">
+                            <AlertTriangle className="size-2.5 shrink-0" aria-hidden />
+                            สต็อกไม่พอ (คงเหลือ {itemProduct!.stock})
+                          </div>
+                        ) : isLowStock ? (
+                          <div className="mt-0.5 flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-[9px] font-black text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+                            <AlertTriangle className="size-2.5 shrink-0" aria-hidden />
+                            เหลือน้อย (จะเหลือ {remainingStock})
+                          </div>
+                        ) : null}
                         {canAddBoltNut ? (
                           <div className="mt-1">
                             <button
@@ -2526,50 +2428,6 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                     className="w-full rounded-lg border border-slate-200 bg-slate-50 py-2 pl-10 pr-3 text-sm text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-cyan-100 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30"
                   />
                 </div>
-                <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
-                  <label className="space-y-0.5 text-[10px] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                    ยี่ห้อ
-                    <select
-                      value={productFilterCarBrand}
-                      onChange={(e) => setProductFilterCarBrand(e.target.value)}
-                      className="w-full rounded border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs font-semibold normal-case tracking-normal text-slate-800 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-cyan-100"
-                    >
-                      {carBrandOptions.map((opt) => (
-                        <option key={`brand-${opt}`} value={opt}>
-                          {opt}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="space-y-0.5 text-[10px] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                    รุ่นรถ
-                    <select
-                      value={productFilterCarModel}
-                      onChange={(e) => setProductFilterCarModel(e.target.value)}
-                      className="w-full rounded border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs font-semibold normal-case tracking-normal text-slate-800 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-cyan-100"
-                    >
-                      {carModelOptions.map((opt) => (
-                        <option key={`model-${opt}`} value={opt}>
-                          {opt}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="space-y-0.5 text-[10px] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                    ปี/เครื่อง
-                    <select
-                      value={productFilterYear}
-                      onChange={(e) => setProductFilterYear(e.target.value)}
-                      className="w-full rounded border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs font-semibold normal-case tracking-normal text-slate-800 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-cyan-100"
-                    >
-                      {yearOptions.map((opt) => (
-                        <option key={`year-${opt}`} value={opt}>
-                          {opt}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                </div>
               </div>
 
               <div className="max-h-[70vh] overflow-auto p-2">
@@ -2613,20 +2471,32 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
         typeof document !== 'undefined' &&
         createPortal(
           <div
-            className="fixed inset-0 z-[340] flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-sm dark:bg-black/70"
+            className="fixed inset-0 z-[340] flex items-center justify-center bg-slate-900/60 p-3 backdrop-blur-sm dark:bg-black/70"
             onMouseDown={(e) => {
-              if (e.target === e.currentTarget) setShowProductModal(false)
+              if (e.target === e.currentTarget) {
+                setShowProductModal(false)
+                setProductSearchQuery('')
+                setProductModalCategory(null)
+                setProductModalMake('ทั้งหมด')
+                setProductModalModel('ทั้งหมด')
+                setSelectedModalProduct(null)
+              }
             }}
           >
-            <div className="w-full max-w-3xl overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-[#2a2d3e] dark:bg-[#0d0f17]">
-              <div className="flex items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 p-4 dark:border-[#2a2d3e] dark:bg-[#12141c]">
-                <h3 className="flex items-center gap-2 text-sm font-black uppercase tracking-widest text-slate-800 dark:text-slate-100">
+            <div className="flex w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-[#2a2d3e] dark:bg-[#0d0f17]" style={{ maxHeight: 'min(94vh, 860px)' }}>
+
+              {/* Header */}
+              <div className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 px-4 py-2.5 dark:border-[#2a2d3e] dark:bg-[#12141c]">
+                <div className="flex items-center gap-2">
                   <ShoppingCart className="size-4 text-blue-500 dark:text-cyan-400" aria-hidden />
-                  เลือกสินค้า
-                </h3>
+                  <span className="text-sm font-black uppercase tracking-widest text-slate-800 dark:text-slate-100">เลือกสินค้า</span>
+                  <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-bold text-blue-700 dark:bg-cyan-900/40 dark:text-cyan-300">
+                    {filteredProducts.length} รายการ
+                  </span>
+                </div>
                 <button
                   type="button"
-                  onClick={() => setShowProductModal(false)}
+                  onClick={() => { setShowProductModal(false); setProductSearchQuery(''); setProductModalCategory(null); setProductModalMake('ทั้งหมด'); setProductModalModel('ทั้งหมด'); setSelectedModalProduct(null) }}
                   className="rounded-full p-1 text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-[#1a1f35]"
                   aria-label="ปิด"
                 >
@@ -2634,55 +2504,250 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                 </button>
               </div>
 
-              <div className="border-b border-slate-200 bg-white p-3 dark:border-[#2a2d3e] dark:bg-[#050508]">
-                <div className="relative">
+              {/* Search + car filter */}
+              <div className="shrink-0 border-b border-slate-200 bg-white px-3 py-2.5 dark:border-[#2a2d3e] dark:bg-[#050508]">
+                {/* Search bar */}
+                <div className="relative mb-2">
                   <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400 dark:text-cyan-500/50" />
                   <input
                     value={productSearchQuery}
                     onChange={(e) => setProductSearchQuery(e.target.value)}
-                    placeholder="ค้นหาสินค้า (รหัส/ชื่อ)..."
+                    placeholder="ค้นหา รหัส / ชื่อสินค้า / เลขอะไหล่ OEM / ยี่ห้อ..."
                     autoFocus
-                    className="w-full rounded-lg border border-slate-200 bg-slate-50 py-2 pl-10 pr-3 text-sm text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-cyan-100 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30"
+                    className="w-full rounded-lg border border-slate-200 bg-slate-50 py-2 pl-10 pr-8 text-sm text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-cyan-100 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30"
                   />
+                  {productSearchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setProductSearchQuery('')}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                    >
+                      <X className="size-3.5" />
+                    </button>
+                  )}
+                </div>
+                {/* Car make / model */}
+                <div className="flex gap-2">
+                  <div className="flex items-center gap-1.5">
+                    <span className="shrink-0 text-[10px] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-500">รถ</span>
+                    <select
+                      value={productModalMake}
+                      onChange={(e) => { setProductModalMake(e.target.value); setProductModalModel('ทั้งหมด') }}
+                      className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs font-semibold text-slate-700 outline-none focus:border-blue-400 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-cyan-100"
+                    >
+                      {modalMakeOptions.map((o) => <option key={o} value={o}>{o}</option>)}
+                    </select>
+                  </div>
+                  <select
+                    value={productModalModel}
+                    onChange={(e) => setProductModalModel(e.target.value)}
+                    disabled={productModalMake === 'ทั้งหมด'}
+                    className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs font-semibold text-slate-700 outline-none focus:border-blue-400 disabled:opacity-40 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-cyan-100"
+                  >
+                    {modalModelOptions.map((o) => <option key={o} value={o}>{o}</option>)}
+                  </select>
+                  {(productModalMake !== 'ทั้งหมด') && (
+                    <button
+                      type="button"
+                      onClick={() => { setProductModalMake('ทั้งหมด'); setProductModalModel('ทั้งหมด') }}
+                      className="ml-auto flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1.5 text-[11px] font-semibold text-slate-500 hover:bg-slate-100 dark:border-[#2a2d3e] dark:text-slate-400 dark:hover:bg-[#1a1f35]"
+                    >
+                      <X className="size-3" /> ล้าง
+                    </button>
+                  )}
                 </div>
               </div>
 
-              <div className="max-h-[70vh] overflow-auto p-2">
-                <div className="grid grid-cols-12 gap-2 border-b border-slate-200 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-slate-500 dark:border-[#2a2d3e] dark:text-slate-400">
-                  <div className="col-span-3">Code</div>
-                  <div className="col-span-5">Name</div>
-                  <div className="col-span-2 text-right">Price</div>
-                  <div className="col-span-1 text-right">Stock</div>
-                  <div className="col-span-1 text-center">Add</div>
-                </div>
-                {filteredProducts.map((p) => (
-                  <div
-                    key={p.id}
-                    className="grid grid-cols-12 items-center gap-2 border-b border-slate-100 px-3 py-2 text-sm hover:bg-slate-50 dark:border-[#1c1f2e] dark:hover:bg-[#1a1f35]"
+              {/* Category chips */}
+              {modalCategoryOptions.length > 0 && (
+                <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-slate-200 bg-slate-50 px-3 py-2 dark:border-[#2a2d3e] dark:bg-[#0a0c13]" style={{ scrollbarWidth: 'none' }}>
+                  <button
+                    type="button"
+                    onClick={() => setProductModalCategory(null)}
+                    className={clsx(
+                      'shrink-0 rounded-full border px-2.5 py-0.5 text-[11px] font-bold transition',
+                      productModalCategory === null
+                        ? 'border-blue-500 bg-blue-500 text-white dark:border-cyan-500 dark:bg-cyan-500 dark:text-slate-900'
+                        : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-slate-400 dark:hover:bg-[#1a1f35]',
+                    )}
                   >
-                    <div className="col-span-3 font-mono text-[11px] font-black text-blue-700 dark:text-cyan-300">
-                      {p.code}
+                    ทั้งหมด
+                  </button>
+                  {modalCategoryOptions.map((cat) => (
+                    <button
+                      key={cat}
+                      type="button"
+                      onClick={() => setProductModalCategory(productModalCategory === cat ? null : cat)}
+                      className={clsx(
+                        'shrink-0 rounded-full border px-2.5 py-0.5 text-[11px] font-bold transition',
+                        productModalCategory === cat
+                          ? 'border-blue-500 bg-blue-500 text-white dark:border-cyan-500 dark:bg-cyan-500 dark:text-slate-900'
+                          : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-slate-400 dark:hover:bg-[#1a1f35]',
+                      )}
+                    >
+                      {cat}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Split view: left list + right detail */}
+              <div className="flex min-h-0 flex-1 overflow-hidden">
+
+                {/* LEFT — compact scrollable list */}
+                <div className="w-72 shrink-0 overflow-y-auto border-r border-slate-200 dark:border-[#2a2d3e]">
+                  {filteredProducts.length === 0 ? (
+                    <div className="flex flex-col items-center gap-2 px-4 py-12 text-center">
+                      <Search className="size-8 text-slate-300 dark:text-slate-600" />
+                      <p className="text-sm font-semibold text-slate-500 dark:text-slate-400">ไม่พบสินค้า</p>
+                      <p className="text-xs text-slate-400 dark:text-slate-500">ลองเปลี่ยนคำค้นหาหรือตัวกรอง</p>
                     </div>
-                    <div className="col-span-5 truncate text-[12px] font-semibold text-slate-700 dark:text-slate-200">
-                      {p.name}
-                    </div>
-                    <div className="col-span-2 text-right font-mono text-[12px] font-black text-slate-700 dark:text-slate-200">
-                      {p.price.toLocaleString('th-TH', { minimumFractionDigits: 2 })}
-                    </div>
-                    <div className="col-span-1 text-right font-mono text-[11px] font-semibold text-slate-500 dark:text-slate-400">
-                      {p.stock}
-                    </div>
-                    <div className="col-span-1 flex justify-center">
+                  ) : filteredProducts.map((p) => {
+                    const dotColor = p.stock <= 0 ? 'bg-rose-400' : p.stock <= 5 ? 'bg-amber-400' : 'bg-emerald-400'
+                    const stockText = p.stock <= 0 ? 'หมด' : `${p.stock}`
+                    const stockTextColor = p.stock <= 0 ? 'text-rose-500 dark:text-rose-400' : p.stock <= 5 ? 'text-amber-500 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'
+                    const cfg = getPosSellConfig(p.id)
+                    const picked = pickDefaultPosUnitAndPrice(cfg)
+                    const price = picked != null ? cfg.getListUnitPrice(picked.unit.index, picked.level.index) : 0
+                    const isSelected = selectedModalProduct?.id === p.id
+                    return (
                       <button
+                        key={p.id}
                         type="button"
-                        onClick={() => addProductToCart(p)}
-                        className="rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-emerald-700 hover:bg-emerald-100 dark:border-emerald-800/50 dark:bg-emerald-900/20 dark:text-emerald-300 dark:hover:bg-emerald-900/35"
+                        onClick={() => setSelectedModalProduct(p)}
+                        className={clsx(
+                          'flex w-full items-center gap-2.5 border-b border-slate-100 px-3 py-2.5 text-left transition-colors dark:border-[#1c1f2e]',
+                          isSelected ? 'bg-blue-50 dark:bg-[#1a1f35]' : 'hover:bg-slate-50 dark:hover:bg-[#1a1f35]/60',
+                        )}
                       >
-                        Add
+                        <span className={clsx('mt-0.5 size-2 shrink-0 rounded-full', dotColor)} />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate font-mono text-[11px] font-black text-blue-700 dark:text-cyan-300">{p.code}</span>
+                          <span className="block truncate text-[12px] font-semibold text-slate-700 dark:text-slate-200">{p.name}</span>
+                        </span>
+                        <span className="shrink-0 text-right">
+                          {price > 0 && <span className="block font-mono text-[11px] font-black text-slate-700 dark:text-slate-200">฿{price.toLocaleString('th-TH')}</span>}
+                          <span className={clsx('block font-mono text-[10px] font-bold tabular-nums', stockTextColor)}>{stockText}</span>
+                        </span>
                       </button>
+                    )
+                  })}
+                </div>
+
+                {/* RIGHT — product detail panel */}
+                <div className="min-w-0 flex-1 overflow-y-auto">
+                  {selectedModalProduct ? (() => {
+                    const sp = selectedModalProduct
+                    const master = getProductMasterBySku(sp.code)
+                    const cfg = getPosSellConfig(sp.id)
+                    const picked = pickDefaultPosUnitAndPrice(cfg)
+                    const displayPrice = picked != null ? cfg.getListUnitPrice(picked.unit.index, picked.level.index) : 0
+                    const fits = (master?.vehicleFitments ?? []).filter(Boolean)
+                    const oem = [sp.factoryOem, sp.genuineNo].filter(Boolean).join(' / ')
+                    const dims = formatDims(sp.dimensions)
+                    const stockColor = sp.stock <= 0 ? 'text-rose-500 dark:text-rose-400' : sp.stock <= 5 ? 'text-amber-500 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'
+                    return (
+                      <div className="flex h-full flex-col gap-4 p-5">
+                        {/* Image + title */}
+                        <div className="flex gap-4">
+                          <ProductImage sku={sp.code} size="lg" className="shrink-0" zoomable />
+                          <div className="min-w-0">
+                            <div className="mb-1.5 flex flex-wrap gap-1">
+                              {sp.brand && <span className="rounded bg-blue-50 px-1.5 py-px text-[10px] font-bold uppercase tracking-wide text-blue-600 dark:bg-blue-900/30 dark:text-blue-300">{sp.brand}</span>}
+                              {sp.category && <span className="rounded bg-slate-100 px-1.5 py-px text-[10px] font-bold uppercase tracking-wide text-slate-500 dark:bg-[#1a1f35] dark:text-slate-400">{sp.category}</span>}
+                            </div>
+                            <p className="font-mono text-[12px] font-black text-blue-700 dark:text-cyan-300">{sp.code}</p>
+                            <h2 className="mt-0.5 text-[15px] font-black leading-snug text-slate-900 dark:text-white">{sp.name}</h2>
+                          </div>
+                        </div>
+
+                        {/* Vehicle fitments */}
+                        {fits.length > 0 && (
+                          <div>
+                            <p className="mb-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-500">รุ่นรถที่ใช้ได้</p>
+                            <div className="flex flex-wrap gap-1.5">
+                              {fits.map((f, i) => {
+                                const eng = getFitmentEngineName(f)
+                                const yr = fitmentYearLabel(f)
+                                const engPart = eng ? ` · ${eng}` : ''
+                                const yrPart = yr !== '-' ? ` · ปี ${yr}` : ''
+                                const drivePart = f.driveType ? ` · ${f.driveType}` : ''
+                                const brakePart = f.brakePosition === 'front' ? ' · เบรกหน้า' : f.brakePosition === 'rear' ? ' · เบรกหลัง' : ''
+                                return (
+                                  <span key={i} className="rounded-lg border border-sky-100 bg-sky-50 px-2.5 py-1 text-[11px] text-sky-800 dark:border-sky-900/40 dark:bg-sky-900/20 dark:text-sky-300">
+                                    🚗 {f.brandName} {f.modelName}{engPart}{yrPart}{drivePart}{brakePart}
+                                  </span>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* OEM / dims / location */}
+                        {(oem || dims || sp.location) && (
+                          <div className="grid grid-cols-2 gap-3 rounded-xl border border-slate-100 bg-slate-50 p-3 dark:border-[#2a2d3e] dark:bg-[#0a0c13]">
+                            {oem && (
+                              <div>
+                                <p className="mb-0.5 text-[10px] font-bold uppercase tracking-wide text-slate-400">OEM / เบอร์แท้</p>
+                                <p className="font-mono text-[12px] font-semibold text-amber-700 dark:text-amber-400">{oem}</p>
+                              </div>
+                            )}
+                            {dims && (
+                              <div>
+                                <p className="mb-0.5 text-[10px] font-bold uppercase tracking-wide text-slate-400">มิติ (A/B/C)</p>
+                                <p className="font-mono text-[12px] font-semibold text-violet-600 dark:text-violet-400">{dims}</p>
+                              </div>
+                            )}
+                            {sp.location && (
+                              <div>
+                                <p className="mb-0.5 text-[10px] font-bold uppercase tracking-wide text-slate-400">ที่เก็บ</p>
+                                <p className="text-[12px] font-semibold text-slate-700 dark:text-slate-200">📍 {sp.location}</p>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Price + stock + add button */}
+                        <div className="mt-auto">
+                          <div className="mb-3 flex items-end justify-between rounded-xl border border-slate-100 bg-slate-50 px-4 py-3 dark:border-[#2a2d3e] dark:bg-[#0a0c13]">
+                            <div>
+                              <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">ราคาขาย</p>
+                              <p className="font-mono text-2xl font-black text-slate-900 dark:text-white">
+                                {displayPrice > 0 ? `฿${displayPrice.toLocaleString('th-TH', { minimumFractionDigits: 2 })}` : '—'}
+                              </p>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">คงเหลือ</p>
+                              <p className={clsx('font-mono text-2xl font-black', stockColor)}>{sp.stock} ชิ้น</p>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              addProductToCart(sp)
+                              setShowProductModal(false)
+                              setProductSearchQuery('')
+                              setSelectedModalProduct(null)
+                              setProductModalCategory(null)
+                              setProductModalMake('ทั้งหมด')
+                              setProductModalModel('ทั้งหมด')
+                            }}
+                            className="w-full rounded-xl bg-blue-600 py-3 text-sm font-black uppercase tracking-widest text-white shadow-md transition hover:bg-blue-700 active:scale-[0.98] dark:bg-cyan-600 dark:hover:bg-cyan-500"
+                          >
+                            + เพิ่มเข้าตะกร้า
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  })() : (
+                    <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
+                      <ShoppingCart className="size-12 text-slate-200 dark:text-slate-700" />
+                      <p className="text-sm font-semibold text-slate-400 dark:text-slate-500">เลือกสินค้าจากรายการ</p>
+                      <p className="text-xs text-slate-300 dark:text-slate-600">คลิกชื่อสินค้าเพื่อดูรายละเอียดและเพิ่มเข้าตะกร้า</p>
                     </div>
-                  </div>
-                ))}
+                  )}
+                </div>
+
               </div>
             </div>
           </div>,

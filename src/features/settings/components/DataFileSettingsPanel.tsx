@@ -1,8 +1,10 @@
 import {
   clearProductMasterListOverride,
   getProductMasterList,
+  persistProductMasterListToDb,
   saveProductMasterList,
 } from '@/features/inventory/data/productMasterData'
+import { isTauri } from '@/features/desktop/isTauri'
 import {
   downloadTextFile,
   exportProductMasterCsvTemplateString,
@@ -14,9 +16,11 @@ import {
   exportVehicleCatalogToJsonString,
   importVehicleCatalogFromJsonString,
 } from '@/features/vehicle/data/vehicleCatalogIo'
+import { ProductCsvTemplateGuideModal } from '@/features/settings/components/ProductCsvTemplateGuideModal'
+import { getProductImagesDir } from '@/features/inventory/data/productImages'
 import { clsx } from 'clsx'
-import { Car, Download, FileSpreadsheet, FileStack, Trash2, Upload } from 'lucide-react'
-import { useRef, useState } from 'react'
+import { BookOpen, Car, Database, Download, FileSpreadsheet, FileStack, ImageIcon, Trash2, Upload } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
 
 type DataFileSettingsPanelProps = {
   className?: string
@@ -28,16 +32,22 @@ export function DataFileSettingsPanel({ className }: DataFileSettingsPanelProps)
   const vehicleFileRef = useRef<HTMLInputElement>(null)
   const [busy, setBusy] = useState(false)
   const [lastMessage, setLastMessage] = useState<string | null>(null)
+  const [templateGuideOpen, setTemplateGuideOpen] = useState(false)
 
   const count = getProductMasterList().length
+  const [imagesDir, setImagesDir] = useState<string | null>(null)
+  useEffect(() => {
+    if (isTauri()) getProductImagesDir().then(setImagesDir)
+  }, [])
 
   const handleExport = () => {
     setLastMessage(null)
-    const csv = exportProductsToCsvString(getProductMasterList())
+    const products = getProductMasterList()
+    const csv = exportProductsToCsvString(products)
     const stamp = new Date().toISOString().slice(0, 10)
     downloadTextFile(`bento-products-${stamp}.csv`, csv, 'text/csv')
     setLastMessage(
-      `ส่งออกแล้ว ${count} รายการ — ไฟล์ถูกบันทึกไปที่โฟลเดอร์ดาวน์โหลดของ Windows (เช่น ดาวน์โหลด) ตามที่เบราว์เซอร์หรือโปรแกรมกำหนด — นำไปเปิดใน Google Sheets ได้ที่เมนู ไฟล์ → นำเข้า`,
+      `ส่งออกแล้ว ${products.length} รายการ — ไฟล์ถูกบันทึกไปที่โฟลเดอร์ดาวน์โหลดของ Windows (เช่น ดาวน์โหลด) ตามที่เบราว์เซอร์หรือโปรแกรมกำหนด — นำไปเปิดใน Google Sheets ได้ที่เมนู ไฟล์ → นำเข้า`,
     )
   }
 
@@ -135,6 +145,25 @@ export function DataFileSettingsPanel({ className }: DataFileSettingsPanelProps)
     }
   }
 
+  const handlePushToDb = async () => {
+    if (!isTauri()) {
+      setLastMessage('ฟีเจอร์นี้ใช้ได้เฉพาะในแอป Tauri เท่านั้น')
+      return
+    }
+    setLastMessage(null)
+    setBusy(true)
+    try {
+      const products = getProductMasterList()
+      await persistProductMasterListToDb(products)
+      setLastMessage(`บันทึกลงฐานข้อมูลสำเร็จ — ${products.length.toLocaleString('th-TH')} รายการ`)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setLastMessage(`บันทึกลงฐานข้อมูลไม่สำเร็จ: ${msg}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const handleResetSeed = () => {
     setLastMessage(null)
     if (
@@ -184,15 +213,26 @@ export function DataFileSettingsPanel({ className }: DataFileSettingsPanelProps)
           <Download className="size-4 shrink-0" aria-hidden />
           ส่งออก CSV
         </button>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={handleDownloadTemplate}
-          className="inline-flex items-center gap-2 rounded-xl border border-violet-200 bg-violet-50 px-4 py-2.5 text-sm font-medium text-violet-950 shadow-sm transition hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          <FileStack className="size-4 shrink-0" aria-hidden />
-          ดาวน์โหลดเทมเพลต
-        </button>
+        <div className="flex flex-wrap items-stretch gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={handleDownloadTemplate}
+            className="inline-flex items-center gap-2 rounded-xl border border-violet-200 bg-violet-50 px-4 py-2.5 text-sm font-medium text-violet-950 shadow-sm transition hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <FileStack className="size-4 shrink-0" aria-hidden />
+            ดาวน์โหลดเทมเพลต
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => setTemplateGuideOpen(true)}
+            className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-800 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <BookOpen className="size-4 shrink-0 text-violet-700" aria-hidden />
+            วิธีกรอกเทมเพลต
+          </button>
+        </div>
         <button
           type="button"
           disabled={busy}
@@ -201,6 +241,15 @@ export function DataFileSettingsPanel({ className }: DataFileSettingsPanelProps)
         >
           <Upload className="size-4 shrink-0" aria-hidden />
           นำเข้า CSV
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={handlePushToDb}
+          className="inline-flex items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2.5 text-sm font-medium text-indigo-950 shadow-sm transition hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <Database className="size-4 shrink-0" aria-hidden />
+          บันทึกลงฐานข้อมูลตอนนี้
         </button>
         <button
           type="button"
@@ -220,6 +269,8 @@ export function DataFileSettingsPanel({ className }: DataFileSettingsPanelProps)
         />
       </div>
 
+      <ProductCsvTemplateGuideModal open={templateGuideOpen} onClose={() => setTemplateGuideOpen(false)} />
+
       {lastMessage ? (
         <p className="whitespace-pre-wrap rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs leading-relaxed text-slate-700">
           {lastMessage}
@@ -231,6 +282,27 @@ export function DataFileSettingsPanel({ className }: DataFileSettingsPanelProps)
         <span className="font-mono">engineIds</span> แทน (ระบบจะดึงยี่ห้อ/รุ่น/ปีจากแคตตาล็อกรถในเครื่องตอนนำเข้า)
         หรือส่งออกใหม่หลังแก้ในโปรแกรม
       </p>
+
+      {isTauri() && (
+        <div className="flex items-start gap-3 rounded-2xl border border-purple-200/90 bg-purple-50/60 px-4 py-3">
+          <span className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-purple-200 bg-white text-purple-700 shadow-sm">
+            <ImageIcon className="size-5" strokeWidth={1.75} aria-hidden />
+          </span>
+          <div className="min-w-0 flex-1 text-sm text-slate-700">
+            <p className="font-semibold text-slate-900">โฟลเดอร์รูปสินค้า</p>
+            <p className="mt-1 text-xs leading-relaxed text-slate-600">
+              บันทึกรูปภาพชื่อ <strong className="font-mono font-medium">รหัสสินค้า.jpg</strong> ในโฟลเดอร์นี้
+              — ระบบจะแสดงรูปอัตโนมัติในหน้าแก้ไขสินค้าและหน้าขาย{' '}
+              รองรับ <span className="font-mono">.jpg .jpeg .png .webp .gif</span>
+            </p>
+            {imagesDir && (
+              <p className="mt-2 rounded-lg border border-purple-100 bg-white px-3 py-1.5 font-mono text-[11px] break-all text-slate-600 select-all">
+                {imagesDir}
+              </p>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="flex items-start gap-3 rounded-2xl border border-amber-200/90 bg-amber-50/60 px-4 py-3">
         <span className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-amber-200 bg-white text-amber-800 shadow-sm">

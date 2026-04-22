@@ -39,6 +39,7 @@ import {
   type CrossBranchStockRow,
   type PhysicalDimensions,
   type ProductMasterDetail,
+  type VehicleFitmentRef,
 } from '@/features/inventory/data/productMasterData'
 import { loadProductTagsRegistry } from '@/features/inventory/data/productTagsRegistry'
 import { clsx } from 'clsx'
@@ -64,7 +65,7 @@ import {
   Store,
   Trash2,
 } from 'lucide-react'
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
 function formatBaht(n: number) {
   return n.toLocaleString('th-TH', { maximumFractionDigits: 0 })
@@ -72,6 +73,111 @@ function formatBaht(n: number) {
 
 function norm(s: string) {
   return s.trim().toLowerCase()
+}
+
+function isMissingCategoryValue(s: string | undefined) {
+  const t = (s ?? '').trim()
+  return t.length === 0 || t === '—' || t === '-'
+}
+
+function normalizeSearchText(s: string) {
+  return s.toLowerCase().replace(/[\s\-_/\\.]+/g, '')
+}
+
+function tokenizeSearchQuery(q: string): string[] {
+  return q
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .map((x) => x.trim())
+    .filter(Boolean)
+}
+
+function yearsFromRange(from: number | undefined, to: number | undefined): string[] {
+  const nowYear = new Date().getFullYear()
+  const hasFrom = Number.isFinite(from)
+  const hasTo = Number.isFinite(to)
+  if (!hasFrom && !hasTo) return []
+  const startRaw = hasFrom ? Math.round(from as number) : 1900
+  const endRaw = hasTo ? Math.round(to as number) : nowYear
+  const start = Math.max(1900, startRaw)
+  const end = Math.min(2100, endRaw)
+  if (start > end) return []
+  // จำกัดช่วงเพื่อกันสตริงยาวผิดปกติ
+  if (end - start > 200) return []
+  const out: string[] = []
+  for (let y = start; y <= end; y++) out.push(String(y))
+  return out
+}
+
+type SearchIndexRow = {
+  product: ProductMasterDetail
+  hit: string
+  hitNorm: string
+}
+
+function safeVehicleFitments(rows: ProductMasterDetail['vehicleFitments']): VehicleFitmentRef[] {
+  return (rows ?? []).filter((x): x is VehicleFitmentRef => Boolean(x && typeof x === 'object'))
+}
+
+function buildSearchHitText(p: ProductMasterDetail): string {
+  const oem = p.oemTags.join(' ').toLowerCase()
+  const factory = (p.factoryNo ?? '').toLowerCase()
+  const xref = (p.crossReferenceTags ?? []).join(' ').toLowerCase()
+  const notes = (p.notes ?? '').toLowerCase()
+  const posNote = (p.posDisplayNote ?? '').toLowerCase()
+  const boxBar = (p.boxBarcode ?? '').toLowerCase()
+  const fitText = safeVehicleFitments(p.vehicleFitments)
+    .map(
+      (f) =>
+        `${f.categoryLabel} ${f.brandName} ${f.modelName} ${f.engineLabel} ${f.engineCode ?? ''} ${f.engineText ?? ''} ${f.driveType ?? ''} ${f.yearRangeText ?? ''} ${
+          f.yearFrom != null ? String(f.yearFrom) : ''
+        } ${f.yearTo != null ? String(f.yearTo) : ''} ${
+          f.brakePosition === 'front' ? 'เบรกหน้า' : f.brakePosition === 'rear' ? 'เบรกหลัง' : ''
+        }`,
+    )
+    .join(' ')
+    .toLowerCase()
+  const yearTokens = [
+    ...new Set(
+      safeVehicleFitments(p.vehicleFitments).flatMap((f) => yearsFromRange(f.yearFrom, f.yearTo)),
+    ),
+  ].join(' ')
+  return (
+    p.name +
+    ' ' +
+    p.sku +
+    ' ' +
+    boxBar +
+    ' ' +
+    p.brand +
+    ' ' +
+    (p.subCategory ?? '') +
+    ' ' +
+    (p.subSubCategory ?? '') +
+    ' ' +
+    p.category +
+    ' ' +
+    p.carBrand +
+    ' ' +
+    p.carModelLabel +
+    ' ' +
+    p.yearLabel +
+    ' ' +
+    yearTokens +
+    ' ' +
+    oem +
+    ' ' +
+    factory +
+    ' ' +
+    xref +
+    ' ' +
+    notes +
+    ' ' +
+    posNote +
+    ' ' +
+    fitText
+  ).toLowerCase()
 }
 
 function enqueueProductLabelPrintFromMaster(p: ProductMasterDetail) {
@@ -99,43 +205,18 @@ function enqueueProductLabelPrintFromMaster(p: ProductMasterDetail) {
   })
 }
 
-function filterProductsBySearch(products: ProductMasterDetail[], q: string): ProductMasterDetail[] {
-  const t = q.trim().toLowerCase()
-  if (!t) return products
-  return products.filter((p) => {
-    const oem = p.oemTags.join(' ').toLowerCase()
-    const factory = (p.factoryNo ?? '').toLowerCase()
-    const xref = (p.crossReferenceTags ?? []).join(' ').toLowerCase()
-    const notes = (p.notes ?? '').toLowerCase()
-    const posNote = (p.posDisplayNote ?? '').toLowerCase()
-    const boxBar = (p.boxBarcode ?? '').toLowerCase()
-    const fitText = (p.vehicleFitments ?? [])
-      .map(
-        (f) =>
-          `${f.categoryLabel} ${f.brandName} ${f.modelName} ${f.engineLabel} ${
-            f.brakePosition === 'front' ? 'เบรกหน้า' : f.brakePosition === 'rear' ? 'เบรกหลัง' : ''
-          }`,
-      )
-      .join(' ')
-      .toLowerCase()
-    return (
-      p.name.toLowerCase().includes(t) ||
-      p.sku.toLowerCase().includes(t) ||
-      boxBar.includes(t) ||
-      p.brand.toLowerCase().includes(t) ||
-      (p.subCategory?.toLowerCase().includes(t) ?? false) ||
-      (p.subSubCategory?.toLowerCase().includes(t) ?? false) ||
-      p.category.toLowerCase().includes(t) ||
-      p.carBrand.toLowerCase().includes(t) ||
-      p.carModelLabel.toLowerCase().includes(t) ||
-      oem.includes(t) ||
-      factory.includes(t) ||
-      xref.includes(t) ||
-      notes.includes(t) ||
-      posNote.includes(t) ||
-      fitText.includes(t)
+function filterProductsBySearch(searchIndex: SearchIndexRow[], q: string): ProductMasterDetail[] {
+  const tokens = tokenizeSearchQuery(q)
+  if (tokens.length === 0) return searchIndex.map((row) => row.product)
+  const tokenNorms = tokens.map((t) => normalizeSearchText(t)).filter(Boolean)
+  return searchIndex
+    .filter((row) =>
+      tokens.every((t, idx) => {
+        const tn = tokenNorms[idx] ?? ''
+        return row.hit.includes(t) || (tn.length > 0 && row.hitNorm.includes(tn))
+      }),
     )
-  })
+    .map((row) => row.product)
 }
 
 function productsInMain(products: ProductMasterDetail[], main: MainCategory) {
@@ -198,9 +279,10 @@ function applyProductFilters(
   carBrand: string,
   carModel: string,
   year: string,
+  driveType: string,
 ): ProductMasterDetail[] {
   return products.filter((p) =>
-    productMatchesInventoryCarFilters(p, { brand, carBrand, carModel, year }, FILTER_ALL),
+    productMatchesInventoryCarFilters(p, { brand, carBrand, carModel, year, driveType }, FILTER_ALL),
   )
 }
 
@@ -219,15 +301,16 @@ function toggleMasterCatalogSort(prev: MasterCatalogSort, key: MasterCatalogSort
   return { key, dir: 'asc' }
 }
 
+const collatorBase = new Intl.Collator('th', { sensitivity: 'base' })
+const collatorNumeric = new Intl.Collator('th', { sensitivity: 'base', numeric: true })
+
 function sortMasterCatalogList(list: ProductMasterDetail[], sort: MasterCatalogSort): ProductMasterDetail[] {
   const arr = [...list]
   const mul = sort.dir === 'desc' ? -1 : 1
   if (sort.key === 'name') {
-    arr.sort((a, b) => a.name.localeCompare(b.name, 'th', { sensitivity: 'base' }) * mul)
+    arr.sort((a, b) => collatorBase.compare(a.name, b.name) * mul)
   } else if (sort.key === 'sku') {
-    arr.sort(
-      (a, b) => a.sku.localeCompare(b.sku, 'th', { sensitivity: 'base', numeric: true }) * mul,
-    )
+    arr.sort((a, b) => collatorNumeric.compare(a.sku, b.sku) * mul)
   } else {
     arr.sort((a, b) => (a.sellPrice - b.sellPrice) * mul)
   }
@@ -577,6 +660,9 @@ function ProductPortfolioBadges({ product }: { product: ProductMasterDetail }) {
   const st = product.salesStatus ?? 'active'
   if (st === 'paused') tags.push({ key: 'pause', cls: 'border-amber-200 bg-amber-50 text-amber-950', text: 'หยุดขาย' })
   if (st === 'discontinued') tags.push({ key: 'disc', cls: 'border-rose-200 bg-rose-50 text-rose-950', text: 'เลิกขาย' })
+  if (product.vatMode === 'no_vat') {
+    tags.push({ key: 'novat', cls: 'border-indigo-200 bg-indigo-50 text-indigo-900', text: 'ไม่มี VAT' })
+  }
   if (tags.length === 0) return null
   return (
     <span className="mt-1 flex flex-wrap gap-1">
@@ -600,28 +686,28 @@ function ProductCardMeta({ product }: { product: ProductMasterDetail }) {
   )
 }
 
-function ProductMasterGridCard({
+const ProductMasterGridCard = memo(function ProductMasterGridCard({
   product,
-  onOpen,
-  onSelect,
+  onOpenProduct,
+  onSelectProduct,
   selected,
-  onContextMenu,
+  onContextMenuProduct,
   dimensionSearchActive,
 }: {
   product: ProductMasterDetail
-  onOpen: () => void
-  onSelect: () => void
+  onOpenProduct: (id: string) => void
+  onSelectProduct: (id: string) => void
   selected: boolean
-  onContextMenu: (e: React.MouseEvent) => void
+  onContextMenuProduct: (e: React.MouseEvent, id: string) => void
   dimensionSearchActive?: boolean
 }) {
   return (
     <div className="relative w-full">
       <button
         type="button"
-        onClick={onSelect}
-        onDoubleClick={onOpen}
-        onContextMenu={onContextMenu}
+        onClick={() => onSelectProduct(product.id)}
+        onDoubleClick={() => onOpenProduct(product.id)}
+        onContextMenu={(e) => onContextMenuProduct(e, product.id)}
         className={clsx(
           'flex w-full flex-col rounded-2xl border bg-white p-3 text-left shadow-sm transition hover:shadow-md pos-compact:rounded-xl pos-compact:p-2.5',
           selected ? 'border-violet-300 ring-2 ring-violet-200/70' : 'border-slate-200 hover:border-slate-300',
@@ -645,35 +731,35 @@ function ProductMasterGridCard({
       </button>
     </div>
   )
-}
+})
 
-function ProductMasterListRow({
+const ProductMasterListRow = memo(function ProductMasterListRow({
   product,
-  onOpen,
-  onSelect,
+  onOpenProduct,
+  onSelectProduct,
   selected,
-  onContextMenu,
+  onContextMenuProduct,
   dimensionSearchActive,
 }: {
   product: ProductMasterDetail
-  onOpen: () => void
-  onSelect: () => void
+  onOpenProduct: (id: string) => void
+  onSelectProduct: (id: string) => void
   selected: boolean
-  onContextMenu: (e: React.MouseEvent) => void
+  onContextMenuProduct: (e: React.MouseEvent, id: string) => void
   dimensionSearchActive?: boolean
 }) {
   return (
     <tr
       role="button"
       tabIndex={0}
-      onClick={onSelect}
-      onDoubleClick={onOpen}
-      onContextMenu={onContextMenu}
+      onClick={() => onSelectProduct(product.id)}
+      onDoubleClick={() => onOpenProduct(product.id)}
+      onContextMenu={(e) => onContextMenuProduct(e, product.id)}
       onKeyDown={(e) => {
-        if (e.key === 'Enter') onOpen()
+        if (e.key === 'Enter') onOpenProduct(product.id)
         if (e.key === ' ') {
           e.preventDefault()
-          onSelect()
+          onSelectProduct(product.id)
         }
       }}
       className={clsx(
@@ -705,7 +791,7 @@ function ProductMasterListRow({
       </td>
     </tr>
   )
-}
+})
 
 function breadcrumbLabel(
   tree: MainCategory[],
@@ -897,6 +983,13 @@ function ProductMasterDetailContent({
                   <span className="text-slate-500">ไม่ระบุ / ไม่ใช่</span>
                 )}
               </FieldLine>
+              <FieldLine label="VAT">
+                {selected.vatMode === 'no_vat' ? (
+                  <span className="text-indigo-700">ไม่มี VAT</span>
+                ) : (
+                  <span className="text-slate-600">มี VAT</span>
+                )}
+              </FieldLine>
               {normalizeSalesUnits(selected).length > 0 ? (
                 <div className="mt-2 space-y-1.5">
                   <p className="text-xs font-medium text-slate-500">หน่วยขาย</p>
@@ -978,9 +1071,9 @@ function ProductMasterDetailContent({
                   </button>
                 ) : null}
               </div>
-              {selected.vehicleFitments && selected.vehicleFitments.length > 0 ? (
+              {safeVehicleFitments(selected.vehicleFitments).length > 0 ? (
                 <ul className="mb-2 space-y-1.5 text-xs text-slate-800">
-                  {selected.vehicleFitments.map((f) => (
+                  {safeVehicleFitments(selected.vehicleFitments).map((f) => (
                     <li
                       key={f.id}
                       className="rounded-lg border border-emerald-100 bg-emerald-50/80 px-2.5 py-1.5 leading-snug"
@@ -1246,41 +1339,133 @@ function ProductMasterDetailContent({
   )
 }
 
+type ProductDataFileViewCache = {
+  navSelection: CategoryNavSelection
+  expandedMain: string[]
+  expandedSub: string[]
+  q: string
+  hasSearched: boolean
+  filterBrand: string
+  filterCarBrand: string
+  filterCarModel: string
+  filterYear: string
+  filterDrive: string
+  catalogSort: MasterCatalogSort
+  catalogViewMode: CatalogViewMode
+  filterInStoreOnly: boolean
+  showMissingCategoryOnly: boolean
+  selectedProductId: string | null
+  measA: string
+  measA2: string
+  measB: string
+  measC: string
+  measTol: number
+  measActive: boolean
+  measPanelOpen: boolean
+}
+
+let _productDataFileViewCache: ProductDataFileViewCache | null = null
+
+function readCache(): ProductDataFileViewCache {
+  return _productDataFileViewCache ?? {
+    navSelection: { type: 'all' },
+    expandedMain: [],
+    expandedSub: [],
+    q: '',
+    hasSearched: false,
+    filterBrand: FILTER_ALL,
+    filterCarBrand: FILTER_ALL,
+    filterCarModel: FILTER_ALL,
+    filterYear: FILTER_ALL,
+    filterDrive: FILTER_ALL,
+    catalogSort: { key: 'name', dir: 'asc' },
+    catalogViewMode: 'list',
+    filterInStoreOnly: true,
+    showMissingCategoryOnly: false,
+    selectedProductId: null,
+    measA: '',
+    measA2: '',
+    measB: '',
+    measC: '',
+    measTol: 3,
+    measActive: false,
+    measPanelOpen: false,
+  }
+}
+
 export function ProductDataFileView() {
   const allowCost = canViewCost()
   const { openTab } = useWorkspaceTabs()
   const [page, setPage] = useState<'browse' | 'detail'>('browse')
   const [detailProductId, setDetailProductId] = useState<string | null>(null)
-  const [catalogViewMode, setCatalogViewMode] = useState<CatalogViewMode>('list')
+
+  const _c = readCache()
+  const [catalogViewMode, setCatalogViewMode] = useState<CatalogViewMode>(_c.catalogViewMode)
 
   const [categoryTree, setCategoryTree] = useState<MainCategory[]>(() => loadCategoryTree())
-  const [expandedMain, setExpandedMain] = useState<Set<string>>(() => new Set())
-  const [expandedSub, setExpandedSub] = useState<Set<string>>(() => new Set())
-  const [navSelection, setNavSelection] = useState<CategoryNavSelection>({ type: 'all' })
-  const [q, setQ] = useState('')
-  const [filterBrand, setFilterBrand] = useState(FILTER_ALL)
-  const [filterCarBrand, setFilterCarBrand] = useState(FILTER_ALL)
-  const [filterCarModel, setFilterCarModel] = useState(FILTER_ALL)
-  const [filterYear, setFilterYear] = useState(FILTER_ALL)
-  const [catalogSort, setCatalogSort] = useState<MasterCatalogSort>({ key: 'name', dir: 'asc' })
+  const [expandedMain, setExpandedMain] = useState<Set<string>>(() => new Set(_c.expandedMain))
+  const [expandedSub, setExpandedSub] = useState<Set<string>>(() => new Set(_c.expandedSub))
+  const [navSelection, setNavSelection] = useState<CategoryNavSelection>(_c.navSelection)
+  const [q, setQ] = useState(_c.q)
+  const [hasSearched, setHasSearched] = useState(_c.hasSearched)
+  const [filterBrand, setFilterBrand] = useState(_c.filterBrand)
+  const [filterCarBrand, setFilterCarBrand] = useState(_c.filterCarBrand)
+  const [filterCarModel, setFilterCarModel] = useState(_c.filterCarModel)
+  const [filterYear, setFilterYear] = useState(_c.filterYear)
+  const [filterDrive, setFilterDrive] = useState(_c.filterDrive)
+  const [catalogSort, setCatalogSort] = useState<MasterCatalogSort>(_c.catalogSort)
   /** A=ใน/กว้าง → inner, B=นอก/ยาว → outer, C=หนา/สูง → height */
-  const [measA, setMeasA] = useState('')
-  const [measA2, setMeasA2] = useState('')
-  const [measB, setMeasB] = useState('')
-  const [measC, setMeasC] = useState('')
-  const [measTol, setMeasTol] = useState(3)
-  const [measActive, setMeasActive] = useState(false)
+  const [measA, setMeasA] = useState(_c.measA)
+  const [measA2, setMeasA2] = useState(_c.measA2)
+  const [measB, setMeasB] = useState(_c.measB)
+  const [measC, setMeasC] = useState(_c.measC)
+  const [measTol, setMeasTol] = useState(_c.measTol)
+  const [measActive, setMeasActive] = useState(_c.measActive)
   /** แถบค้นหามิติ — ย่อเป็นไอคอนไว้กดขยาย */
-  const [measPanelOpen, setMeasPanelOpen] = useState(false)
+  const [measPanelOpen, setMeasPanelOpen] = useState(_c.measPanelOpen)
   /** เปิด = แสดงเฉพาะสินค้าในพอร์ตร้าน (ซ่อนรายการอ้างอิง) */
-  const [filterInStoreOnly, setFilterInStoreOnly] = useState(true)
+  const [filterInStoreOnly, setFilterInStoreOnly] = useState(_c.filterInStoreOnly)
+  /** เปิด = แสดงเฉพาะรายการที่ยังไม่ถูกจัดหมวดตามระดับที่เลือก */
+  const [showMissingCategoryOnly, setShowMissingCategoryOnly] = useState(_c.showMissingCategoryOnly)
   const [products, setProducts] = useState<ProductMasterDetail[]>(() => [...getProductMasterList()])
   const [productModalOpen, setProductModalOpen] = useState(false)
   const [modalEditProduct, setModalEditProduct] = useState<ProductMasterDetail | null>(null)
   const [addProductCopySource, setAddProductCopySource] = useState<ProductMasterDetail | null>(null)
   const [copySuggestedSku, setCopySuggestedSku] = useState<string | undefined>(undefined)
-  const [selectedProductId, setSelectedProductId] = useState<string | null>(null)
+  const [selectedProductId, setSelectedProductId] = useState<string | null>(_c.selectedProductId)
   const [ctx, setCtx] = useState<null | { x: number; y: number; productId: string }>(null)
+
+  useEffect(() => {
+    _productDataFileViewCache = {
+      navSelection,
+      expandedMain: [...expandedMain],
+      expandedSub: [...expandedSub],
+      q,
+      hasSearched,
+      filterBrand,
+      filterCarBrand,
+      filterCarModel,
+      filterYear,
+      filterDrive,
+      catalogSort,
+      catalogViewMode,
+      filterInStoreOnly,
+      showMissingCategoryOnly,
+      selectedProductId,
+      measA,
+      measA2,
+      measB,
+      measC,
+      measTol,
+      measActive,
+      measPanelOpen,
+    }
+  }, [
+    navSelection, expandedMain, expandedSub, q, hasSearched,
+    filterBrand, filterCarBrand, filterCarModel, filterYear, filterDrive,
+    catalogSort, catalogViewMode, filterInStoreOnly, showMissingCategoryOnly, selectedProductId,
+    measA, measA2, measB, measC, measTol, measActive, measPanelOpen,
+  ])
   const ctxMenuRef = useRef<HTMLDivElement>(null)
   const [ctxMenuPos, setCtxMenuPos] = useState<{ left: number; top: number } | null>(null)
 
@@ -1340,6 +1525,35 @@ export function ProductDataFileView() {
     [navSelection, categoryTree, products],
   )
 
+  const missingCategoryMeta = useMemo(() => {
+    if (navSelection.type === 'all') {
+      const count = fromNav.filter((p) => isMissingCategoryValue(p.category)).length
+      return { enabled: true, count, label: 'ยังไม่มีหมวดหลัก', title: 'ดูสินค้าที่ไม่มี Category หลัก' }
+    }
+    if (navSelection.type === 'main') {
+      const count = fromNav.filter((p) => isMissingCategoryValue(p.subCategory)).length
+      return { enabled: true, count, label: 'ยังไม่มีหมวดย่อย 1', title: 'ดูสินค้าที่ยังไม่มี Subcategory' }
+    }
+    return { enabled: false, count: 0, label: '', title: '' }
+  }, [fromNav, navSelection.type])
+
+  useEffect(() => {
+    if (!missingCategoryMeta.enabled && showMissingCategoryOnly) {
+      setShowMissingCategoryOnly(false)
+    }
+  }, [missingCategoryMeta.enabled, showMissingCategoryOnly])
+
+  const fromNavMissingFiltered = useMemo(() => {
+    if (!showMissingCategoryOnly) return fromNav
+    if (navSelection.type === 'all') {
+      return fromNav.filter((p) => isMissingCategoryValue(p.category))
+    }
+    if (navSelection.type === 'main') {
+      return fromNav.filter((p) => isMissingCategoryValue(p.subCategory))
+    }
+    return fromNav
+  }, [fromNav, navSelection.type, showMissingCategoryOnly])
+
   const dimLayout: PaperDimLayout = useMemo(() => {
     if (navSelection.type === 'all') {
       return dimLayoutFromPaperFields(undefined)
@@ -1358,8 +1572,26 @@ export function ProductDataFileView() {
 
   const fromNavCatalog = useMemo(
     () =>
-      filterInStoreOnly ? fromNav.filter((p) => p.inStoreCatalog !== false) : fromNav,
-    [fromNav, filterInStoreOnly],
+      filterInStoreOnly ? fromNavMissingFiltered.filter((p) => p.inStoreCatalog !== false) : fromNavMissingFiltered,
+    [fromNavMissingFiltered, filterInStoreOnly],
+  )
+
+  const globalSearchIndex = useMemo<Map<string, { hit: string; hitNorm: string }>>(() => {
+    const map = new Map<string, { hit: string; hitNorm: string }>()
+    for (const p of products) {
+      const hit = buildSearchHitText(p)
+      map.set(p.id, { hit, hitNorm: normalizeSearchText(hit) })
+    }
+    return map
+  }, [products])
+
+  const searchIndex = useMemo<SearchIndexRow[]>(
+    () =>
+      fromNavCatalog.map((product) => {
+        const entry = globalSearchIndex.get(product.id) ?? { hit: '', hitNorm: '' }
+        return { product, ...entry }
+      }),
+    [fromNavCatalog, globalSearchIndex],
   )
 
   /** มีสินค้าในมุมมองหมวด แต่ทุกรายการถูกซ่อนเพราะโหมดเฉพาะในร้าน */
@@ -1368,11 +1600,14 @@ export function ProductDataFileView() {
     [filterInStoreOnly, fromNav, fromNavCatalog],
   )
 
-  const afterSearch = useMemo(() => filterProductsBySearch(fromNavCatalog, q), [fromNavCatalog, q])
+  const afterSearch = useMemo(
+    () => (hasSearched ? filterProductsBySearch(searchIndex, q) : []),
+    [hasSearched, searchIndex, q],
+  )
 
   const filtered = useMemo(
-    () => applyProductFilters(afterSearch, filterBrand, filterCarBrand, filterCarModel, filterYear),
-    [afterSearch, filterBrand, filterCarBrand, filterCarModel, filterYear],
+    () => applyProductFilters(afterSearch, filterBrand, filterCarBrand, filterCarModel, filterYear, filterDrive),
+    [afterSearch, filterBrand, filterCarBrand, filterCarModel, filterYear, filterDrive],
   )
 
   const measureInput = useMemo(() => {
@@ -1415,21 +1650,58 @@ export function ProductDataFileView() {
     [dimensionMatch.list, catalogSort],
   )
 
+  const PAGE_SIZE = 150
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE)
+  useEffect(() => { setVisibleCount(PAGE_SIZE) }, [sortedList])
+  const visibleList = useMemo(() => sortedList.slice(0, visibleCount), [sortedList, visibleCount])
+
   function handleCatalogHeaderSort(key: MasterCatalogSortKey) {
     setCatalogSort((prev) => toggleMasterCatalogSort(prev, key))
   }
 
   const filterOptions = useMemo(() => {
-    const base = products
+    const base = filterInStoreOnly ? products.filter((p) => p.inStoreCatalog !== false) : products
     const brands = [...new Set(base.map((p) => p.brand))].sort((a, b) => a.localeCompare(b, 'th'))
-    const { carBrands, models, years } = collectInventoryCarFilterOptions(base)
-    return { brands, carBrands, models, years }
-  }, [products])
+    const { carBrands, models, years, driveTypes } = collectInventoryCarFilterOptions(base, {
+      carBrand: filterCarBrand,
+      carModel: filterCarModel,
+      filterAll: FILTER_ALL,
+    })
+    return { brands, carBrands, models, years, driveTypes }
+  }, [products, filterInStoreOnly, filterCarBrand, filterCarModel])
 
   const hasOrphans = useMemo(() => {
     const names = new Set(categoryTree.map((m) => norm(m.name)))
     return products.some((p) => !names.has(norm(p.category)))
   }, [categoryTree, products])
+
+  const navCounts = useMemo(() => {
+    const base = filterInStoreOnly ? products.filter((p) => p.inStoreCatalog !== false) : products
+    const mainByName = new Map<string, number>()
+    const subByMainSub = new Map<string, number>()
+    const subSubByMainSubSub = new Map<string, number>()
+    const mainNameSet = new Set(categoryTree.map((m) => norm(m.name)))
+    let orphan = 0
+    for (const p of base) {
+      const mainKey = norm(p.category)
+      if (!mainNameSet.has(mainKey)) {
+        orphan += 1
+        continue
+      }
+      mainByName.set(mainKey, (mainByName.get(mainKey) ?? 0) + 1)
+      const subKey = norm(p.subCategory ?? '')
+      if (subKey) {
+        const msKey = `${mainKey}::${subKey}`
+        subByMainSub.set(msKey, (subByMainSub.get(msKey) ?? 0) + 1)
+      }
+      const subSubKey = norm(p.subSubCategory ?? '')
+      if (subKey && subSubKey) {
+        const mssKey = `${mainKey}::${subKey}::${subSubKey}`
+        subSubByMainSubSub.set(mssKey, (subSubByMainSubSub.get(mssKey) ?? 0) + 1)
+      }
+    }
+    return { mainByName, subByMainSub, subSubByMainSubSub, orphan, total: base.length }
+  }, [categoryTree, products, filterInStoreOnly])
 
   const detailProduct = useMemo(
     () => (detailProductId ? products.find((p) => p.id === detailProductId) : undefined),
@@ -1441,11 +1713,11 @@ export function ProductDataFileView() {
     [products, selectedProductId],
   )
 
-  function openProductDetail(id: string) {
+  const openProductDetail = useCallback((id: string) => {
     setDetailProductId(id)
     setPage('detail')
     setSelectedProductId(id)
-  }
+  }, [])
 
   function backToCatalog() {
     setPage('browse')
@@ -1464,6 +1736,10 @@ export function ProductDataFileView() {
     setSelectedProductId(productId)
     setCtxMenuPos(null)
     setCtx({ x: e.clientX, y: e.clientY, productId })
+  }, [])
+
+  const handleSelectProduct = useCallback((id: string) => {
+    setSelectedProductId(id)
   }, [])
 
   useEffect(() => {
@@ -1666,13 +1942,16 @@ export function ProductDataFileView() {
             type="button"
             onClick={() => setNavSelection({ type: 'all' })}
             className={clsx(
-              'mb-1 w-full rounded-lg px-2 py-1.5 text-left text-sm font-medium pos-compact:py-1 pos-compact:text-[13px]',
+              'mb-1 flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-sm font-medium pos-compact:py-1 pos-compact:text-[13px]',
               navSelection.type === 'all'
                 ? 'bg-teal-100 text-teal-900 ring-1 ring-teal-200/80'
                 : 'text-slate-800 hover:bg-white',
             )}
           >
-            ทั้งหมด
+            <span>ทั้งหมด</span>
+            <span className="rounded-md bg-white/80 px-1.5 py-0.5 text-[11px] font-semibold tabular-nums text-slate-700">
+              {navCounts.total.toLocaleString('th-TH')}
+            </span>
           </button>
           {categoryTree.length === 0 ? (
             <p className="rounded-lg border border-amber-200/80 bg-amber-50/90 px-2 py-2.5 text-center text-[11px] leading-snug text-amber-900 pos-compact:text-[10px]">
@@ -1684,6 +1963,7 @@ export function ProductDataFileView() {
               const open = expandedMain.has(main.id)
               const mainSelected =
                 navSelection.type === 'main' && navSelection.mainId === main.id
+              const mainCount = navCounts.mainByName.get(norm(main.name)) ?? 0
 
               return (
                 <div key={main.id} className="mb-0.5">
@@ -1692,13 +1972,16 @@ export function ProductDataFileView() {
                       type="button"
                       onClick={() => setNavSelection({ type: 'main', mainId: main.id })}
                       className={clsx(
-                        'w-full rounded-lg px-2 py-1.5 text-left text-sm pos-compact:py-1 pos-compact:text-[13px]',
+                        'flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-sm pos-compact:py-1 pos-compact:text-[13px]',
                         mainSelected
                           ? 'bg-teal-100 font-medium text-teal-900 ring-1 ring-teal-200/80'
                           : 'font-medium text-slate-800 hover:bg-white',
                       )}
                     >
                       <span className="line-clamp-2">{main.name}</span>
+                      <span className="shrink-0 rounded-md bg-white/80 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-slate-700">
+                        {mainCount.toLocaleString('th-TH')}
+                      </span>
                     </button>
                   ) : (
                     <>
@@ -1730,7 +2013,12 @@ export function ProductDataFileView() {
                               : 'font-medium text-slate-800 hover:bg-white',
                           )}
                         >
-                          <span className="line-clamp-2">{main.name}</span>
+                          <span className="flex items-center justify-between gap-2">
+                            <span className="line-clamp-2">{main.name}</span>
+                            <span className="shrink-0 rounded-md bg-white/80 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-slate-700">
+                              {mainCount.toLocaleString('th-TH')}
+                            </span>
+                          </span>
                         </button>
                       </div>
                       {open && (
@@ -1746,6 +2034,8 @@ export function ProductDataFileView() {
                             const subSubs = sub.subSubcategories
                             const subKey = `${main.id}::${sub.id}`
                             const subOpen = expandedSub.has(subKey)
+                            const subCount =
+                              navCounts.subByMainSub.get(`${norm(main.name)}::${norm(sub.name)}`) ?? 0
                             return (
                               <div key={sub.id} className="space-y-0.5">
                                 <button
@@ -1761,7 +2051,12 @@ export function ProductDataFileView() {
                                       : 'text-slate-700 hover:bg-white',
                                   )}
                                 >
-                                  <span className="line-clamp-2">{sub.name}</span>
+                                  <span className="flex items-center justify-between gap-2">
+                                    <span className="line-clamp-2">{sub.name}</span>
+                                    <span className="shrink-0 rounded-md bg-white/80 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-slate-700">
+                                      {subCount.toLocaleString('th-TH')}
+                                    </span>
+                                  </span>
                                 </button>
                                 {subSubs.length > 0 && subOpen ? (
                                   <div className="ml-0 space-y-0.5 border-l border-slate-200/70 py-0.5 pl-2">
@@ -1771,6 +2066,10 @@ export function ProductDataFileView() {
                                         navSelection.mainId === main.id &&
                                         navSelection.subId === sub.id &&
                                         navSelection.subSubId === ss.id
+                                      const subSubCount =
+                                        navCounts.subSubByMainSubSub.get(
+                                          `${norm(main.name)}::${norm(sub.name)}::${norm(ss.name)}`,
+                                        ) ?? 0
                                       return (
                                         <button
                                           key={ss.id}
@@ -1790,7 +2089,12 @@ export function ProductDataFileView() {
                                               : 'hover:bg-white',
                                           )}
                                         >
-                                          <span className="line-clamp-2">{ss.name}</span>
+                                          <span className="flex items-center justify-between gap-2">
+                                            <span className="line-clamp-2">{ss.name}</span>
+                                            <span className="shrink-0 rounded-md bg-white/80 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-slate-700">
+                                              {subSubCount.toLocaleString('th-TH')}
+                                            </span>
+                                          </span>
                                         </button>
                                       )
                                     })}
@@ -1812,13 +2116,16 @@ export function ProductDataFileView() {
               type="button"
               onClick={() => setNavSelection({ type: 'orphan' })}
               className={clsx(
-                'mt-2 w-full rounded-lg border border-amber-200/80 px-2 py-2 text-left text-[11px] font-medium leading-snug pos-compact:text-[10px]',
+                'mt-2 flex w-full items-center justify-between gap-2 rounded-lg border border-amber-200/80 px-2 py-2 text-left text-[11px] font-medium leading-snug pos-compact:text-[10px]',
                 navSelection.type === 'orphan'
                   ? 'bg-amber-100 text-amber-950 ring-1 ring-amber-200/90'
                   : 'bg-amber-50/80 text-amber-900 hover:bg-amber-100/90',
               )}
             >
-              สินค้าไม่ตรงหมวดในระบบ
+              <span>สินค้าไม่ตรงหมวดในระบบ</span>
+              <span className="shrink-0 rounded-md bg-white/80 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-amber-900">
+                {navCounts.orphan.toLocaleString('th-TH')}
+              </span>
             </button>
           )}
         </nav>
@@ -1831,6 +2138,14 @@ export function ProductDataFileView() {
           <span className="font-medium text-slate-700">{breadcrumbLabel(categoryTree, navSelection)}</span>
         </nav>
 
+        <div className="inline-flex w-fit items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs text-slate-700">
+          <span className="text-slate-500">สินค้าแสดงผล</span>
+          <span className="font-semibold tabular-nums text-slate-900">{sortedList.length.toLocaleString('th-TH')}</span>
+          <span className="text-slate-500">จาก</span>
+          <span className="tabular-nums text-slate-700">{navCounts.total.toLocaleString('th-TH')}</span>
+          <span className="text-slate-500">รายการ</span>
+        </div>
+
         <div className="flex flex-col gap-2 pos-compact:gap-1.5 sm:flex-row sm:items-stretch sm:gap-2">
           <div className="relative min-w-0 flex-1">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-slate-400" />
@@ -1838,8 +2153,14 @@ export function ProductDataFileView() {
               type="search"
               placeholder="ค้นหาสินค้า (ชื่อ, SKU, OEM, Cross ref, หมวด...)"
               className="w-full rounded-lg border border-slate-200 py-2 pl-9 pr-2.5 text-sm shadow-sm outline-none focus:border-slate-400 focus:ring-1 focus:ring-slate-200"
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
+              key={q}
+              defaultValue={q}
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter') return
+                e.preventDefault()
+                setHasSearched(true)
+                setQ(e.currentTarget.value)
+              }}
             />
           </div>
           {allowCost ? (
@@ -1895,7 +2216,7 @@ export function ProductDataFileView() {
           </label>
           <label className="block min-w-0">
             <span className="mb-0.5 block text-[11px] text-slate-500">ยี่ห้อรถ</span>
-            <select className={selectClass} value={filterCarBrand} onChange={(e) => setFilterCarBrand(e.target.value)}>
+            <select className={selectClass} value={filterCarBrand} onChange={(e) => { setFilterCarBrand(e.target.value); setFilterCarModel(FILTER_ALL); setFilterYear(FILTER_ALL); setFilterDrive(FILTER_ALL) }}>
               <option value={FILTER_ALL}>{FILTER_ALL}</option>
               {filterOptions.carBrands.map((b) => (
                 <option key={b} value={b}>
@@ -1906,12 +2227,21 @@ export function ProductDataFileView() {
           </label>
           <label className="block min-w-0">
             <span className="mb-0.5 block text-[11px] text-slate-500">รุ่นรถ</span>
-            <select className={selectClass} value={filterCarModel} onChange={(e) => setFilterCarModel(e.target.value)}>
+            <select className={selectClass} value={filterCarModel} onChange={(e) => { setFilterCarModel(e.target.value); setFilterYear(FILTER_ALL); setFilterDrive(FILTER_ALL) }}>
               <option value={FILTER_ALL}>{FILTER_ALL}</option>
               {filterOptions.models.map((m) => (
                 <option key={m} value={m}>
                   {m}
                 </option>
+              ))}
+            </select>
+          </label>
+          <label className="block min-w-0">
+            <span className="mb-0.5 block text-[11px] text-slate-500">ขับเคลื่อน</span>
+            <select className={selectClass} value={filterDrive} onChange={(e) => setFilterDrive(e.target.value)}>
+              <option value={FILTER_ALL}>{FILTER_ALL}</option>
+              {filterOptions.driveTypes.map((d) => (
+                <option key={d} value={d}>{d}</option>
               ))}
             </select>
           </label>
@@ -2196,6 +2526,24 @@ export function ProductDataFileView() {
                 </div>
               </div>
               <div className="flex w-full min-w-0 flex-wrap items-end justify-end sm:ml-auto sm:w-auto">
+                {missingCategoryMeta.enabled ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowMissingCategoryOnly((v) => !v)}
+                    title={missingCategoryMeta.title}
+                    className={clsx(
+                      'mr-2 inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-medium transition',
+                      showMissingCategoryOnly
+                        ? 'border-violet-300 bg-violet-100 text-violet-900'
+                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50',
+                    )}
+                  >
+                    <span>{missingCategoryMeta.label}</span>
+                    <span className="rounded-md bg-white/90 px-1.5 py-0.5 tabular-nums text-[10px] text-slate-700">
+                      {missingCategoryMeta.count.toLocaleString('th-TH')}
+                    </span>
+                  </button>
+                ) : null}
                 <div className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2 py-1">
                   <span className="text-[11px] font-medium text-slate-600">เฉพาะในร้าน</span>
                   <div className="flex items-center gap-1">
@@ -2221,7 +2569,16 @@ export function ProductDataFileView() {
                           ? 'เฉพาะสินค้าในร้าน — กดเพื่อแสดงรายการอ้างอิงทั้งหมด'
                           : 'แสดงทุกรายการ — กดเพื่อดูเฉพาะสินค้าในร้าน'
                       }
-                      onClick={() => setFilterInStoreOnly((v) => !v)}
+                      onClick={() => {
+                        setFilterInStoreOnly((v) => !v)
+                        setFilterBrand(FILTER_ALL)
+                        setFilterCarBrand(FILTER_ALL)
+                        setFilterCarModel(FILTER_ALL)
+                        setFilterYear(FILTER_ALL)
+                        setFilterDrive(FILTER_ALL)
+                        setQ('')
+                        setHasSearched(false)
+                      }}
                       className={clsx(
                         'relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-1',
                         filterInStoreOnly
@@ -2243,7 +2600,9 @@ export function ProductDataFileView() {
 
         {sortedList.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50/50 px-4 py-12 text-center text-sm text-slate-500 pos-compact:rounded-xl pos-compact:py-6 pos-compact:px-3 pos-compact:text-xs">
-            {catalogFilterHidesAllInNav
+            {!hasSearched
+              ? 'ยังไม่ได้ค้นหา — พิมพ์คำค้นแล้วกด Enter เพื่อแสดงสินค้า'
+              : catalogFilterHidesAllInNav
               ? 'ในมุมมองนี้มีเฉพาะสินค้าอ้างอิง — ปิดสวิตช์ «เฉพาะในร้าน» ด้านบนเพื่อดูในแฟ้มข้อมูล หรือเปลี่ยนหมวด'
               : dimensionMatch.kind === 'no_dim_in_filter'
                 ? 'ไม่มีสินค้าที่มีมิติในระบบในรายการนี้ — ลองเปลี่ยนหมวดหรือตัวกรอง'
@@ -2283,17 +2642,30 @@ export function ProductDataFileView() {
                     </tr>
                   </thead>
                   <tbody>
-                    {sortedList.map((p) => (
+                    {visibleList.map((p) => (
                       <ProductMasterListRow
                         key={p.id}
                         product={p}
                         dimensionSearchActive={measActive}
-                        onOpen={() => openProductDetail(p.id)}
-                        onSelect={() => setSelectedProductId(p.id)}
+                        onOpenProduct={openProductDetail}
+                        onSelectProduct={handleSelectProduct}
                         selected={selectedProductId === p.id}
-                        onContextMenu={(e) => openProductContextMenu(e, p.id)}
+                        onContextMenuProduct={openProductContextMenu}
                       />
                     ))}
+                    {visibleCount < sortedList.length ? (
+                      <tr>
+                        <td colSpan={5} className="py-3 text-center">
+                          <button
+                            type="button"
+                            onClick={() => setVisibleCount((n) => n + PAGE_SIZE)}
+                            className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-slate-700 shadow-sm hover:bg-slate-50"
+                          >
+                            แสดงเพิ่ม ({sortedList.length - visibleCount} รายการที่เหลือ)
+                          </button>
+                        </td>
+                      </tr>
+                    ) : null}
                   </tbody>
                 </table>
               </div>
@@ -2310,18 +2682,29 @@ export function ProductDataFileView() {
                     'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 pos-compact:md:grid-cols-3 pos-compact:xl:grid-cols-4',
                   )}
                 >
-                  {sortedList.map((p) => (
+                  {visibleList.map((p) => (
                     <ProductMasterGridCard
                       key={p.id}
                       product={p}
                       dimensionSearchActive={measActive}
-                      onOpen={() => openProductDetail(p.id)}
-                      onSelect={() => setSelectedProductId(p.id)}
+                      onOpenProduct={openProductDetail}
+                      onSelectProduct={handleSelectProduct}
                       selected={selectedProductId === p.id}
-                      onContextMenu={(e) => openProductContextMenu(e, p.id)}
+                      onContextMenuProduct={openProductContextMenu}
                     />
                   ))}
                 </div>
+                {visibleCount < sortedList.length ? (
+                  <div className="pt-2 text-center">
+                    <button
+                      type="button"
+                      onClick={() => setVisibleCount((n) => n + PAGE_SIZE)}
+                      className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-slate-700 shadow-sm hover:bg-slate-50"
+                    >
+                      แสดงเพิ่ม ({sortedList.length - visibleCount} รายการที่เหลือ)
+                    </button>
+                  </div>
+                ) : null}
               </div>
         )}
 

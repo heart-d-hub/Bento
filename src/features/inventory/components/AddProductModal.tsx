@@ -43,9 +43,11 @@ import {
   type PaperDimLayout,
 } from '@/features/inventory/data/paperDimensionLayout'
 import { VehicleFitPicker, type VehicleFitRow } from '@/features/inventory/components/VehicleFitPicker'
+import { ProductImage } from '@/features/inventory/components/ProductImage'
+import { isTauri } from '@/features/desktop/isTauri'
 import { clsx } from 'clsx'
 import { ChevronDown, Coins, ExternalLink, Plus, RotateCcw, Trash2, X } from 'lucide-react'
-import { useCallback, useEffect, useId, useMemo, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 
 function norm(s: string) {
   return s.trim().toLowerCase()
@@ -80,6 +82,151 @@ function splitTags(s: string): string[] {
     .split(/[\n,]+/)
     .map((t) => t.trim())
     .filter(Boolean)
+}
+
+function splitLegacyCarModelLines(lines: string[]): string[] {
+  return lines
+    .flatMap((line) => line.split(/\s*\/\s*/))
+    .map((x) => x.trim())
+    .filter(Boolean)
+}
+
+function extractDriveType(text: string): string | undefined {
+  const m = text.match(/\b(\d{1,2}WD|AWD|FWD|RWD)\b/i)
+  return m?.[1] ? m[1].toUpperCase() : undefined
+}
+
+function stripDriveType(text: string): string {
+  return text
+    .replace(/\s*[·•:\-–]?\s*\b(\d{1,2}WD|AWD|FWD|RWD)\b\s*$/i, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+}
+
+function looksLikeEngineText(text: string): boolean {
+  const t = text.toLowerCase()
+  return /(\d+\s*hp|\bwd\b|awd|fwd|rwd|engine|cng|diesel|hybrid|ev)/i.test(t)
+}
+
+function normalizeVehicleLine(
+  p: ProductMasterDetail,
+  f: VehicleFitmentRef,
+  idx: number,
+): VehicleFitRow {
+  const driveType = f.driveType?.trim() || extractDriveType(f.engineText ?? '') || extractDriveType(f.engineLabel ?? '')
+  const engineTextBase = (f.engineText?.trim() || stripDriveType(f.engineLabel ?? '') || '').trim()
+  const modelCandidate = (f.modelName ?? '').trim()
+  const modelName =
+    !modelCandidate || modelCandidate === '—' || looksLikeEngineText(modelCandidate)
+      ? (p.carModelLabel && p.carModelLabel !== '—' ? p.carModelLabel : '—')
+      : modelCandidate
+  const brandCandidate = (f.brandName ?? '').trim()
+  const brandName =
+    !brandCandidate ||
+    brandCandidate === '—' ||
+    ['รถบรรทุก', 'รถยนต์', 'รถกระบะ', 'รถตู้', 'มอเตอร์ไซค์'].includes(brandCandidate)
+      ? (p.carBrand && p.carBrand !== '—' ? p.carBrand : '—')
+      : brandCandidate
+  const yearRangeText = f.yearRangeText?.trim() || undefined
+  const engineLabel =
+    f.engineLabel?.trim() ||
+    [engineTextBase || undefined, driveType || undefined, yearRangeText || p.yearLabel || undefined]
+      .filter(Boolean)
+      .join(' · ') ||
+    'ไม่ระบุเครื่อง/ปี'
+
+  return {
+    id: f.id || `vf-row-${p.id}-${idx}`,
+    categoryId: f.categoryId || 'legacy-category',
+    categoryLabel: f.categoryLabel || '—',
+    brandId: f.brandId || 'legacy-brand',
+    brandName,
+    modelId: f.modelId || `legacy-model-${idx}`,
+    modelName,
+    engineId: f.engineId || `legacy-engine-${p.id}-${idx}`,
+    engineLabel,
+    ...(engineTextBase ? { engineText: engineTextBase } : {}),
+    ...(yearRangeText ? { yearRangeText } : {}),
+    ...(f.yearFrom != null ? { yearFrom: f.yearFrom } : {}),
+    ...(f.yearTo != null ? { yearTo: f.yearTo } : {}),
+    ...(driveType ? { driveType } : {}),
+    ...(f.engineCode ? { engineCode: f.engineCode } : {}),
+    brakePosition: (f.brakePosition ?? '') as '' | 'front' | 'rear',
+  }
+}
+
+function vehicleRowsFromProduct(p: ProductMasterDetail): VehicleFitRow[] {
+  const fits = (p.vehicleFitments ?? []).filter(
+    (f): f is VehicleFitmentRef => Boolean(f && typeof f === 'object'),
+  )
+  if (fits.length > 0) {
+    const normalized = fits.map((f, idx) => normalizeVehicleLine(p, f, idx))
+    const seen = new Set<string>()
+    return normalized.filter((r) => {
+      const key = [
+        r.brandName,
+        r.modelName,
+        r.engineText ?? '',
+        r.driveType ?? '',
+        r.yearRangeText ?? '',
+        r.yearFrom ?? '',
+        r.yearTo ?? '',
+        r.brakePosition ?? '',
+      ].join('|')
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  }
+  // fallback: ข้อมูลเก่าที่มีเฉพาะสรุปรถบนหัวสินค้า/บรรทัด carModels
+  const lines = [
+    ...new Set(splitLegacyCarModelLines((p.carModels ?? []).map((x) => x.trim()).filter(Boolean))),
+  ]
+  if (lines.length > 0) {
+    return lines.map((line, idx) => {
+      const [left, rightRaw] = line.split(/[—-]/, 2)
+      const right = (rightRaw ?? '').trim()
+      const leftParts = (left ?? '').trim().split(/\s+/).filter(Boolean)
+      const brandName =
+        (p.carBrand && p.carBrand !== '—' ? p.carBrand : leftParts[1]) || '—'
+      const modelName =
+        (p.carModelLabel && p.carModelLabel !== '—'
+          ? p.carModelLabel
+          : (leftParts.slice(2).join(' ').trim() || right || line)) || '—'
+      const driveType = extractDriveType(right)
+      const engineText = stripDriveType(right)
+      return {
+        id: `vf-legacy-${p.id}-${idx}`,
+        categoryId: 'legacy-category',
+        categoryLabel: '—',
+        brandId: 'legacy-brand',
+        brandName,
+        modelId: `legacy-model-${idx}`,
+        modelName,
+        engineId: `legacy-engine-${p.id}-${idx}`,
+        engineLabel:
+          [engineText || undefined, driveType || undefined, p.yearLabel && p.yearLabel !== '—' ? p.yearLabel : undefined]
+            .filter(Boolean)
+            .join(' · ') || 'ไม่ระบุเครื่อง/ปี',
+        ...(engineText ? { engineText } : {}),
+        ...(driveType ? { driveType } : {}),
+      }
+    })
+  }
+  if (p.carBrand && p.carBrand !== '—' && p.carModelLabel && p.carModelLabel !== '—') {
+    return [{
+      id: `vf-legacy-${p.id}`,
+      categoryId: 'legacy-category',
+      categoryLabel: '—',
+      brandId: 'legacy-brand',
+      brandName: p.carBrand,
+      modelId: 'legacy-model',
+      modelName: p.carModelLabel,
+      engineId: `legacy-engine-${p.id}`,
+      engineLabel: p.yearLabel && p.yearLabel !== '—' ? p.yearLabel : 'ไม่ระบุเครื่อง/ปี',
+    }]
+  }
+  return []
 }
 
 function parseBoltMaleSkuLines(s: string): string[] | undefined {
@@ -178,6 +325,7 @@ function parseBuyScheme(s: string): { buyQty: number; freeQty: number; effective
 /** เกณฑ์เริ่มต้นในโมเดิลปัดเศษ (5 / 10 บาท) */
 const ROUNDING_START_5_BAHT_DEFAULT = '50'
 const ROUNDING_START_10_BAHT_DEFAULT = '500'
+const VAT_RATE = 0.07
 
 /** ปัดเศษ 5 / 10 บาทตามเกณฑ์เริ่มที่ — ใช้กับราคาปลีกจาก % เท่านั้น */
 function applyRetailPriceRounding(price: number, start5Baht: number, start10Baht: number): number {
@@ -256,6 +404,7 @@ export function AddProductModal({
   const [vehicleRows, setVehicleRows] = useState<VehicleFitRow[]>([])
   const [brand, setBrand] = useState('')
   const [isGenuine, setIsGenuine] = useState(false)
+  const [vatMode, setVatMode] = useState<'vat' | 'no_vat'>('vat')
   /** สินค้าแบ่งขาย — ชื่อบิล/POS ไม่แสดงท้ายวงเล็บ */
   const [splitSale, setSplitSale] = useState(false)
   /** piece | kg_roll | meter_roll | box_piece — ควบคุมการตัดสต็อก POS / หน้าแบ่งขาย */
@@ -558,6 +707,9 @@ export function AddProductModal({
     categoryPickerTouched,
     categoryTree,
   ])
+  /** ป้องกัน effect re-populate ซ้ำเมื่อ dep อื่น (เช่น browseNav) เปลี่ยนขณะ modal เปิดอยู่ */
+  const initKeyRef = useRef<string | null>(null)
+
   const reset = useCallback((browse?: AddProductBrowseNav) => {
     setSku('')
     setBoxBarcode('')
@@ -568,6 +720,7 @@ export function AddProductModal({
     setVehicleRows([])
     setBrand('')
     setIsGenuine(false)
+    setVatMode('vat')
     setSplitSale(false)
     setStockModeChoice('piece')
     setStockModeDetailsOpen(false)
@@ -652,7 +805,20 @@ export function AddProductModal({
   }, [categoryTree])
 
   useEffect(() => {
-    if (!open || !categoryTree.length) return
+    if (!open || !categoryTree.length) {
+      if (!open) initKeyRef.current = null
+      return
+    }
+
+    // Build a key that captures what we're initializing for.
+    // Only re-initialize if this key is different from last time.
+    const newKey = editingProduct
+      ? `edit:${editingProduct.id}`
+      : copySource
+        ? `copy:${copySource.id}:${suggestedSku ?? ''}`
+        : `new:${browseNav ? JSON.stringify(browseNav) : 'all'}`
+    if (initKeyRef.current === newKey) return
+    initKeyRef.current = newKey
 
     if (editingProduct) {
       setCategoryPickerTouched(false)
@@ -663,27 +829,10 @@ export function AddProductModal({
       setFactoryNo(p.factoryNo ?? '')
       setCrossRefText((p.crossReferenceTags ?? []).join('\n'))
       setName(p.name)
-      setVehicleRows(
-        (p.vehicleFitments ?? []).map((f) => ({
-          id: f.id,
-          categoryId: f.categoryId,
-          categoryLabel: f.categoryLabel,
-          brandId: f.brandId,
-          brandName: f.brandName,
-          modelId: f.modelId,
-          modelName: f.modelName,
-          engineId: f.engineId,
-          engineLabel: f.engineLabel,
-          engineText: f.engineText,
-          yearRangeText: f.yearRangeText,
-          yearFrom: f.yearFrom,
-          yearTo: f.yearTo,
-          engineCode: f.engineCode,
-          brakePosition: f.brakePosition ?? '',
-        })),
-      )
+      setVehicleRows(vehicleRowsFromProduct(p))
       setBrand(p.brand === '—' ? '' : p.brand)
       setIsGenuine(Boolean(p.isGenuine))
+      setVatMode(p.vatMode === 'no_vat' ? 'no_vat' : 'vat')
       setSplitSale(Boolean(p.splitSale))
       const sm = p.stockMode
       if (sm === 'kg_roll') {
@@ -737,7 +886,7 @@ export function AddProductModal({
         setDimUnit('mm')
       }
       setDimsOpen(Boolean(pd))
-      setVehicleFitOpen((p.vehicleFitments?.length ?? 0) > 0)
+      setVehicleFitOpen(vehicleRowsFromProduct(p).length > 0)
       setSupplierListStr(
         p.supplierListPrice !== undefined && p.supplierListPrice > 0 ? formatMoneyInput(p.supplierListPrice) : '',
       )
@@ -807,25 +956,7 @@ export function AddProductModal({
 
     // โหมดคัดลอก: ดึงเฉพาะข้อมูลหลัก + เลือกหมวดเดิม + ตั้ง SKU ใหม่
     setName(copySource.name)
-    setVehicleRows(
-      (copySource.vehicleFitments ?? []).map((f) => ({
-        id: f.id,
-        categoryId: f.categoryId,
-        categoryLabel: f.categoryLabel,
-        brandId: f.brandId,
-        brandName: f.brandName,
-        modelId: f.modelId,
-        modelName: f.modelName,
-        engineId: f.engineId,
-        engineLabel: f.engineLabel,
-          engineText: f.engineText,
-          yearRangeText: f.yearRangeText,
-          yearFrom: f.yearFrom,
-          yearTo: f.yearTo,
-        engineCode: f.engineCode,
-        brakePosition: f.brakePosition ?? '',
-      })),
-    )
+    setVehicleRows(vehicleRowsFromProduct(copySource))
     setBrand(copySource.brand)
     const nu = normalizeSalesUnits(copySource)
     setSalesUnitRows(
@@ -839,6 +970,7 @@ export function AddProductModal({
     setFactoryNo('')
     setCrossRefText('')
     setIsGenuine(Boolean(copySource.isGenuine))
+    setVatMode(copySource.vatMode === 'no_vat' ? 'no_vat' : 'vat')
     setSplitSale(Boolean(copySource.splitSale))
     const csm = copySource.stockMode
     if (csm === 'kg_roll') {
@@ -877,7 +1009,7 @@ export function AddProductModal({
     setDimC('')
     setDimUnit('mm')
     setDimsOpen(false)
-    setVehicleFitOpen((copySource.vehicleFitments?.length ?? 0) > 0)
+    setVehicleFitOpen(vehicleRowsFromProduct(copySource).length > 0)
     setSupplierListStr('')
     setBuyScheme(parseBuyScheme(copySource.scheme)?.normalized ?? '1+0')
     setPd1('')
@@ -938,10 +1070,13 @@ export function AddProductModal({
   const pctsPreview: [number, number, number, number] = [parsePct(pd1), parsePct(pd2), parsePct(pd3), parsePct(pd4)]
   const listPPreview = parseMoney(supplierListStr)
   const schemePreview = parseBuyScheme(buyScheme)
+  const vatMultiplier = vatMode === 'no_vat' ? 1 : 1 + VAT_RATE
   const autoCostPreview =
     listPPreview !== undefined && listPPreview > 0
       ? Math.round(
-          (computeCostFromSupplierList(listPPreview, pctsPreview) / Math.max(1, schemePreview?.effectiveQty ?? 1)) * 100,
+          ((computeCostFromSupplierList(listPPreview, pctsPreview) * vatMultiplier) /
+            Math.max(1, schemePreview?.effectiveQty ?? 1)) *
+            100,
         ) / 100
       : null
 
@@ -1078,11 +1213,8 @@ export function AddProductModal({
     if (costParsed !== undefined) {
       costPrice = costParsed
     } else if (listP !== undefined && listP > 0) {
-      const totalAfterDiscount = computeCostFromSupplierList(listP, pcts)
+      const totalAfterDiscount = computeCostFromSupplierList(listP, pcts) * vatMultiplier
       costPrice = Math.round((totalAfterDiscount / parsedScheme.effectiveQty) * 100) / 100
-    } else {
-      setError('กรุณาระบุราคาตั้ง หรือกรอกทุนสุทธิ')
-      return
     }
 
     const salesUnitsAligned: SalesUnit[] = salesUnitRows.map((row, i) => {
@@ -1097,13 +1229,6 @@ export function AddProductModal({
 
     /** บรรจุใช้เพื่อแสดงผลเท่านั้น — ไม่ใช้คำนวณราคาขาย */
     const packPieces = 1
-    const tierUsesPercentCol = sellRows.some((r) => parseSignedTierPercent(r.markup) !== 0)
-    if (sellTierPercentBasis === 'list_discount' && tierUsesPercentCol) {
-      if (listP === undefined || listP <= 0) {
-        setError('โหมดลดจากราคาตั้ง — ต้องระบุราคาตั้ง (ซัพพลายเออร์)')
-        return
-      }
-    }
     const sellTiersParsed: SellPriceTier[] = sellRows.map((r) => {
       const signed = parseSignedTierPercent(r.markup)
       const unitPrices = r.prices.slice(0, nCols).map((p) => parseMoney(p))
@@ -1252,6 +1377,7 @@ export function AddProductModal({
             ...(r.yearRangeText ? { yearRangeText: r.yearRangeText } : {}),
             ...(r.yearFrom != null ? { yearFrom: r.yearFrom } : {}),
             ...(r.yearTo != null ? { yearTo: r.yearTo } : {}),
+            ...(r.driveType ? { driveType: r.driveType } : {}),
             ...(r.engineCode ? { engineCode: r.engineCode } : {}),
             ...(r.brakePosition === 'front' || r.brakePosition === 'rear'
               ? { brakePosition: r.brakePosition }
@@ -1357,6 +1483,7 @@ export function AddProductModal({
       scheme: parsedScheme.normalized,
       avgCost: costPrice,
       sellPrice,
+      vatMode: vatMode === 'no_vat' ? 'no_vat' : undefined,
       supplierListPrice: listP !== undefined && listP > 0 ? listP : undefined,
       purchaseDiscountPcts: pcts.some((p) => p > 0) ? pcts : undefined,
       costEnteredManually: (costManualOverride && costParsed !== undefined) || undefined,
@@ -1415,15 +1542,8 @@ export function AddProductModal({
       role="dialog"
       aria-modal="true"
       aria-labelledby="add-product-title"
-      onClick={() => {
-        reset()
-        onClose()
-      }}
     >
-      <div
-        className="flex max-h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
+      <div className="flex max-h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl">
         <div className="flex shrink-0 items-center justify-between gap-2 border-b border-slate-100 bg-white px-3 py-2 sm:px-4">
           <div className="min-w-0">
             <h2 id="add-product-title" className="text-sm font-semibold text-slate-900 sm:text-base">
@@ -1456,7 +1576,10 @@ export function AddProductModal({
 
             <div className="grid gap-2 lg:grid-cols-2 lg:items-start lg:gap-3">
               <div className={sectionClass}>
-                <p className={sectionTitleClass}>ข้อมูลหลัก</p>
+                <div className="flex items-start gap-3">
+                  <p className={clsx(sectionTitleClass, 'flex-1')}>ข้อมูลหลัก</p>
+                  {isTauri() && <ProductImage sku={sku} size="sm" zoomable />}
+                </div>
                 <div className="grid gap-2 sm:grid-cols-2">
                   <label className="block min-w-0 sm:col-span-1">
                     <span className={labelClass}>รหัสสินค้า *</span>
@@ -1980,6 +2103,9 @@ export function AddProductModal({
                       <VehicleFitPicker
                         rows={vehicleRows}
                         onAdd={(row) => setVehicleRows((prev) => [...prev, row])}
+                        onUpdate={(id, row) =>
+                          setVehicleRows((prev) => prev.map((r) => (r.id === id ? row : r)))
+                        }
                         onRemove={(id) => setVehicleRows((prev) => prev.filter((r) => r.id !== id))}
                         labelClass={labelClass}
                         sectionClass="border-0 bg-transparent p-0"
@@ -2132,7 +2258,19 @@ export function AddProductModal({
                 ) : null}
 
                 <div className="rounded-md border border-slate-200 bg-white p-1.5">
-                  <p className="mb-1 text-xs font-semibold text-slate-900">ราคาซื้อ / ทุน</p>
+                  <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-xs font-semibold text-slate-900">ราคาซื้อ / ทุน</p>
+                    <label className="flex cursor-pointer items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-2 py-1">
+                      <input
+                        type="checkbox"
+                        checked={vatMode !== 'no_vat'}
+                        onChange={(e) => setVatMode(e.target.checked ? 'vat' : 'no_vat')}
+                        className="size-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                      />
+                      <span className="text-[11px] font-medium text-slate-800">มี VAT</span>
+                    </label>
+                    <span className="text-[10px] text-slate-500">ติ๊กแล้วระบบบวก VAT 7% ในต้นทุนอัตโนมัติ</span>
+                  </div>
                   <div className="flex flex-wrap items-end gap-1.5">
                     <label className="block min-w-[7rem] flex-1">
                       <span className={labelClass}>ราคาตั้ง</span>

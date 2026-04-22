@@ -31,12 +31,12 @@ function loadCatalog(): VehicleCatalogState {
 function loadVisibleIds(categories: VehicleCategoryDef[]): Set<string> {
   try {
     const raw = localStorage.getItem(VEHICLE_VISIBLE_CATEGORIES_STORAGE_KEY)
-    if (!raw) {
-      return new Set(categories.map((c) => c.id))
-    }
+    if (!raw) return new Set(categories.map((c) => c.id))
     const arr = JSON.parse(raw) as string[]
     if (!Array.isArray(arr)) return new Set(categories.map((c) => c.id))
-    return new Set(arr.filter((id) => categories.some((c) => c.id === id)))
+    const saved = new Set(arr)
+    // Keep saved visibility for existing categories; new categories default to visible
+    return new Set(categories.map((c) => c.id).filter((id) => saved.has(id) || !arr.includes(id)))
   } catch {
     return new Set(categories.map((c) => c.id))
   }
@@ -62,12 +62,33 @@ export function VehicleCatalogProvider({ children }: { children: ReactNode }) {
     localStorage.setItem(VEHICLE_CATALOG_STORAGE_KEY, JSON.stringify(catalog))
   }, [catalog])
 
+  // Ensure any category in the catalog that isn't yet tracked gets added as visible
+  useEffect(() => {
+    setVisibleState((prev) => {
+      const missing = catalog.categories.filter((c) => !prev.has(c.id))
+      if (missing.length === 0) return prev
+      return new Set([...prev, ...missing.map((c) => c.id)])
+    })
+  }, [catalog.categories])
+
   useEffect(() => {
     localStorage.setItem(VEHICLE_VISIBLE_CATEGORIES_STORAGE_KEY, JSON.stringify([...visibleCategoryIds]))
   }, [visibleCategoryIds])
 
   const setCatalog = useCallback((next: VehicleCatalogState) => {
     setCatalogState(next)
+    // Auto-include any newly added categories (default visible)
+    setVisibleState((prev) => {
+      const updated = new Set(prev)
+      let changed = false
+      for (const c of next.categories) {
+        if (!updated.has(c.id)) {
+          updated.add(c.id)
+          changed = true
+        }
+      }
+      return changed ? updated : prev
+    })
   }, [])
 
   const setVisibleCategoryIds = useCallback((ids: Set<string>) => {

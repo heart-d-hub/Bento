@@ -46,6 +46,7 @@ function fitmentMatches(
     brake: '' | 'front' | 'rear'
   },
 ): boolean {
+  if (!f) return false
   if (opts.categoryId && f.categoryId !== opts.categoryId) return false
   if (opts.brand && normalizeText(f.brandName) !== opts.brand) return false
   if (opts.model && normalizeText(f.modelName) !== opts.model) return false
@@ -63,8 +64,10 @@ function fitmentMatches(
     if (opts.yearValue !== null) {
       const from = f.yearFrom
       const to = f.yearTo
-      if (from != null && to != null) {
-        if (!(opts.yearValue >= from && opts.yearValue <= to)) return false
+      if (from != null || to != null) {
+        const start = from != null ? from : 1900
+        const end = to != null ? to : new Date().getFullYear()
+        if (!(opts.yearValue >= start && opts.yearValue <= end)) return false
       } else {
         const hay = normalizeText([f.yearRangeText ?? '', f.engineLabel ?? ''].join(' '))
         if (!hay.includes(opts.yearText)) return false
@@ -83,7 +86,7 @@ function fitmentMatches(
 function productMatches(p: ProductMasterDetail, opts: Parameters<typeof fitmentMatches>[1]): VehicleFitmentRef[] {
   const fits = p.vehicleFitments ?? []
   if (!fits.length) return []
-  return fits.filter((f) => fitmentMatches(f, opts))
+  return fits.filter((f) => f != null && fitmentMatches(f, opts))
 }
 
 function fitPreviewText(f: VehicleFitmentRef): string {
@@ -149,6 +152,7 @@ export function VehicleSearchView() {
     const set = new Set<string>()
     for (const p of masters) {
       for (const f of p.vehicleFitments ?? []) {
+        if (!f) continue
         if (categoryId && f.categoryId !== categoryId) continue
         set.add(f.brandName)
       }
@@ -160,6 +164,7 @@ export function VehicleSearchView() {
     const set = new Set<string>()
     for (const p of masters) {
       for (const f of p.vehicleFitments ?? []) {
+        if (!f) continue
         if (categoryId && f.categoryId !== categoryId) continue
         if (normalizedBrand && normalizeText(f.brandName) !== normalizedBrand) continue
         set.add(f.modelName)

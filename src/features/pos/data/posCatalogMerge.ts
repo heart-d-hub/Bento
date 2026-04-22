@@ -1,6 +1,7 @@
 import { MOCK_PRODUCTS, type InventoryProduct } from '@/features/inventory/data/mockInventory'
 import {
   getProductMasterList,
+  productEligibleForPosSale,
   totalCrossBranchStock,
   type ProductMasterDetail,
 } from '@/features/inventory/data/productMasterData'
@@ -44,8 +45,9 @@ export function masterToInventoryProduct(m: ProductMasterDetail): InventoryProdu
  * (สูตรประกอบ / โค้ดเก่าใช้ p-* — มาสเตอร์มักเป็น pm-*) เพื่อให้คีย์สต็อก POS ตรงกับที่เลือกในสูตร
  */
 export function getPosCatalogProducts(): InventoryProduct[] {
-  const masters = getProductMasterList().map(masterToInventoryProduct)
-  const masterSkusLower = new Set(masters.map((p) => p.sku.trim().toLowerCase()))
+  const masters = getProductMasterList()
+    .filter(productEligibleForPosSale)
+    .map(masterToInventoryProduct)
   const mockBySku = new Map(MOCK_PRODUCTS.map((p) => [p.sku.trim().toLowerCase(), p] as const))
 
   const mergedFromMaster: InventoryProduct[] = []
@@ -68,8 +70,7 @@ export function getPosCatalogProducts(): InventoryProduct[] {
     }
   }
 
-  const mockExtra = MOCK_PRODUCTS.filter((p) => !masterSkusLower.has(p.sku.trim().toLowerCase()))
-  return [...mergedFromMaster, ...mockExtra]
+  return mergedFromMaster
 }
 
 /**

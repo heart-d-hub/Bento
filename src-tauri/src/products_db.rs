@@ -51,6 +51,7 @@ pub async fn products_master_replace_all(rows: Vec<Value>) -> Result<(), String>
       r#"
       INSERT INTO "ProductMasterRow" (id, payload, "updatedAt")
       VALUES ($1, $2::jsonb, (now() AT TIME ZONE 'Asia/Bangkok'))
+      ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, "updatedAt" = EXCLUDED."updatedAt"
       "#,
     )
     .bind(&id)
@@ -62,4 +63,45 @@ pub async fn products_master_replace_all(rows: Vec<Value>) -> Result<(), String>
 
   tx.commit().await.map_err(|e| format!("commit failed: {e}"))?;
   Ok(())
+}
+
+#[tauri::command]
+pub async fn get_product_images_dir(app: tauri::AppHandle) -> Result<String, String> {
+  use tauri::Manager;
+  let dir = app
+    .path()
+    .app_local_data_dir()
+    .map_err(|e| format!("app_local_data_dir failed: {e}"))?
+    .join("product-images");
+  std::fs::create_dir_all(&dir).map_err(|e| format!("create product-images dir failed: {e}"))?;
+  Ok(dir.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn list_product_image_skus(
+  app: tauri::AppHandle,
+) -> Result<std::collections::HashMap<String, String>, String> {
+  use tauri::Manager;
+  let dir = app
+    .path()
+    .app_local_data_dir()
+    .map_err(|e| format!("app_local_data_dir failed: {e}"))?
+    .join("product-images");
+  std::fs::create_dir_all(&dir).map_err(|e| format!("create product-images dir failed: {e}"))?;
+  let mut map = std::collections::HashMap::new();
+  const EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif"];
+  for entry in std::fs::read_dir(&dir)
+    .map_err(|e| format!("read product-images dir failed: {e}"))?
+    .flatten()
+  {
+    let fname = entry.file_name().to_string_lossy().to_string();
+    let lower = fname.to_lowercase();
+    if let Some(dot) = lower.rfind('.') {
+      let ext = &lower[dot + 1..];
+      if EXTS.contains(&ext) {
+        map.insert(lower[..dot].to_string(), fname);
+      }
+    }
+  }
+  Ok(map)
 }
