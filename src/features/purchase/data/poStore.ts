@@ -1,5 +1,7 @@
 import type { BranchId } from '@/features/auth/branches'
-import type { PurchaseOrder } from '@/features/purchase/data/poTypes'
+import type { PurchaseOrder, PoPromoGroup, PoVatMode, PoInvoice } from '@/features/purchase/data/poTypes'
+import { isTauri } from '@/features/desktop/isTauri'
+import { invoke } from '@tauri-apps/api/core'
 
 const LS_KEY = 'bento.purchase.orders.v1'
 const MAX = 200
@@ -45,7 +47,13 @@ function normalizePo(v: unknown): PurchaseOrder | null {
       const unitCostOrder = Math.max(0, Number(r.unitCostOrder) || 0)
       const receivedQtyTotal = Math.max(0, Number(r.receivedQtyTotal) || 0)
       if (!productId) return null
-      return { lineId, productId, sku, name, orderedQty, unitCostOrder, receivedQtyTotal }
+      return {
+        lineId, productId, sku, name, orderedQty, unitCostOrder, receivedQtyTotal,
+        ...(typeof r.listPrice === 'number' && r.listPrice > 0 ? { listPrice: r.listPrice } : {}),
+        ...(typeof r.discountChain === 'string' && r.discountChain.trim() ? { discountChain: r.discountChain.trim() } : {}),
+        ...(typeof r.bonusPaidQty === 'number' && r.bonusPaidQty > 0 ? { bonusPaidQty: r.bonusPaidQty } : {}),
+        ...(typeof r.bonusFreeQty === 'number' && r.bonusFreeQty > 0 ? { bonusFreeQty: r.bonusFreeQty } : {}),
+      }
     })
     .filter(Boolean) as PurchaseOrder['lines']
 
@@ -64,8 +72,12 @@ function normalizePo(v: unknown): PurchaseOrder | null {
               const lineId = typeof z.lineId === 'string' ? z.lineId : ''
               const qty = Math.max(0, Number(z.qty) || 0)
               const unitCost = Math.max(0, Number(z.unitCost) || 0)
-              if (!lineId || qty <= 0) return null
-              return { lineId, qty, unitCost }
+              const shortageQty =
+                typeof z.shortageQty === 'number' && z.shortageQty > 0
+                  ? Math.round(Math.max(0, z.shortageQty) * 10000) / 10000
+                  : undefined
+              if (!lineId || (qty <= 0 && (!shortageQty || shortageQty <= 0))) return null
+              return { lineId, qty, unitCost, ...(shortageQty ? { shortageQty } : {}) }
             })
             .filter(Boolean) as PurchaseOrder['receiveBatches'][0]['lines']
           if (blines.length === 0) return null
@@ -98,6 +110,41 @@ function normalizePo(v: unknown): PurchaseOrder | null {
       ? o.paymentMode
       : 'unpaid'
 
+  const promoGroups: PoPromoGroup[] | undefined = Array.isArray(o.promoGroups)
+    ? (o.promoGroups as unknown[]).map((g) => {
+        if (!g || typeof g !== 'object') return null
+        const gr = g as Record<string, unknown>
+        return {
+          id: typeof gr.id === 'string' ? gr.id : `pg-${Math.random().toString(36).slice(2, 9)}`,
+          name: typeof gr.name === 'string' ? gr.name : 'โปรโมชั่น',
+          buyQty: Math.max(1, Number(gr.buyQty) || 1),
+          freeQty: Math.max(1, Number(gr.freeQty) || 1),
+          lineIds: Array.isArray(gr.lineIds)
+            ? (gr.lineIds as unknown[]).filter((x): x is string => typeof x === 'string')
+            : [],
+        }
+      }).filter(Boolean) as PoPromoGroup[]
+    : undefined
+
+  const poInvoices: PoInvoice[] | undefined = Array.isArray(o.poInvoices)
+    ? (o.poInvoices as unknown[]).map((inv) => {
+        if (!inv || typeof inv !== 'object') return null
+        const i = inv as Record<string, unknown>
+        const invoiceNo = typeof i.invoiceNo === 'string' ? i.invoiceNo.trim() : ''
+        if (!invoiceNo) return null
+        return {
+          id: typeof i.id === 'string' ? i.id : `inv-${Math.random().toString(36).slice(2, 9)}`,
+          invoiceNo,
+          invoiceDate: typeof i.invoiceDate === 'string' ? i.invoiceDate : new Date().toISOString().slice(0, 10),
+          receiveBatchId: typeof i.receiveBatchId === 'string' ? i.receiveBatchId : undefined,
+          beforeVatBaht: Math.max(0, Number(i.beforeVatBaht) || 0),
+          vatBaht: Math.max(0, Number(i.vatBaht) || 0),
+          totalBaht: Math.max(0, Number(i.totalBaht) || 0),
+          notes: typeof i.notes === 'string' && i.notes.trim() ? i.notes.trim() : undefined,
+        } satisfies PoInvoice
+      }).filter(Boolean) as PoInvoice[]
+    : undefined
+
   return {
     id,
     poNo,
@@ -117,8 +164,20 @@ function normalizePo(v: unknown): PurchaseOrder | null {
       typeof o.debtReductionChannel === 'string' && o.debtReductionChannel.trim()
         ? o.debtReductionChannel.trim()
         : undefined,
+    supplierBankAccountRef:
+      typeof o.supplierBankAccountRef === 'string' && o.supplierBankAccountRef.trim()
+        ? o.supplierBankAccountRef.trim()
+        : undefined,
     paymentNote: typeof o.paymentNote === 'string' ? o.paymentNote : undefined,
     paidAt: typeof o.paidAt === 'string' ? o.paidAt : undefined,
+    expectedDeliveryAt: typeof o.expectedDeliveryAt === 'string' ? o.expectedDeliveryAt : undefined,
+    shippingMethod: typeof o.shippingMethod === 'string' && o.shippingMethod.trim() ? o.shippingMethod.trim() : undefined,
+    vatMode: (o.vatMode === 'included' || o.vatMode === 'none') ? (o.vatMode as PoVatMode) : undefined,
+    notes: typeof o.notes === 'string' && o.notes.trim() ? o.notes.trim() : undefined,
+    invoiceNo: typeof o.invoiceNo === 'string' && o.invoiceNo.trim() ? o.invoiceNo.trim() : undefined,
+    trackingNo: typeof o.trackingNo === 'string' && o.trackingNo.trim() ? o.trackingNo.trim() : undefined,
+    ...(promoGroups && promoGroups.length > 0 ? { promoGroups } : {}),
+    ...(poInvoices && poInvoices.length > 0 ? { poInvoices } : {}),
   }
 }
 
@@ -141,4 +200,37 @@ export function upsertPurchaseOrder(po: PurchaseOrder): void {
 
 export function deletePurchaseOrder(id: string): void {
   savePurchaseOrders(loadPurchaseOrders().filter((p) => p.id !== id))
+}
+
+export function clearAllPurchaseOrders(): void {
+  savePurchaseOrders([])
+}
+
+export async function loadPurchaseOrdersAsync(): Promise<PurchaseOrder[]> {
+  if (isTauri()) {
+    try {
+      const rows = await invoke<unknown[]>('po_list')
+      if (Array.isArray(rows) && rows.length > 0) {
+        const parsed = rows.map(normalizePo).filter(Boolean) as PurchaseOrder[]
+        if (parsed.length > 0) return parsed
+      }
+    } catch (e) {
+      console.warn('po_list failed, falling back to localStorage', e)
+    }
+  }
+  return loadPurchaseOrders()
+}
+
+export async function upsertPurchaseOrderAsync(po: PurchaseOrder): Promise<void> {
+  upsertPurchaseOrder(po)
+  if (isTauri()) {
+    await invoke('po_upsert', { payload: po })
+  }
+}
+
+export async function deletePurchaseOrderAsync(id: string): Promise<void> {
+  deletePurchaseOrder(id)
+  if (isTauri()) {
+    await invoke('po_delete', { id })
+  }
 }

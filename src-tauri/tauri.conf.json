@@ -18,13 +18,23 @@
         "height": 720,
         "resizable": true,
         "fullscreen": false
+      },
+      {
+        "label": "cfd",
+        "title": "Customer Facing Display",
+        "url": "/?cfd=1",
+        "width": 1280,
+        "height": 720,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": false
       }
     ],
     "security": {
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": ["$APPLOCALDATA/**"]
+        "scope": ["$APPLOCALDATA/**", "$VIDEO/**", "$DOCUMENT/**", "$DOWNLOAD/**", "$DESKTOP/**", "$HOME/**"]
       }
     }
   },

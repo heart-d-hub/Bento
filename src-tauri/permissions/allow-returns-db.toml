@@ -1,0 +1,10 @@
+[[permission]]
+identifier = "allow-returns-db"
+description = "Allows returns and claims management."
+commands.allow = [
+  "return_list",
+  "claim_list",
+  "claim_create",
+  "claim_update",
+  "claim_delete"
+]

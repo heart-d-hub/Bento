@@ -70,12 +70,16 @@ export function loadStaffUsers(): StaffUser[] {
 }
 
 async function persistStaffUsersToDb(users: StaffUser[]): Promise<void> {
+  if (!isTauri() && import.meta.env.DEV) {
+    await pushStaffUsersToDevApi(users)
+    return
+  }
   const rows = JSON.parse(JSON.stringify(users)) as unknown[]
   await invoke('staff_users_replace_all', { rows })
 }
 
 function schedulePersistStaffUsersToDb(users: StaffUser[]): void {
-  if (!isTauri()) return
+  if (!isTauri() && !import.meta.env.DEV) return
   staffUsersDbPending = users
   if (staffUsersDbDebounceTimer !== null) {
     clearTimeout(staffUsersDbDebounceTimer)
@@ -119,11 +123,28 @@ function mergeStaffUsersFromLocalAndDb(local: StaffUser[], fromDb: StaffUser[]):
   return dedupeStaffUsersById([...byKey.values()])
 }
 
+async function fetchStaffUsersFromDevApi(): Promise<unknown[]> {
+  const res = await fetch('/api/staff-users')
+  if (!res.ok) throw new Error(`dev-api staff-users ${res.status}`)
+  return res.json() as Promise<unknown[]>
+}
+
+async function pushStaffUsersToDevApi(users: StaffUser[]): Promise<void> {
+  await fetch('/api/staff-users', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(users),
+  })
+}
+
 export async function hydrateStaffUsersFromDb(): Promise<StaffUser[]> {
-  if (!isTauri()) return loadStaffUsers()
+  const isDevBrowser = !isTauri() && import.meta.env.DEV
+  if (!isTauri() && !isDevBrowser) return loadStaffUsers()
   try {
     const local = loadStaffUsers()
-    const rows = await invoke<unknown[]>('staff_users_load')
+    const rows = isDevBrowser
+      ? await fetchStaffUsersFromDevApi()
+      : await invoke<unknown[]>('staff_users_load')
     if (!Array.isArray(rows) || rows.length === 0) {
       // Bootstrap DB with current local users so dev/release share one source.
       if (local.length > 0 && hasNonDefaultStaffUsers(local)) {

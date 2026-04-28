@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-sale-adjustments-db"
+description = "Allows bill void and return creation."
+commands.allow = ["sale_void", "sale_return_create"]

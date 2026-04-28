@@ -1,9 +1,10 @@
-import { ArrowLeft, Home, X } from 'lucide-react'
+import { ArrowLeft, ChevronDown, Home, X } from 'lucide-react'
 import { clsx } from 'clsx'
 import { useWorkspaceTabs } from '@/features/main/context/WorkspaceTabsContext'
 import { getDeviceLabel, setDeviceLabel } from '@/features/device/deviceSession'
-import { getStaffRole } from '@/features/auth/authSession'
-import { useEffect, useState } from 'react'
+import { getStaffRole, getStoredBranch, setStoredBranch } from '@/features/auth/authSession'
+import { BRANCHES } from '@/features/auth/branches'
+import { useEffect, useRef, useState } from 'react'
 
 type MainTopNavProps = {
   /** ถ้ามี จะแสดงแทนชื่อร้าน (เช่น หัวข้อหน้า workspace) */
@@ -15,8 +16,8 @@ type MainTopNavProps = {
 
 function formatDisplayDate(d: Date) {
   return d.toLocaleDateString('th-TH', {
-    day: '2-digit',
-    month: '2-digit',
+    day: 'numeric',
+    month: 'short',
     year: 'numeric',
   })
 }
@@ -48,10 +49,24 @@ export function MainTopNav({
   const heading = pageTitle ?? shopName
   const [deviceLabel, setDeviceLabelState] = useState(() => getDeviceLabel())
   const canEditDeviceLabel = getStaffRole() === 'admin'
+  const [branchOpen, setBranchOpen] = useState(false)
+  const currentBranch = getStoredBranch()
+  const branchRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     setDeviceLabelState(getDeviceLabel())
   }, [])
+
+  useEffect(() => {
+    if (!branchOpen) return
+    const onClickOutside = (e: MouseEvent) => {
+      if (branchRef.current && !branchRef.current.contains(e.target as Node)) {
+        setBranchOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onClickOutside)
+    return () => document.removeEventListener('mousedown', onClickOutside)
+  }, [branchOpen])
 
   return (
     <nav
@@ -106,6 +121,46 @@ export function MainTopNav({
             <span className="rounded bg-slate-100 px-1.5 py-0.5 font-semibold text-slate-700">
               {userRole}
             </span>
+            {/* Branch switcher */}
+            <div ref={branchRef} className="relative">
+              <button
+                type="button"
+                onClick={() => setBranchOpen((o) => !o)}
+                className="flex items-center gap-1 rounded border border-slate-200 bg-white px-2 py-0.5 font-semibold text-slate-700 shadow-sm hover:bg-slate-50"
+                title="เปลี่ยนสาขา"
+              >
+                <span className="text-slate-400">สาขา:</span>
+                {currentBranch?.name ?? '—'}
+                <ChevronDown className={clsx('size-3 transition-transform', branchOpen && 'rotate-180')} />
+              </button>
+              {branchOpen && (
+                <div className="absolute left-0 top-full z-50 mt-1 min-w-[160px] overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg">
+                  <p className="border-b border-slate-100 px-3 py-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-400">
+                    เลือกสาขา
+                  </p>
+                  {BRANCHES.map((b) => (
+                    <button
+                      key={b.id}
+                      type="button"
+                      onClick={() => {
+                        if (b.id === currentBranch?.id) { setBranchOpen(false); return }
+                        setStoredBranch({ id: b.id, name: b.name })
+                        window.location.reload()
+                      }}
+                      className={clsx(
+                        'flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-medium hover:bg-slate-50',
+                        b.id === currentBranch?.id ? 'font-bold text-amber-700' : 'text-slate-700',
+                      )}
+                    >
+                      {b.id === currentBranch?.id && (
+                        <span className="size-1.5 rounded-full bg-amber-500" />
+                      )}
+                      {b.name}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             {canEditDeviceLabel ? (
               <button
                 type="button"

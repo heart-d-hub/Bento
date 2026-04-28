@@ -1,6 +1,6 @@
 import { getProductImageUrl } from '@/features/inventory/data/productImages'
-import { ImageIcon, X, ZoomIn } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { ImageIcon, Monitor, X, ZoomIn } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 
 const SIZE_CLS = {
@@ -15,23 +15,35 @@ type Props = {
   size?: keyof typeof SIZE_CLS
   className?: string
   zoomable?: boolean
+  onProject?: () => void
 }
 
-export function ProductImage({ sku, size = 'md', className, zoomable = false }: Props) {
+export function ProductImage({ sku, size = 'md', className, zoomable = false, onProject }: Props) {
   const [url, setUrl] = useState<string | null>(null)
   const [errored, setErrored] = useState(false)
   const [lightboxOpen, setLightboxOpen] = useState(false)
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     let cancelled = false
     setUrl(null)
     setErrored(false)
-    if (!sku.trim()) return
-    getProductImageUrl(sku).then((u) => {
-      if (!cancelled) setUrl(u)
-    })
+    if (retryTimer.current) clearTimeout(retryTimer.current)
+
+    async function tryFetch() {
+      if (cancelled || !sku.trim()) return
+      const u = await getProductImageUrl(sku)
+      if (cancelled) return
+      setUrl(u)
+      if (!u) {
+        retryTimer.current = setTimeout(tryFetch, 6000)
+      }
+    }
+
+    void tryFetch()
     return () => {
       cancelled = true
+      if (retryTimer.current) clearTimeout(retryTimer.current)
     }
   }, [sku])
 
@@ -45,9 +57,12 @@ export function ProductImage({ sku, size = 'md', className, zoomable = false }: 
           <img
             src={url}
             alt={sku}
-            className={`h-full w-full rounded-lg border border-slate-200 bg-slate-50 object-contain ${zoomable ? 'cursor-zoom-in' : ''}`}
+            className={`h-full w-full rounded-lg border border-slate-200 bg-slate-50 object-contain ${zoomable ? 'cursor-zoom-in' : onProject ? 'cursor-pointer' : ''}`}
             onError={() => setErrored(true)}
-            onClick={zoomable ? () => setLightboxOpen(true) : undefined}
+            onClick={(e) => {
+              if (!zoomable && onProject) { e.stopPropagation(); onProject(); return }
+              if (zoomable) setLightboxOpen(true)
+            }}
           />
           {zoomable && (
             <div
@@ -56,6 +71,17 @@ export function ProductImage({ sku, size = 'md', className, zoomable = false }: 
             >
               <ZoomIn className="size-5 text-white drop-shadow" />
             </div>
+          )}
+          {onProject && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onProject() }}
+              className="absolute bottom-0.5 right-0.5 flex size-5 items-center justify-center rounded bg-indigo-600/80 text-white opacity-0 shadow transition group-hover:opacity-100 hover:bg-indigo-600"
+              aria-label="แสดงบนจอลูกค้า"
+              title="แสดงบนจอลูกค้า"
+            >
+              <Monitor className="size-3" />
+            </button>
           )}
         </div>
       ) : (

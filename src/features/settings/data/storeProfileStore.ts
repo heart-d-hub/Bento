@@ -10,7 +10,13 @@ function normalize(p: Partial<StoreProfile> | null | undefined): StoreProfile {
     address: typeof p?.address === 'string' ? p.address : MOCK_STORE_PROFILE.address,
     phone: typeof p?.phone === 'string' ? p.phone : MOCK_STORE_PROFILE.phone,
     email: typeof p?.email === 'string' ? p.email : MOCK_STORE_PROFILE.email,
+    vatRegistered: typeof p?.vatRegistered === 'boolean' ? p.vatRegistered : false,
   }
+}
+
+/** ธุรกิจจดทะเบียน VAT หรือยัง — ใช้ในการคำนวณต้นทุนสต็อก */
+export function getVatRegistered(): boolean {
+  return loadStoreProfile().vatRegistered
 }
 
 export function loadStoreProfile(): StoreProfile {

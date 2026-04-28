@@ -60,6 +60,8 @@ export type SalesUnit = {
   label: string
   /** 1 หน่วยนี้เทียบเท่ากี่หน่วยฐาน (หน่วยแรกต้องเป็น 1) */
   baseUnits: number
+  /** บาร์โค้ดประจำหน่วยนี้ (ถ้ามี) */
+  barcode?: string
 }
 
 /**
@@ -174,12 +176,18 @@ export function fitmentYearRangeKey(f: VehicleFitmentRef): string {
 /** ใช้กับแฟ้มข้อมูลสินค้า — กรองยี่ห้อ/รุ่น/เครื่อง-ปี จาก vehicleFitments หรือฟิลด์สรุปเดิม */
 export function productMatchesInventoryCarFilters(
   p: ProductMasterDetail,
-  opts: { brand: string; carBrand: string; carModel: string; year: string; driveType?: string },
+  opts: { brand: string; carBrand: string; carModel: string; year: string; engineLabel?: string; driveType?: string },
   filterAll: string,
 ): boolean {
-  const { brand, carBrand, carModel, year, driveType } = opts
+  const { brand, carBrand, carModel, year, engineLabel, driveType } = opts
   if (brand !== filterAll && p.brand !== brand) return false
-  if (carBrand === filterAll && carModel === filterAll && year === filterAll && (!driveType || driveType === filterAll)) return true
+  if (
+    carBrand === filterAll &&
+    carModel === filterAll &&
+    year === filterAll &&
+    (!engineLabel || engineLabel === filterAll) &&
+    (!driveType || driveType === filterAll)
+  ) return true
 
   const matchLegacy = (): boolean => {
     if (carBrand !== filterAll && p.carBrand !== carBrand) return false
@@ -196,6 +204,7 @@ export function productMatchesInventoryCarFilters(
     if (carBrand !== filterAll && f.brandName !== carBrand) return false
     if (carModel !== filterAll && f.modelName !== carModel) return false
     if (year !== filterAll && fitmentYearRangeKey(f) !== year) return false
+    if (engineLabel && engineLabel !== filterAll && (f.engineLabel ?? '').trim() !== engineLabel) return false
     if (driveType && driveType !== filterAll && (f.driveType ?? '').toUpperCase() !== driveType.toUpperCase()) return false
     return true
   })
@@ -204,35 +213,55 @@ export function productMatchesInventoryCarFilters(
 
 export function collectInventoryCarFilterOptions(
   products: ProductMasterDetail[],
-  filters?: { carBrand?: string; carModel?: string; filterAll?: string },
+  filters?: { carBrand?: string; carModel?: string; engineLabel?: string; driveType?: string; filterAll?: string },
 ): {
   carBrands: string[]
   models: string[]
-  years: string[]
+  engines: string[]
   driveTypes: string[]
+  years: string[]
 } {
   const fa = filters?.filterAll ?? 'ทั้งหมด'
   const activeBrand = filters?.carBrand && filters.carBrand !== fa ? filters.carBrand : null
   const activeModel = filters?.carModel && filters.carModel !== fa ? filters.carModel : null
+  const activeEngine = filters?.engineLabel && filters.engineLabel !== fa ? filters.engineLabel : null
+  const activeDrive = filters?.driveType && filters.driveType !== fa ? filters.driveType : null
 
   const carBrands = new Set<string>()
   const models = new Set<string>()
-  const years = new Set<string>()
+  const engines = new Set<string>()
   const driveTypes = new Set<string>()
+  const years = new Set<string>()
   for (const p of products) {
     if (p.carBrand && p.carBrand !== '—') carBrands.add(p.carBrand)
     for (const f of p.vehicleFitments ?? []) {
       if (!f) continue
       if (f.brandName) carBrands.add(f.brandName)
-      // cascade: models only from matching brand
+      // cascade: models from brand
       if (!activeBrand || f.brandName === activeBrand) {
         if (f.modelName) models.add(f.modelName)
       }
-      // cascade: years & driveTypes only from matching brand+model
+      // cascade: engines from brand+model
       if ((!activeBrand || f.brandName === activeBrand) && (!activeModel || f.modelName === activeModel)) {
+        if (f.engineLabel?.trim()) engines.add(f.engineLabel.trim())
+      }
+      // cascade: driveTypes from brand+model+engine
+      if (
+        (!activeBrand || f.brandName === activeBrand) &&
+        (!activeModel || f.modelName === activeModel) &&
+        (!activeEngine || (f.engineLabel ?? '').trim() === activeEngine)
+      ) {
+        if (f.driveType?.trim()) driveTypes.add(f.driveType.trim().toUpperCase())
+      }
+      // cascade: years from brand+model+engine+drive
+      if (
+        (!activeBrand || f.brandName === activeBrand) &&
+        (!activeModel || f.modelName === activeModel) &&
+        (!activeEngine || (f.engineLabel ?? '').trim() === activeEngine) &&
+        (!activeDrive || (f.driveType ?? '').toUpperCase() === activeDrive.toUpperCase())
+      ) {
         const yr = fitmentYearRangeKey(f)
         if (yr) years.add(yr)
-        if (f.driveType?.trim()) driveTypes.add(f.driveType.trim().toUpperCase())
       }
     }
     // legacy fields for models/years without fitments
@@ -244,20 +273,47 @@ export function collectInventoryCarFilterOptions(
   return {
     carBrands: [...carBrands].sort((a, b) => a.localeCompare(b, 'th')),
     models: [...models].sort((a, b) => a.localeCompare(b, 'th')),
-    years: [...years].sort((a, b) => a.localeCompare(b, 'th')),
+    engines: [...engines].sort((a, b) => a.localeCompare(b, 'th')),
     driveTypes: [...driveTypes].sort(),
+    years: [...years].sort((a, b) => a.localeCompare(b, 'th')),
   }
 }
 
 /** ฐานของตัวเลข % ในแถวระดับราคาขาย (ร่วมกับ sellPriceTiers) */
 export type SellTierPercentBasis = 'cost_markup' | 'list_discount'
 
+/** บาร์โค้ดหนึ่งรายการ — รหัส + จำนวนต่อการสแกน 1 ครั้ง */
+export type BarcodeEntry = {
+  code: string
+  /** จำนวนชิ้นต่อการสแกน 1 ครั้ง: 1 = ชิ้น, 6 = ลัง 6 ชิ้น ฯลฯ */
+  qtyPerScan: number
+  /** ชื่อแสดงผล เช่น "ชิ้น" "กล่อง" "ลัง" */
+  label?: string
+  /** ขนาดกล่อง — เมื่อสแกนบาร์โค้ดนี้ตอนรับของ ระบบเพิ่มจำนวนกล่องให้อัตโนมัติ */
+  boxSize?: 'small' | 'normal' | 'large'
+}
+
+/** กฎสินค้าแถมตอนรับของ — เมื่อรับสินค้านี้ N ชิ้น แถมสินค้าอื่น M ชิ้นอัตโนมัติ */
+export type ReceiveBonusRule = {
+  id: string
+  bonusSku: string
+  /** จำนวนแถมต่อ 1 ชิ้นที่รับ (เศษปัดทิ้ง) */
+  bonusQtyPerUnit: number
+  notes?: string
+}
+
+/** ส่วนประกอบ 1 รายการในสินค้าชุด (Bundle/Kit) */
+export type BundleComponent = {
+  sku: string
+  qty: number
+}
+
 export type ProductMasterDetail = {
   id: string
   /** รหัสสินค้า — ใช้พิมพ์บาร์โค้ด */
   sku: string
-  /** บาร์โค้ดที่ติดบนกล่องสินค้า (ถ้าต่างจากรหัสสินค้า) */
-  boxBarcode?: string
+  /** บาร์โค้ดทั้งหมดของสินค้านี้ — รองรับหลายบาร์โค้ด (ชิ้น / กล่อง / ลัง) */
+  barcodes?: BarcodeEntry[]
   name: string
   /** บริษัท / แบรนด์ชิ้นงาน — ใช้ในตัวกรอง «แบรนด์» */
   brand: string
@@ -288,6 +344,8 @@ export type ProductMasterDetail = {
   costPrice: number
   scheme: string
   avgCost: number
+  /** ต้นทุนล่าสุด — ราคาต่อหน่วยของ PO receive ล่าสุด */
+  lastCost?: number
   sellPrice: number
   /** สถานะ VAT ของสินค้า (ไม่ระบุ = มี VAT ตามค่าเริ่มต้น) */
   vatMode?: 'vat' | 'no_vat'
@@ -317,6 +375,14 @@ export type ProductMasterDetail = {
   purchaseDiscountPcts?: [number, number, number, number]
   /** true = ใช้ค่า costPrice ที่กรอกเอง ไม่คำนวณจากราคาตั้ง */
   costEnteredManually?: boolean
+  /** โปรซื้อครั้งล่าสุด — ส่วนลด chain เช่น "45+10" */
+  poLastDiscountChain?: string
+  /** โปรซื้อครั้งล่าสุด — จำนวนซื้อในรอบแถม เช่น 2 (ซื้อ 2 แถม 1) */
+  poLastBonusPaid?: number
+  /** โปรซื้อครั้งล่าสุด — จำนวนแถม */
+  poLastBonusFree?: number
+  /** โปรซื้อครั้งล่าสุด — % แถมเพิ่ม */
+  poLastBonusPct?: number
   /** ราคาขายหลายระดับ — แถวละระดับ: กำไร % จากทุน (ใหม่) หรือ ราคา+ลด% (เดิม) */
   sellPriceTiers?: SellPriceTier[]
   /**
@@ -352,6 +418,12 @@ export type ProductMasterDetail = {
    * เมื่อสินค้านี้เป็น**หัว/ตัวเมีย**: ระบุ SKU ตัวผู้ทั้งหมดที่ใช้คู่กับหัวนี้ (หลายความยาว)
    */
   stlBoltPairMaleSkus?: string[]
+  /** กฎสินค้าแถมตอนรับของ — เมื่อรับสินค้านี้แล้วแถมสินค้าอื่นอัตโนมัติ */
+  receiveBonusRules?: ReceiveBonusRule[]
+  /** ส่วนประกอบของสินค้าชุด (Bundle/Kit) — ตัดสต็อกจาก SKU ส่วนประกอบแทน SKU ชุด */
+  bundleComponents?: BundleComponent[]
+  /** ISO timestamp เมื่อถูกย้ายเข้าถังขยะ — ถ้ามีค่า = soft-deleted */
+  deletedAt?: string
 }
 
 /** ชื่อแสดงบน POS / บิล — ถ้า splitSale ตัดท้าย ` (ข้อความ)` ชุดสุดท้าย */
@@ -359,6 +431,34 @@ export function posDisplayProductName(p: { name: string; splitSale?: boolean }):
   if (!p.splitSale) return p.name
   const t = p.name.replace(/\s*\([^)]*\)\s*$/, '').trim()
   return t || p.name
+}
+
+/** จำนวนชุดที่ประกอบได้ = min(stock[comp] / comp.qty) ข้ามส่วนประกอบทั้งหมด */
+export function getBundleAvailableQty(
+  components: BundleComponent[],
+  pieceStock: Record<string, number>,
+): number {
+  if (!components.length) return 0
+  let available = Infinity
+  for (const comp of components) {
+    const master = getProductMasterBySku(comp.sku)
+    if (!master) return 0
+    const stock = pieceStock[master.id] ?? 0
+    available = Math.min(available, Math.floor(stock / Math.max(1, comp.qty)))
+  }
+  return available === Infinity ? 0 : Math.max(0, available)
+}
+
+/** แปลง bundleComponents[] → stockBreakdown[] (productId + qty ต่อ 1 ชุด) */
+export function resolveBundleBreakdown(
+  components: BundleComponent[],
+): Array<{ productId: string; qty: number }> {
+  return components
+    .flatMap((comp) => {
+      const master = getProductMasterBySku(comp.sku)
+      if (!master) return []
+      return [{ productId: master.id, qty: comp.qty }]
+    })
 }
 
 export type SellPriceTier = {
@@ -1030,6 +1130,15 @@ export const PRODUCT_MASTER_DETAILS: ProductMasterDetail[] = [
   },
 ]
 
+const DEMO_OIL_IDS = ['pm-oil-10w40-6l', 'pm-oil-10w40-1l', 'pm-oil-6p1l', 'pm-oil-1l']
+
+/** ลบสินค้าตัวอย่างน้ำมันเครื่องที่ถูก seed ไว้ก่อนหน้าออกจาก localStorage */
+export function seedDemoOilProducts(): void {
+  const list = getProductMasterList()
+  const cleaned = list.filter((p) => !DEMO_OIL_IDS.includes(p.id))
+  if (cleaned.length !== list.length) saveProductMasterList(cleaned, { notify: false })
+}
+
 /** หมายเหตุแสดง (POS) จากแฟ้มมาสเตอร์ — ใช้คู่กับ MOCK_PRODUCTS ตาม SKU */
 export function masterPosDisplayNoteForSku(sku: string): string | undefined {
   const key = sku.trim().toLowerCase()
@@ -1333,6 +1442,21 @@ export function getProductMasterBySku(sku: string): ProductMasterDetail | undefi
   return productMasterSkuMap.get(key)
 }
 
+/** ค้นบาร์โค้ดข้ามทุกสินค้า — คืน product + จำนวนต่อสแกน */
+export function getProductMasterByBarcode(
+  code: string,
+): { product: ProductMasterDetail; qtyPerScan: number } | undefined {
+  const key = code.trim().toLowerCase()
+  if (!key) return undefined
+  for (const p of getProductMasterList()) {
+    if (p.sku.trim().toLowerCase() === key) return { product: p, qtyPerScan: 1 }
+    for (const b of p.barcodes ?? []) {
+      if (b.code.trim().toLowerCase() === key) return { product: p, qtyPerScan: b.qtyPerScan }
+    }
+  }
+  return undefined
+}
+
 /** POS / MOCK สินค้า — ถ้าไม่มีแถวมาสเตอร์ให้ผ่าน (ของเดโมเก่า) */
 export function productPosEligibleByInventorySku(sku: string): boolean {
   const m = getProductMasterBySku(sku)
@@ -1385,6 +1509,10 @@ export function masterSearchExtrasForSku(sku: string): string {
   }
   const fn = m.factoryNo?.trim()
   if (fn) parts.push(fn)
+  for (const b of m.barcodes ?? []) {
+    const c = b.code.trim()
+    if (c) parts.push(c)
+  }
   return parts.join(' ')
 }
 

@@ -199,6 +199,7 @@ export function VehicleFitPicker({
   const categoryDropdownRef = useRef<HTMLDivElement | null>(null)
   const brandDropdownRef = useRef<HTMLDivElement | null>(null)
   const modelDropdownRef = useRef<HTMLDivElement | null>(null)
+  const formTopRef = useRef<HTMLDivElement | null>(null)
 
   const visibleCategories = useMemo(
     () =>
@@ -385,6 +386,7 @@ export function VehicleFitPicker({
     )
     setManualYearFrom(yearResolved.yearFrom != null ? String(yearResolved.yearFrom) : '')
     setManualYearTo(yearResolved.yearTo != null ? String(yearResolved.yearTo) : '')
+    window.setTimeout(() => formTopRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 30)
   }
 
   useEffect(() => {
@@ -556,7 +558,7 @@ export function VehicleFitPicker({
         </div>
       ) : null}
 
-      <div className="grid gap-1.5 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
+      <div ref={formTopRef} className="grid gap-1.5 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
         <label className="block min-w-0">
           <span className={clsx(labelClass, alignedLabelCls)}>ประเภท</span>
           <div className="relative">
@@ -884,51 +886,111 @@ export function VehicleFitPicker({
       ) : null}
 
       {rows.length > 0 ? (
-        <ul className="mt-1.5 max-h-20 overflow-y-auto rounded-md border border-slate-200 bg-white p-1.5">
-          {rows.map((r) => (
-            <li
-              key={r.id}
-              className="mb-1 inline-flex max-w-full items-center gap-1 rounded-md border border-slate-200 bg-slate-50 py-0.5 pl-2 pr-1 text-[11px] text-slate-800 last:mb-0"
-            >
-              <span className="truncate">
-                {r.modelName} {compactEngineLabel(r.engineLabel)}
-                {r.engineCode ? ` [${r.engineCode}]` : ''}
-                {r.driveType ? ` · ${r.driveType}` : ''}
-                {r.brakePosition === 'front'
-                  ? ' · เบรกหน้า'
-                  : r.brakePosition === 'rear'
-                    ? ' · เบรกหลัง'
-                    : ''}
-              </span>
-              <button
-                type="button"
-                onClick={() => copyBrandModel(r)}
-                className="shrink-0 rounded p-0.5 text-slate-400 hover:bg-emerald-50 hover:text-emerald-700"
-                aria-label="ใช้ยี่ห้อ/รุ่นเดิม"
-                title="ใช้ยี่ห้อ/รุ่นเดิม (เพิ่มเครื่องใหม่)"
-              >
-                <Copy className="size-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={() => beginEdit(r)}
-                className="shrink-0 rounded p-0.5 text-slate-400 hover:bg-sky-50 hover:text-sky-700"
-                aria-label="แก้ไขรายการ"
-                title="แก้ไข"
-              >
-                <Pencil className="size-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={() => onRemove(r.id)}
-                className="shrink-0 rounded p-0.5 text-slate-400 hover:bg-rose-50 hover:text-rose-700"
-                aria-label="ลบรายการ"
-              >
-                <X className="size-3.5" />
-              </button>
-            </li>
-          ))}
-        </ul>
+        <div className="mt-2 overflow-hidden rounded-lg border border-slate-200 bg-white">
+          <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50 px-3 py-1.5">
+            <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+              รุ่นที่ผูกไว้ ({rows.length})
+            </span>
+          </div>
+          <ul className="max-h-52 divide-y divide-slate-100 overflow-y-auto">
+            {rows.map((r, idx) => {
+              // engine — prefer explicit engineText, fall back to stripping year from engineLabel
+              const engineDisplay =
+                r.engineText ||
+                (r.engineLabel && r.engineLabel !== 'ไม่ระบุเครื่อง/ปี'
+                  ? extractEngineTextFromLabel(r.engineLabel)
+                  : '')
+              // year — prefer stored fields, then yearRangeText, then parse from engineLabel
+              const yearDisplay = (() => {
+                if (r.yearFrom !== undefined || r.yearTo !== undefined)
+                  return buildYearRangeLabel(r.yearFrom, r.yearTo)
+                if (r.yearRangeText) return r.yearRangeText
+                if (r.engineLabel && r.engineLabel !== 'ไม่ระบุเครื่อง/ปี') {
+                  const p = parseYearRangeFromText(r.engineLabel)
+                  if (p.yearFrom !== undefined || p.yearTo !== undefined)
+                    return buildYearRangeLabel(p.yearFrom, p.yearTo)
+                }
+                return ''
+              })()
+
+              const specParts: string[] = []
+              if (engineDisplay) specParts.push(engineDisplay)
+              if (r.engineCode) specParts.push(`[${r.engineCode}]`)
+              if (r.driveType) specParts.push(r.driveType)
+              if (yearDisplay) specParts.push(`ปี ${yearDisplay}`)
+              if (r.brakePosition === 'front') specParts.push('เบรกหน้า')
+              else if (r.brakePosition === 'rear') specParts.push('เบรกหลัง')
+
+              const isEditing = editingRowId === r.id
+              return (
+                <li
+                  key={r.id}
+                  className={clsx(
+                    'flex items-center gap-2 py-2 pl-3 pr-2 transition',
+                    isEditing
+                      ? 'border-l-2 border-sky-400 bg-sky-50'
+                      : idx % 2 === 0
+                        ? 'border-l-2 border-transparent bg-white'
+                        : 'border-l-2 border-transparent bg-slate-50/50',
+                  )}
+                >
+                  <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <span className="flex items-center gap-1.5">
+                      {r.categoryLabel && (
+                        <span className="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-slate-500">
+                          {r.categoryLabel}
+                        </span>
+                      )}
+                      <span className="truncate text-[12px] font-semibold text-slate-800">
+                        {r.brandName} {r.modelName}
+                      </span>
+                    </span>
+                    {specParts.length > 0 ? (
+                      <span className="truncate text-[11px] text-slate-500">
+                        {specParts.join(' · ')}
+                      </span>
+                    ) : (
+                      <span className="text-[11px] italic text-slate-400">ไม่ระบุเครื่อง/ปี</span>
+                    )}
+                  </span>
+                  <div className="flex shrink-0 items-center gap-0.5">
+                    <button
+                      type="button"
+                      onClick={() => copyBrandModel(r)}
+                      className="rounded p-1 text-slate-400 hover:bg-emerald-50 hover:text-emerald-700"
+                      aria-label="ใช้ยี่ห้อ/รุ่นเดิม"
+                      title="คัดลอกยี่ห้อ/รุ่น — เพิ่มเครื่องใหม่สำหรับรุ่นนี้"
+                    >
+                      <Copy className="size-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => beginEdit(r)}
+                      className={clsx(
+                        'rounded p-1 transition',
+                        isEditing
+                          ? 'bg-sky-100 text-sky-700'
+                          : 'text-slate-400 hover:bg-sky-50 hover:text-sky-700',
+                      )}
+                      aria-label="แก้ไขรายการ"
+                      title="แก้ไข"
+                    >
+                      <Pencil className="size-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onRemove(r.id)}
+                      className="rounded p-1 text-slate-400 hover:bg-rose-50 hover:text-rose-700"
+                      aria-label="ลบรายการ"
+                    >
+                      <X className="size-3.5" />
+                    </button>
+                  </div>
+                </li>
+              )
+            })}
+          </ul>
+        </div>
       ) : (
         <p className="mt-1.5 text-[10px] text-slate-400">ยังไม่ได้เพิ่มรุ่นรถ</p>
       )}

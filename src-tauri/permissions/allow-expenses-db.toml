@@ -1,0 +1,13 @@
+[[permission]]
+identifier = "allow-expenses-db"
+description = "Allows expense management (create, list, update, delete, approve, report)."
+commands.allow = [
+  "expense_create",
+  "expense_list",
+  "expense_update",
+  "expense_delete",
+  "expense_approve",
+  "expense_reject",
+  "report_expenses",
+  "report_expense_comparison"
+]

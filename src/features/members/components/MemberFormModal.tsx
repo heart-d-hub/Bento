@@ -1,4 +1,5 @@
 import { MEMBER_PRICE_TIER_LABELS, type MemberItemTierOverride, type MemberPriceTier } from '@/features/members/data/memberTypes'
+import { isValidPhoneLength, normalizePhone } from '@/features/members/data/phoneUtils'
 import {
   MEMBER_STATUS_LABELS,
   MEMBER_TYPE_LABELS,
@@ -179,7 +180,9 @@ export function MemberFormModal({
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault()
     if (!form.fullName.trim()) return
-    onSubmit(form)
+    if (!isValidPhoneLength(form.phone)) return
+    if (!isValidPhoneLength(form.fax)) return
+    onSubmit({ ...form, phone: normalizePhone(form.phone), fax: normalizePhone(form.fax) })
     onClose()
   }
 
@@ -328,9 +331,16 @@ export function MemberFormModal({
                       type="tel"
                       value={form.phone}
                       onChange={(e) => set({ phone: e.target.value })}
-                      className={inputClass}
+                      className={clsx(
+                        inputClass,
+                        form.phone && !isValidPhoneLength(form.phone) && 'border-rose-400 ring-1 ring-rose-300',
+                      )}
+                      placeholder="มือถือ 10 หลัก / บ้าน 9 หลัก"
                       autoComplete="tel"
                     />
+                    {form.phone && !isValidPhoneLength(form.phone) && (
+                      <p className="mt-0.5 text-[9px] text-rose-600">ต้องเป็น 9 หลัก (บ้าน) หรือ 10 หลัก (มือถือ)</p>
+                    )}
                   </div>
                   <div className="min-w-0">
                     <label className={labelClass} htmlFor="fax">
@@ -338,10 +348,19 @@ export function MemberFormModal({
                     </label>
                     <input
                       id="fax"
+                      type="tel"
                       value={form.fax}
                       onChange={(e) => set({ fax: e.target.value })}
-                      className={inputClass}
+                      className={clsx(
+                        inputClass,
+                        form.fax && !isValidPhoneLength(form.fax) && 'border-rose-400 ring-1 ring-rose-300',
+                      )}
+                      placeholder="9 หลัก"
+                      autoComplete="tel"
                     />
+                    {form.fax && !isValidPhoneLength(form.fax) && (
+                      <p className="mt-0.5 text-[9px] text-rose-600">ต้องเป็น 9 หลัก (บ้าน) หรือ 10 หลัก (มือถือ)</p>
+                    )}
                   </div>
                 </div>
 

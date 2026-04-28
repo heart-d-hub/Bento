@@ -1,0 +1,22 @@
+[[permission]]
+identifier = "allow-reports-db"
+description = "Allows all Report feature queries."
+commands.allow = [
+  "report_filter_options",
+  "report_sales_summary",
+  "report_top_products",
+  "report_top_members",
+  "report_tax_invoices",
+  "report_slow_movers",
+  "report_adjustments",
+  "report_credit_notes",
+  "report_stock_ledger",
+  "report_ar_balances",
+  "report_sales_by_category",
+  "report_profit_margin",
+  "report_member_segments",
+  "report_rfm",
+  "report_pnl",
+  "report_abc_analysis",
+  "report_dead_stock"
+]

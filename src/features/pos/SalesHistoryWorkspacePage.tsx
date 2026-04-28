@@ -6,11 +6,12 @@ import {
 } from '@/features/pos/data/posSalesHistory'
 import { loadPosSalesHistoryAsync } from '@/features/pos/data/posSalesDb'
 import { getPosSaleByBillNoAsync } from '@/features/pos/data/posSalesDb'
-import { MOCK_POS_SALES_HISTORY } from '@/features/pos/data/mockPosSalesHistory'
+import { SaleVoidModal } from '@/features/pos/components/SaleVoidModal'
+import { SaleReturnModal } from '@/features/pos/components/SaleReturnModal'
 import { printPosReceipt } from '@/features/pos/utils/posPrintReceipt'
 import { clsx } from 'clsx'
-import { History, Printer, Search, X } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { Ban, History, Printer, RefreshCw, RotateCcw, Search, X } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 
 type SalesHistoryWorkspacePageProps = {
   className?: string
@@ -36,44 +37,48 @@ function formatTime(iso: string): string {
 export function SalesHistoryWorkspacePage({ className }: SalesHistoryWorkspacePageProps) {
   const [storedRows, setStoredRows] = useState<PosSaleRecord[]>(() => loadRecentSales())
   const [dbRows, setDbRows] = useState<PosSaleRecord[] | null>(null)
+  const [isLoadingDb, setIsLoadingDb] = useState(true)
   const [q, setQ] = useState('')
   const [payment, setPayment] = useState<'all' | string>('all')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [isReprintLoading, setIsReprintLoading] = useState(false)
+  const [showVoidModal, setShowVoidModal] = useState(false)
+  const [showReturnModal, setShowReturnModal] = useState(false)
 
-  const isDemoFallback = dbRows == null && storedRows.length === 0
   const rows = useMemo(
-    () => (dbRows && dbRows.length > 0 ? dbRows : isDemoFallback ? MOCK_POS_SALES_HISTORY : storedRows),
-    [dbRows, storedRows, isDemoFallback],
+    () => (dbRows && dbRows.length > 0 ? dbRows : storedRows),
+    [dbRows, storedRows],
   )
 
-  useEffect(() => {
-    const refresh = () => {
-      setStoredRows(loadRecentSales())
-      void loadPosSalesHistoryAsync(200)
-        .then((rowsFromDb) => {
-          if (!rowsFromDb) {
-            setDbRows(null)
-            return
-          }
-          setDbRows(
-            rowsFromDb.map((r) => ({
-              id: r.id,
-              billNo: r.billNo,
-              at: r.at,
-              total: r.total,
-              paymentId: r.paymentId as PosSaleRecord['paymentId'],
-              lineCount: r.lineCount,
-              lines: r.lines,
-            })),
-          )
-        })
-        .catch(() => setDbRows(null))
-    }
-    refresh()
-    window.addEventListener(POS_SALE_RECORDED_EVENT, refresh)
-    return () => window.removeEventListener(POS_SALE_RECORDED_EVENT, refresh)
+  const refresh = useCallback((showSpinner = false) => {
+    setStoredRows(loadRecentSales())
+    if (showSpinner) setIsLoadingDb(true)
+    void loadPosSalesHistoryAsync(200)
+      .then((rowsFromDb) => {
+        if (!rowsFromDb) { setDbRows(null); return }
+        setDbRows(
+          rowsFromDb.map((r) => ({
+            id: r.id,
+            billNo: r.billNo,
+            at: r.at,
+            total: r.total,
+            paymentId: r.paymentId as PosSaleRecord['paymentId'],
+            lineCount: r.lineCount,
+            lines: r.lines,
+            voidedAt: r.voidedAt,
+          })),
+        )
+      })
+      .catch(() => setDbRows(null))
+      .finally(() => setIsLoadingDb(false))
   }, [])
+
+  useEffect(() => {
+    refresh(true)
+    const onSale = () => refresh()
+    window.addEventListener(POS_SALE_RECORDED_EVENT, onSale)
+    return () => window.removeEventListener(POS_SALE_RECORDED_EVENT, onSale)
+  }, [refresh])
 
   const filtered = useMemo(() => {
     const term = q.trim().toLowerCase()
@@ -116,17 +121,24 @@ export function SalesHistoryWorkspacePage({ className }: SalesHistoryWorkspacePa
             <div>
               <h1 className="text-sm font-semibold text-slate-900">ประวัติการขาย (POS)</h1>
               <p className="text-[11px] text-slate-500">
-                {isDemoFallback
-                  ? 'แสดงตัวอย่าง — ยังไม่มีการขายจริงในเครื่องนี้ (บันทึกจริงเก็บได้สูงสุด 80 บิล)'
+                {isLoadingDb
+                  ? 'กำลังโหลดจากฐานข้อมูล…'
                   : dbRows
-                    ? 'ข้อมูลจากฐานข้อมูล'
-                    : 'ข้อมูลในเครื่อง — ล่าสุด 80 รายการ'}
-                {' · '}
-                ในมุมมองนี้ {totals.count} บิล · ฿{formatBaht(totals.baht)}
+                    ? `ฐานข้อมูล · ${totals.count} บิล · ฿${formatBaht(totals.baht)}`
+                    : `ในเครื่อง · ${totals.count} บิล · ฿${formatBaht(totals.baht)}`}
               </p>
             </div>
           </div>
           <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => refresh(true)}
+              disabled={isLoadingDb}
+              title="รีเฟรช"
+              className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-500 hover:bg-slate-50 disabled:opacity-40"
+            >
+              <RefreshCw className={clsx('size-4', isLoadingDb && 'animate-spin')} />
+            </button>
             <div className="relative min-w-[14rem] flex-1 sm:max-w-xs">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-slate-400" />
               <input
@@ -153,54 +165,12 @@ export function SalesHistoryWorkspacePage({ className }: SalesHistoryWorkspacePa
       </header>
 
       <div className="min-h-0 flex-1 overflow-auto p-3 sm:p-4">
-        <details
-          className={clsx(
-            'mb-3 rounded-xl border px-3 py-2 text-xs',
-            isDemoFallback
-              ? 'border-amber-200/90 bg-amber-50/90 text-amber-950'
-              : 'border-slate-200 bg-slate-50/90 text-slate-800',
-          )}
-        >
-          <summary
-            className={clsx(
-              'cursor-pointer select-none font-semibold',
-              isDemoFallback ? 'text-amber-950/95' : 'text-slate-800',
-            )}
-          >
-            เก็บอะไรบ้างต่อ 1 บิล (localStorage key:{' '}
-            <span className="font-mono font-normal">bento.pos.salesHistory.v1</span>)
-          </summary>
-          <ul
-            className={clsx(
-              'mt-2 list-inside list-disc space-y-1 pl-0.5 text-[11px] leading-relaxed',
-              isDemoFallback ? 'text-amber-950/90' : 'text-slate-700',
-            )}
-          >
-            <li>
-              <span className="font-medium">id</span> — รหัสอ้างอิงภายใน (สร้างตอนบันทึกการขาย)
-            </li>
-            <li>
-              <span className="font-medium">billNo</span> — เลขที่บิล POS (รูปแบบเช่น 1PA69040001)
-            </li>
-            <li>
-              <span className="font-medium">at</span> — เวลาออกบิล (ISO string)
-            </li>
-            <li>
-              <span className="font-medium">total</span> — ยอดรวมสุทธิ (บาท)
-            </li>
-            <li>
-              <span className="font-medium">paymentId</span> — ช่องทางชำระ (cash / qr / credit / bill)
-            </li>
-            <li>
-              <span className="font-medium">lineCount</span> — จำนวนรายการในรถเข็น (แถวสินค้า)
-            </li>
-            <li>
-              <span className="font-medium">lines</span> — รายละเอียดแต่ละแถว: productId, sku, name, qty, unitPrice (บิลเก่าอาจไม่มี)
-            </li>
-          </ul>
-        </details>
-
-        {filtered.length === 0 ? (
+        {isLoadingDb && rows.length === 0 ? (
+          <div className="flex items-center gap-2 py-8 text-sm text-slate-400">
+            <RefreshCw className="size-4 animate-spin" />
+            กำลังโหลดข้อมูลจากฐานข้อมูล…
+          </div>
+        ) : filtered.length === 0 ? (
           <p className="text-sm text-slate-500">ยังไม่มีการบันทึกการขาย</p>
         ) : (
           <div className="overflow-x-auto rounded-xl border border-slate-200">
@@ -215,27 +185,38 @@ export function SalesHistoryWorkspacePage({ className }: SalesHistoryWorkspacePa
                 </tr>
               </thead>
               <tbody className="text-slate-800">
-                {filtered.map((r) => (
-                  <tr
-                    key={r.id}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => setSelectedId(r.id)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault()
-                        setSelectedId(r.id)
-                      }
-                    }}
-                    className="cursor-pointer border-b border-slate-100 last:border-0 hover:bg-slate-50/80"
-                  >
-                    <td className="whitespace-nowrap px-3 py-2 text-slate-600">{formatTime(r.at)}</td>
-                    <td className="px-3 py-2 font-mono text-[11px]">{r.billNo}</td>
-                    <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums">{formatBaht(r.total)}</td>
-                    <td className="px-3 py-2">{getPaymentMethodLabel(r.paymentId)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{r.lineCount}</td>
-                  </tr>
-                ))}
+                {filtered.map((r) => {
+                  const isVoided = Boolean(r.voidedAt)
+                  return (
+                    <tr
+                      key={r.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setSelectedId(r.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          setSelectedId(r.id)
+                        }
+                      }}
+                      className={clsx(
+                        'cursor-pointer border-b border-slate-100 last:border-0 hover:bg-slate-50/80',
+                        isVoided && 'opacity-50',
+                      )}
+                    >
+                      <td className="whitespace-nowrap px-3 py-2 text-slate-600">{formatTime(r.at)}</td>
+                      <td className="px-3 py-2 font-mono text-[11px]">
+                        <span className={clsx(isVoided && 'line-through')}>{r.billNo}</span>
+                        {isVoided && (
+                          <span className="ml-1.5 rounded bg-rose-100 px-1 py-0.5 text-[9px] font-bold text-rose-700">VOID</span>
+                        )}
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums">{formatBaht(r.total)}</td>
+                      <td className="px-3 py-2">{getPaymentMethodLabel(r.paymentId)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{r.lineCount}</td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>
@@ -299,55 +280,106 @@ export function SalesHistoryWorkspacePage({ className }: SalesHistoryWorkspacePa
                 <p className="text-xs text-slate-500">บิลนี้ไม่มีรายละเอียดรายการสินค้า (ข้อมูลเก่า)</p>
               )}
             </div>
-            <div className="flex items-center justify-between gap-2 border-t border-slate-100 px-4 py-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 px-4 py-3">
               <div>
                 <p className="text-[11px] text-slate-500">ยอดรวมสุทธิ</p>
                 <p className="text-base font-semibold tabular-nums text-slate-900">฿{formatBaht(selected.total)}</p>
               </div>
-              <button
-                type="button"
-                disabled={
-                  isReprintLoading || !selected.lines?.length || selected.lines.some((l) => l.unitPrice === undefined)
-                }
-                onClick={async () => {
-                  setIsReprintLoading(true)
-                  try {
-                    const fresh = (await getPosSaleByBillNoAsync(selected.billNo)) ?? selected
-                    if (!fresh.lines?.length) return
-                    const lines = fresh.lines
-                    .filter((l) => l.unitPrice !== undefined)
-                    .map((l) => ({
-                      lineId: `re-${fresh.id}-${Math.random().toString(36).slice(2, 6)}`,
-                      productId: l.productId,
-                      sku: l.sku ?? '',
-                      name: l.name,
-                      qty: l.qty,
-                      unitPrice: l.unitPrice ?? 0,
-                      unitLabel: 'ชิ้น',
-                      unitIndex: 0,
-                      unitBaseUnits: 1,
-                      priceLevelIndex: 0,
-                      priceLevelLabel: 'ราคา 1',
-                    }))
-                    printPosReceipt({
-                      billNo: fresh.billNo,
-                      lines,
-                      grandTotal: fresh.total,
-                      paymentLabel: getPaymentMethodLabel(fresh.paymentId),
-                    })
-                  } finally {
-                    setIsReprintLoading(false)
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Void */}
+                {!selected.voidedAt && (
+                  <button
+                    type="button"
+                    onClick={() => setShowVoidModal(true)}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 hover:bg-rose-100"
+                  >
+                    <Ban className="size-3.5" aria-hidden />
+                    ยกเลิกบิล
+                  </button>
+                )}
+                {/* Return */}
+                {!selected.voidedAt && (selected.lines?.some((l) => l.unitPrice !== undefined)) && (
+                  <button
+                    type="button"
+                    onClick={() => setShowReturnModal(true)}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700 hover:bg-indigo-100"
+                  >
+                    <RotateCcw className="size-3.5" aria-hidden />
+                    คืนสินค้า
+                  </button>
+                )}
+                {/* Reprint */}
+                <button
+                  type="button"
+                  disabled={
+                    isReprintLoading || !selected.lines?.length || selected.lines.some((l) => l.unitPrice === undefined)
                   }
-                }}
-                className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 shadow-sm hover:bg-slate-50 disabled:opacity-50"
-              >
-                <Printer className="size-4" aria-hidden />
-                {isReprintLoading ? 'กำลังดึงบิล...' : 'พิมพ์ซ้ำ'}
-              </button>
+                  onClick={async () => {
+                    setIsReprintLoading(true)
+                    try {
+                      const fresh = (await getPosSaleByBillNoAsync(selected.billNo)) ?? selected
+                      if (!fresh.lines?.length) return
+                      const lines = fresh.lines
+                        .filter((l) => l.unitPrice !== undefined)
+                        .map((l) => ({
+                          lineId: `re-${fresh.id}-${Math.random().toString(36).slice(2, 6)}`,
+                          productId: l.productId,
+                          sku: l.sku ?? '',
+                          name: l.name,
+                          qty: l.qty,
+                          unitPrice: l.unitPrice ?? 0,
+                          unitLabel: 'ชิ้น',
+                          unitIndex: 0,
+                          unitBaseUnits: 1,
+                          priceLevelIndex: 0,
+                          priceLevelLabel: 'ราคา 1',
+                        }))
+                      printPosReceipt({
+                        billNo: fresh.billNo,
+                        lines,
+                        grandTotal: fresh.total,
+                        paymentLabel: getPaymentMethodLabel(fresh.paymentId),
+                      })
+                    } finally {
+                      setIsReprintLoading(false)
+                    }
+                  }}
+                  className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 shadow-sm hover:bg-slate-50 disabled:opacity-50"
+                >
+                  <Printer className="size-4" aria-hidden />
+                  {isReprintLoading ? 'กำลังดึงบิล...' : 'พิมพ์ซ้ำ'}
+                </button>
+              </div>
             </div>
           </div>
         </div>
       ) : null}
+
+      {showVoidModal && selected && (
+        <SaleVoidModal
+          bill={selected}
+          onClose={() => setShowVoidModal(false)}
+          onVoided={() => {
+            setShowVoidModal(false)
+            setSelectedId(null)
+            refresh(true)
+          }}
+        />
+      )}
+
+      {showReturnModal && selected && (
+        <SaleReturnModal
+          bill={selected}
+          onClose={() => setShowReturnModal(false)}
+          onReturned={(returnNo, totalRefund, creditNoteNo) => {
+            setShowReturnModal(false)
+            setSelectedId(null)
+            refresh(true)
+            const cn = creditNoteNo ? `\nใบลดหนี้: ${creditNoteNo}` : ''
+            alert(`บันทึกคืนสินค้าแล้ว\nเลขที่ใบคืน: ${returnNo}\nยอดคืน: ฿${totalRefund.toLocaleString('th-TH', { minimumFractionDigits: 2 })}${cn}`)
+          }}
+        />
+      )}
     </div>
   )
 }

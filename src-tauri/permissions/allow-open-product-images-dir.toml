@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-open-product-images-dir"
+description = "Allows opening the product images folder in the OS file manager."
+commands.allow = ["open_product_images_dir"]

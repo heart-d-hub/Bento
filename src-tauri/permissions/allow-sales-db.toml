@@ -1,4 +1,15 @@
 [[permission]]
 identifier = "allow-sales-db"
 description = "Allows POS sales read/write in PostgreSQL."
-commands.allow = ["database_ping", "sales_create", "sales_day_summary", "sales_history_list", "sales_get_by_bill_no", "pos_bill_peek_next", "pos_bill_next"]
+commands.allow = [
+  "database_ping",
+  "sales_create",
+  "sales_day_summary",
+  "sales_history_list",
+  "sales_get_by_bill_no",
+  "sales_history_by_member",
+  "sales_member_summary",
+  "sales_link_member_by_bill",
+  "pos_bill_peek_next",
+  "pos_bill_next"
+]

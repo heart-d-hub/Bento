@@ -5,6 +5,8 @@ export type StoreProfile = {
   address: string
   phone: string
   email: string
+  /** ธุรกิจจดทะเบียน VAT แล้ว — ส่งผลต่อการคำนวณต้นทุนสต็อก */
+  vatRegistered: boolean
 }
 
 export const MOCK_STORE_PROFILE: StoreProfile = {
@@ -13,4 +15,5 @@ export const MOCK_STORE_PROFILE: StoreProfile = {
   address: '123 ถนนพระราม 4 แขวงคลองเตย เขตคลองเตย กรุงเทพฯ 10110',
   phone: '02-123-4567',
   email: 'contact@bento-auto.example',
+  vatRegistered: false,
 }

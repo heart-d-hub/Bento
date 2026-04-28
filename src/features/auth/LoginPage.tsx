@@ -6,10 +6,7 @@ import {
   setStaffUsername,
   setStoredBranch,
 } from '@/features/auth/authSession'
-import {
-  hydrateStaffUsersFromDb,
-  loadStaffUsers,
-} from '@/features/settings/data/staffUsersStore'
+import { hydrateStaffUsersFromDb, loadStaffUsers } from '@/features/settings/data/staffUsersStore'
 import { clsx } from 'clsx'
 import { Lock, User } from 'lucide-react'
 import { type FormEvent, useEffect, useId, useState } from 'react'
@@ -60,6 +57,7 @@ export function LoginPage() {
     setStoredBranch(null)
     navigate('/branch')
   }
+
 
   return (
     <div className="relative flex min-h-screen flex-col items-center justify-center overflow-hidden bg-slate-100 px-4 py-10">
@@ -131,11 +129,14 @@ export function LoginPage() {
           >
             เข้าสู่ระบบ
           </button>
+
+
         </form>
 
         <p className="mt-4 text-center text-[10px] leading-relaxed text-slate-500">
           ผู้ใช้ทดสอบ: <span className="font-mono">ANG</span> / <span className="font-mono">EVE</span> /{' '}
-          <span className="font-mono">STOCK</span> — รหัส <span className="font-mono">bento123</span>
+          <span className="font-mono">STOCK</span> — รหัส <span className="font-mono">bento123</span> |{' '}
+          <span className="font-mono">herb</span> — รหัส <span className="font-mono">1234</span>
         </p>
 
         <div className="mt-6 flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-center text-[11px] text-slate-500">

@@ -25,6 +25,9 @@ function workspacePageTitle(activeTabId: string | null): string | undefined {
   if (activeTabId === 'promotions') return 'โปรโมชัน — ซื้อครบแถม / ของแถม'
   if (activeTabId === 'car-model') return 'รถ — ค้นหา / จัดการรุ่นรถ'
   if (activeTabId === 'task-notepad-history') return 'ประวัติสั่งงาน / โน้ต — สรุปรายวัน'
+  if (activeTabId === 'clockin') return 'ลงเวลา — บันทึกเวลาเข้า-ออกงานพนักงาน'
+  if (activeTabId === 'global-dashboard') return 'Dashboard รวมทุกสาขา'
+  if (activeTabId === 'transport') return 'บริษัทขนส่ง — รายชื่อ / เบอร์โทร / ติดต่อ'
   return undefined
 }
 
@@ -113,11 +116,10 @@ function MainPageContent() {
       />
 
       <div className="mx-auto flex min-h-0 w-full max-w-[1920px] flex-1 flex-col gap-2 p-2 pos-compact:gap-1.5 pos-compact:p-1.5 pos-720p:gap-1 pos-720p:p-1 sm:gap-3 sm:p-4 pos-compact:sm:gap-2 pos-compact:sm:p-3 pos-720p:sm:gap-2 pos-720p:sm:p-2">
-        {showDashboard ? (
-          <MainDashboard className="min-h-0 flex-1" />
-        ) : (
+        {showDashboard && <MainDashboard className="min-h-0 flex-1" />}
+        <div className={showDashboard ? 'hidden' : 'contents'}>
           <WorkspaceTabPanel className="min-h-0 flex-1" />
-        )}
+        </div>
       </div>
     </div>
   )

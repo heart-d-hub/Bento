@@ -32,6 +32,7 @@ export type PosSaleCreatePayload = {
   remark?: string
   branchId?: string
   memberCode?: string
+  shippingMethod?: string
   lines: PosSaleLinePayload[]
 }
 
@@ -72,6 +73,7 @@ export type PosSalesHistoryRow = {
   paymentId: string
   lineCount: number
   lines: PosSalesHistoryLine[]
+  voidedAt?: string | null
 }
 
 export async function loadPosSalesHistoryAsync(limit = 200): Promise<PosSalesHistoryRow[] | null> {
@@ -87,17 +89,38 @@ export async function loadPosSalesHistoryAsync(limit = 200): Promise<PosSalesHis
   }))
 }
 
-export async function loadPosSalesHistoryByMemberAsync(memberCode: string, limit = 5): Promise<PosSalesHistoryRow[]> {
+export async function loadPosSalesHistoryByMemberAsync(
+  memberCode: string,
+  limit = 5,
+  offset = 0,
+): Promise<PosSalesHistoryRow[]> {
   if (!isTauri()) return []
   const rows = await invoke<Array<Omit<PosSalesHistoryRow, 'lineCount'> & { lineCount: number | string }>>(
     'sales_history_by_member',
-    { memberCode, limit },
+    { memberCode, limit, offset },
   )
   return (rows ?? []).map((r) => ({
     ...r,
     lineCount: Number(r.lineCount) || 0,
     lines: Array.isArray(r.lines) ? r.lines : [],
   }))
+}
+
+export type MemberSalesSummary = {
+  visitCount: number
+  totalSpent: number
+  avgBill: number
+  lastVisitAt: string | null
+}
+
+export async function loadMemberSalesSummaryAsync(memberCode: string): Promise<MemberSalesSummary | null> {
+  if (!isTauri()) return null
+  return invoke<MemberSalesSummary>('sales_member_summary', { memberCode })
+}
+
+export async function salesLinkMemberByBillAsync(billNo: string, memberCode: string): Promise<void> {
+  if (!isTauri()) return
+  await invoke('sales_link_member_by_bill', { billNo, memberCode })
 }
 
 export async function getPosSaleByBillNoAsync(billNo: string): Promise<PosSalesHistoryRow | null> {

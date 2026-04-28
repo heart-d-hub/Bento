@@ -6,7 +6,7 @@ import type { ReactNode } from 'react'
  * โปรดักชันใช้เฉพาะแอป Windows (.exe) — ไม่รองรับการเปิด UI ผ่านเบราว์เซอร์
  */
 export function DesktopOnlyGate({ children }: { children: ReactNode }) {
-  if (isTauri()) return <>{children}</>
+  if (isTauri() || import.meta.env.DEV) return <>{children}</>
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-slate-900 px-6 text-center text-slate-100">

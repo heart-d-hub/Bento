@@ -1,4 +1,6 @@
 import { MOCK_SUPPLIERS } from '@/features/purchase/data/mockSuppliers'
+import { isTauri } from '@/features/desktop/isTauri'
+import { invoke } from '@tauri-apps/api/core'
 
 const LS_KEY = 'bento.purchase.supplierDirectory.v1'
 
@@ -9,6 +11,12 @@ export type SupplierBankAccount = {
   bankName?: string
   accountNo?: string
   accountName?: string
+}
+
+/** ส่วนลดสำหรับจ่ายก่อนกำหนด — จ่ายภายใน X วัน จากวันยืนยัน PO ได้ลด Y% */
+export type EarlyPayDiscount = {
+  withinDays: number
+  discountPct: number
 }
 
 export type SupplierProfile = {
@@ -38,6 +46,10 @@ export type SupplierProfile = {
   defaultShipping?: string
   /** จำนวนสินค้าประจำ (แสดงในแถว) */
   regularProductCount?: number
+  /** รูปแบบ VAT ในใบเสนอราคา/รายการสินค้า */
+  priceListVatMode?: 'vat_included' | 'vat_excluded' | 'no_vat'
+  /** ส่วนลดจ่ายก่อนกำหนด — เรียงตาม withinDays น้อยสุดก่อน */
+  earlyPayDiscounts?: EarlyPayDiscount[]
 }
 
 function newSupplierId(): string {
@@ -153,6 +165,24 @@ function normalizeProfile(v: unknown): SupplierProfile | null {
       ? brandsRaw.map((x) => (typeof x === 'string' ? x.trim() : '')).filter(Boolean)
       : undefined
   const rpc = typeof o.regularProductCount === 'number' && Number.isFinite(o.regularProductCount) ? Math.max(0, Math.floor(o.regularProductCount)) : undefined
+  const validVatModes = ['vat_included', 'vat_excluded', 'no_vat'] as const
+  const priceListVatMode = validVatModes.includes(o.priceListVatMode as typeof validVatModes[number])
+    ? (o.priceListVatMode as SupplierProfile['priceListVatMode'])
+    : undefined
+  const earlyPayDiscounts: EarlyPayDiscount[] | undefined = (() => {
+    if (!Array.isArray(o.earlyPayDiscounts)) return undefined
+    const list = (o.earlyPayDiscounts as unknown[])
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null
+        const d = item as Record<string, unknown>
+        const days = Number(d.withinDays)
+        const pct  = Number(d.discountPct)
+        if (!Number.isFinite(days) || days <= 0 || !Number.isFinite(pct) || pct <= 0) return null
+        return { withinDays: Math.round(days), discountPct: Math.round(pct * 100) / 100 }
+      })
+      .filter((x): x is EarlyPayDiscount => x !== null)
+    return list.length ? list : undefined
+  })()
   return {
     id,
     supplierCode,
@@ -170,6 +200,8 @@ function normalizeProfile(v: unknown): SupplierProfile | null {
     brandsSold: brandsSold?.length ? brandsSold : undefined,
     defaultShipping: optTrim(o.defaultShipping),
     regularProductCount: rpc,
+    priceListVatMode,
+    earlyPayDiscounts,
   }
 }
 
@@ -260,9 +292,40 @@ export function createSupplierProfile(partial: Omit<SupplierProfile, 'id'> & { i
       partial.regularProductCount != null && Number.isFinite(partial.regularProductCount)
         ? Math.max(0, Math.floor(partial.regularProductCount))
         : undefined,
+    priceListVatMode: partial.priceListVatMode,
+    earlyPayDiscounts: partial.earlyPayDiscounts?.length ? partial.earlyPayDiscounts : undefined,
   }
   upsertSupplierProfile(profile)
   return profile
+}
+
+export async function loadSupplierDirectoryAsync(): Promise<SupplierProfile[]> {
+  if (isTauri()) {
+    try {
+      const rows = await invoke<unknown[]>('supplier_list')
+      if (Array.isArray(rows) && rows.length > 0) {
+        const parsed = rows.map(normalizeProfile).filter((x): x is SupplierProfile => x !== null)
+        if (parsed.length > 0) return parsed
+      }
+    } catch (e) {
+      console.warn('supplier_list failed, falling back to localStorage', e)
+    }
+  }
+  return loadSupplierDirectory()
+}
+
+export async function upsertSupplierProfileAsync(profile: SupplierProfile): Promise<void> {
+  upsertSupplierProfile(profile)
+  if (isTauri()) {
+    await invoke('supplier_upsert', { payload: profile })
+  }
+}
+
+export async function deleteSupplierProfileAsync(id: string): Promise<void> {
+  deleteSupplierProfile(id)
+  if (isTauri()) {
+    await invoke('supplier_delete', { id })
+  }
 }
 
 /** แสดงช่องทางชำระที่ตั้งไว้ (รวมช่องทางอื่นที่กำหนดเอง) */

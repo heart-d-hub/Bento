@@ -72,3 +72,38 @@ export type SecondPiecePromoApplied = {
   fullPricePieces: number
   percentOffAdditional: number
 }
+
+/** ขั้นส่วนลดหนึ่งขั้นใน VendorPromotion */
+export type VendorPromoTier = {
+  /** จำนวนซื้อขั้นต่ำของ tier นี้ */
+  minQty: number
+  /** ส่วนลดเพิ่ม % (0 = ไม่ลด) */
+  extraDiscountPct: number
+  /** ของแถมจำนวนชิ้น (0 = ไม่แถม) */
+  freeQty: number
+}
+
+/**
+ * โปรโมชั่นผู้จัดจำหน่าย (Vendor Promotion)
+ * รองรับหลายขั้น (tiers) เช่น ซื้อ 50 → -3%, ซื้อ 100 → แถม 10
+ * ใช้ฝั่งการสั่งซื้อ (PO/Catalog) ไม่ใช่ POS
+ */
+export type VendorPromotion = {
+  id: string
+  name: string
+  enabled: boolean
+  /** YYYY-MM-DD */
+  startDate: string
+  /** YYYY-MM-DD */
+  endDate: string
+  /** productId เฉพาะเจาะจง — '' = ใช้ brand/category แทน */
+  productId: string
+  /** กรองตามแบรนด์สินค้า — '' = ทุกแบรนด์ */
+  brand: string
+  /** กรองตามหมวดสินค้า — '' = ทุกหมวด */
+  category: string
+  /** รหัส supplier — '' = ทุก supplier */
+  supplierId: string
+  /** ขั้นส่วนลด เรียงตาม minQty น้อย → มาก */
+  tiers: VendorPromoTier[]
+}

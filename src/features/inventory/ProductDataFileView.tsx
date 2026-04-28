@@ -1,4 +1,5 @@
 import { AddProductModal, type AddProductBrowseNav } from '@/features/inventory/components/AddProductModal'
+import { ProductImage } from '@/features/inventory/components/ProductImage'
 import { CrossBranchStockSortModal } from '@/features/inventory/components/CrossBranchStockSortModal'
 import { canViewCost } from '@/features/auth/authSession'
 import { useWorkspaceTabs } from '@/features/main/context/WorkspaceTabsContext'
@@ -60,6 +61,7 @@ import {
   Pencil,
   Plus,
   Printer,
+  RotateCcw,
   Ruler,
   Search,
   Store,
@@ -278,11 +280,12 @@ function applyProductFilters(
   brand: string,
   carBrand: string,
   carModel: string,
-  year: string,
+  engineLabel: string,
   driveType: string,
+  year: string,
 ): ProductMasterDetail[] {
   return products.filter((p) =>
-    productMatchesInventoryCarFilters(p, { brand, carBrand, carModel, year, driveType }, FILTER_ALL),
+    productMatchesInventoryCarFilters(p, { brand, carBrand, carModel, year, engineLabel, driveType }, FILTER_ALL),
   )
 }
 
@@ -638,15 +641,10 @@ function CrossBranchRow({ row }: { row: CrossBranchStockRow }) {
 
 type CatalogViewMode = 'list' | 'grid-5' | 'flip-card'
 
-function ProductThumb({ className }: { className?: string }) {
+function ProductThumb({ sku, className }: { sku: string; className?: string }) {
   return (
-    <div
-      className={clsx(
-        'flex aspect-[4/3] w-full items-center justify-center rounded-xl bg-slate-100',
-        className,
-      )}
-    >
-      <Package className="size-10 text-slate-400" strokeWidth={1.25} />
+    <div className={clsx('aspect-[4/3] w-full overflow-hidden rounded-xl', className)}>
+      <ProductImage sku={sku} size="md" className="!size-full !rounded-xl" />
     </div>
   )
 }
@@ -679,9 +677,18 @@ function ProductPortfolioBadges({ product }: { product: ProductMasterDetail }) {
 }
 
 function ProductCardMeta({ product }: { product: ProductMasterDetail }) {
+  const skip = (v: string | undefined) => !v || v === '—'
+  const brand = skip(product.brand) ? null : product.brand
+  const car = [
+    skip(product.carBrand) ? null : product.carBrand,
+    skip(product.carModelLabel) ? null : product.carModelLabel,
+    skip(product.yearLabel) ? null : `ปี ${product.yearLabel}`,
+  ].filter(Boolean).join(' ')
+  const parts = [brand, car || null].filter(Boolean)
+  if (!parts.length) return null
   return (
     <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-slate-500">
-      {product.brand} · {product.carBrand} {product.carModelLabel} · ปี {product.yearLabel}
+      {parts.join(' · ')}
     </p>
   )
 }
@@ -713,7 +720,7 @@ const ProductMasterGridCard = memo(function ProductMasterGridCard({
           selected ? 'border-violet-300 ring-2 ring-violet-200/70' : 'border-slate-200 hover:border-slate-300',
         )}
       >
-        <ProductThumb className="mb-2" />
+        <ProductThumb sku={product.sku} className="mb-2" />
         <p className="line-clamp-2 text-sm font-semibold leading-snug text-slate-900 pos-compact:text-[13px]">
           {product.name}
         </p>
@@ -768,9 +775,7 @@ const ProductMasterListRow = memo(function ProductMasterListRow({
       )}
     >
       <td className="w-20 py-2 pl-2.5 pr-2 pos-compact:w-[4.25rem] pos-compact:py-1.5 pos-compact:pl-2">
-        <div className="flex size-14 items-center justify-center overflow-hidden rounded-lg bg-slate-100 pos-compact:size-12">
-          <Package className="size-7 text-slate-400 pos-compact:size-6" strokeWidth={1.25} />
-        </div>
+        <ProductImage sku={product.sku} size="md" />
       </td>
       <td className="min-w-0 py-2 pr-2 pos-compact:py-1.5">
         <p className="font-medium text-slate-900 pos-compact:text-sm">{product.name}</p>
@@ -815,15 +820,16 @@ function breadcrumbLabel(
 function ProductMasterDetailContent({
   selected,
   onEdit,
+  onSoftDelete,
   onOpenVehicleManage,
 }: {
   selected: ProductMasterDetail
   onEdit?: () => void
+  onSoftDelete?: () => void
   onOpenVehicleManage?: () => void
 }) {
-  const allowCost = canViewCost()
   const tierPriceCtx = useMemo(() => sellPriceTierContextFromProduct(selected), [selected])
-  const sellTierListBasis = selected.sellTierPercentBasis === 'list_discount'
+
   return (
     <>
       <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -1133,176 +1139,106 @@ function ProductMasterDetailContent({
       </section>
 
       <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-        <SectionTitle>ข้อมูลจัดซื้อ/ขาย</SectionTitle>
-        <div className="mt-4 space-y-3">
-          {allowCost && selected.supplierListPrice !== undefined && selected.supplierListPrice > 0 ? (
-            <FieldLine label="ราคาตั้ง (ซัพพลายเออร์)">
-              <span className="tabular-nums">฿{formatBaht(selected.supplierListPrice)}</span>
-            </FieldLine>
-          ) : null}
-          {allowCost && sellTierListBasis ? (
-            <FieldLine label="ระดับราคา (%)">
-              <span className="text-sky-900">
-                จากราคาตั้งต่อชิ้น (ราคาตั้ง ÷ Scheme): ค่าบวก = แพงกว่าราคาตั้ง, ค่าลบ = ลด
-              </span>
-            </FieldLine>
-          ) : null}
-          {allowCost && selected.purchaseDiscountPcts?.some((p) => p > 0) ? (
-            <FieldLine label="ส่วนลดซื้อ (%)">
-              <span className="tabular-nums">
-                {selected.purchaseDiscountPcts
-                  .filter((p) => p > 0)
-                  .map((p) => `${p}%`)
-                  .join(' → ') || '—'}
-              </span>
-            </FieldLine>
-          ) : null}
-          {allowCost && selected.costEnteredManually ? (
-            <FieldLine label="ทุน">
-              <span className="text-emerald-800">ระบุเอง</span>
-            </FieldLine>
-          ) : null}
-          {allowCost ? (
-            <>
-              <FieldLine label="ราคาทุน(ต่อชิ้น):">
-                <span className="tabular-nums">฿{formatBaht(selected.costPrice)}</span>
-              </FieldLine>
-              <FieldLine>
-                <span className="font-medium tabular-nums">Scheme({selected.scheme})</span>
-              </FieldLine>
-              <FieldLine label="ราคาทุนเฉลี่ย:">
-                <span className="tabular-nums">฿{formatBaht(selected.avgCost)}</span>
-              </FieldLine>
-            </>
-          ) : (
-            <FieldLine>
-              <span className="font-medium tabular-nums">Scheme({selected.scheme})</span>
-            </FieldLine>
-          )}
-          {selected.sellPriceTiers &&
-          selected.sellPriceTiers.some(
-            (t) =>
-              (t.markupFromCostPercent ?? 0) !== 0 ||
-              (t.supplierListSignedPercent ?? 0) !== 0 ||
-              (t.discountFromSupplierListPercent ?? 0) > 0 ||
-              (t.explicitSmallUnitPrice ?? 0) > 0 ||
-              (t.explicitLargeUnitPrice ?? 0) > 0 ||
-              (t.explicitUnitPrices?.some((p) => p > 0) ?? false),
-          ) ? (
-            <div className="overflow-x-auto rounded-xl border border-emerald-100 bg-emerald-50/40">
-              <table className="w-full min-w-[28rem] border-collapse text-sm">
-                <thead>
-                  <tr className="border-b border-emerald-100 text-left text-xs text-slate-600">
-                    <th className="p-2 font-medium">ระดับ</th>
-                    {allowCost ? (
-                      <th className="p-2 font-medium">
-                        {sellTierListBasis ? '±% จากราคาตั้ง' : '±% จากทุน'}
-                      </th>
-                    ) : null}
-                    {normalizeSalesUnits(selected).map((u) => (
-                      <th key={u.id} className="p-2 font-medium">
-                        ราคา ({u.label})
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {selected.sellPriceTiers.map((t, i) => {
-                    const m = t.markupFromCostPercent ?? 0
-                    const dList = t.discountFromSupplierListPercent ?? 0
-                    const sList = t.supplierListSignedPercent
-                    /** บรรจุใช้แสดงผลเท่านั้น */
-                    const pieces = 1
-                    const units = normalizeSalesUnits(selected)
-                    const hasAny =
-                      m !== 0 ||
-                      (sList !== undefined && sList !== 0) ||
-                      dList > 0 ||
-                      (t.explicitSmallUnitPrice ?? 0) > 0 ||
-                      (t.explicitLargeUnitPrice ?? 0) > 0 ||
-                      (t.explicitUnitPrices?.some((p) => p > 0) ?? false)
-                    if (!hasAny) return null
-                    return (
-                      <tr key={i} className="border-b border-emerald-50/80">
-                        <td className="p-2 text-slate-600">{i + 1}</td>
-                        {allowCost ? (
-                          <td className="p-2 tabular-nums">
-                            {sellTierListBasis
-                              ? sList !== undefined && sList !== 0
-                                ? `${sList > 0 ? '+' : ''}${sList}%`
-                                : dList > 0
-                                  ? `ลด ${dList}%`
-                                  : '—'
-                              : m !== 0
-                                ? `${m > 0 ? '+' : ''}${m}%`
-                                : '—'}
+        <SectionTitle>ราคาขาย</SectionTitle>
+        <div className="mt-4">
+
+          {/* ── ราคาขาย ── */}
+          <div className="rounded-xl border border-emerald-100 bg-emerald-50/40 p-3">
+            <p className="mb-2.5 text-[10px] font-bold uppercase tracking-wide text-emerald-600">ขาย</p>
+            <div className="mb-3 flex items-baseline justify-between gap-2">
+              <span className="text-xs text-slate-500">ราคาขายหลัก</span>
+              <span className="tabular-nums text-base font-bold text-emerald-800">฿{formatBaht(selected.sellPrice)}</span>
+            </div>
+
+            {/* ตารางระดับราคา — new-style (markup/list-discount tiers) */}
+            {selected.sellPriceTiers &&
+            selected.sellPriceTiers.some(
+              (t) =>
+                (t.markupFromCostPercent ?? 0) !== 0 ||
+                (t.supplierListSignedPercent ?? 0) !== 0 ||
+                (t.discountFromSupplierListPercent ?? 0) > 0 ||
+                (t.explicitSmallUnitPrice ?? 0) > 0 ||
+                (t.explicitLargeUnitPrice ?? 0) > 0 ||
+                (t.explicitUnitPrices?.some((p) => p > 0) ?? false),
+            ) ? (
+              <div className="overflow-x-auto rounded-lg border border-emerald-100">
+                <table className="w-full min-w-[20rem] border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-emerald-100 bg-emerald-50 text-left text-slate-500">
+                      <th className="px-2 py-1.5 font-medium">ระดับ</th>
+                      {normalizeSalesUnits(selected).map((u) => (
+                        <th key={u.id} className="px-2 py-1.5 font-medium">
+                          ราคา ({u.label})
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {selected.sellPriceTiers.map((t, i) => {
+                      const m = t.markupFromCostPercent ?? 0
+                      const dList = t.discountFromSupplierListPercent ?? 0
+                      const sList = t.supplierListSignedPercent
+                      const pieces = 1
+                      const units = normalizeSalesUnits(selected)
+                      const hasAny =
+                        m !== 0 ||
+                        (sList !== undefined && sList !== 0) ||
+                        dList > 0 ||
+                        (t.explicitSmallUnitPrice ?? 0) > 0 ||
+                        (t.explicitLargeUnitPrice ?? 0) > 0 ||
+                        (t.explicitUnitPrices?.some((p) => p > 0) ?? false)
+                      if (!hasAny) return null
+                      return (
+                        <tr key={i} className="border-b border-emerald-50">
+                          <td className="px-2 py-1.5 text-slate-500">{i + 1}</td>
+                          {units.map((u, ui) => {
+                            const px = sellPriceAtUnitIndex(t, selected.costPrice, pieces, units, ui, tierPriceCtx)
+                            return (
+                              <td
+                                key={u.id}
+                                className={clsx('px-2 py-1.5 tabular-nums', ui === 0 ? 'font-semibold text-emerald-800' : 'text-emerald-700')}
+                              >
+                                {px !== null ? `฿${px.toLocaleString('th-TH', { maximumFractionDigits: 2 })}` : '—'}
+                              </td>
+                            )
+                          })}
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ) : selected.sellPriceTiers?.some((t) => t.price > 0) ? (
+              /* ตารางระดับราคา — old-style (explicit price + discount%) */
+              <div className="overflow-x-auto rounded-lg border border-emerald-100">
+                <table className="w-full min-w-[16rem] border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-emerald-100 bg-emerald-50 text-left text-slate-500">
+                      <th className="px-2 py-1.5 font-medium">ระดับ</th>
+                      <th className="px-2 py-1.5 font-medium">ราคา</th>
+                      <th className="px-2 py-1.5 font-medium">ลด%</th>
+                      <th className="px-2 py-1.5 font-medium">หลังลด</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {selected.sellPriceTiers.map((t, i) =>
+                      t.price > 0 ? (
+                        <tr key={i} className="border-b border-emerald-50">
+                          <td className="px-2 py-1.5 text-slate-500">{i + 1}</td>
+                          <td className="px-2 py-1.5 tabular-nums">฿{formatBaht(t.price)}</td>
+                          <td className="px-2 py-1.5 tabular-nums text-slate-600">{t.discountPercent}%</td>
+                          <td className="px-2 py-1.5 tabular-nums font-semibold text-emerald-800">
+                            ฿{effectiveSellPriceTier(t).toLocaleString('th-TH', { maximumFractionDigits: 2 })}
                           </td>
-                        ) : null}
-                        {units.map((u, ui) => {
-                          const px = sellPriceAtUnitIndex(
-                            t,
-                            selected.costPrice,
-                            pieces,
-                            units,
-                            ui,
-                            tierPriceCtx,
-                          )
-                          return (
-                            <td
-                              key={u.id}
-                              className={clsx(
-                                'p-2 tabular-nums',
-                                ui === 0 ? 'font-medium text-emerald-800' : 'text-emerald-900',
-                              )}
-                            >
-                              {px !== null
-                                ? `฿${px.toLocaleString('th-TH', { maximumFractionDigits: 2 })}`
-                                : '—'}
-                            </td>
-                          )
-                        })}
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
-          ) : selected.sellPriceTiers && selected.sellPriceTiers.some((t) => t.price > 0) ? (
-            <div className="overflow-x-auto rounded-xl border border-emerald-100 bg-emerald-50/40">
-              <table className="w-full min-w-[20rem] border-collapse text-sm">
-                <thead>
-                  <tr className="border-b border-emerald-100 text-left text-xs text-slate-600">
-                    <th className="p-2 font-medium">ระดับ</th>
-                    <th className="p-2 font-medium">ราคา</th>
-                    <th className="p-2 font-medium">ลด%</th>
-                    <th className="p-2 font-medium">หลังลด</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {selected.sellPriceTiers.map((t, i) =>
-                    t.price > 0 ? (
-                      <tr key={i} className="border-b border-emerald-50/80">
-                        <td className="p-2 text-slate-600">{i + 1}</td>
-                        <td className="p-2 tabular-nums">฿{formatBaht(t.price)}</td>
-                        <td className="p-2 tabular-nums">{t.discountPercent}%</td>
-                        <td className="p-2 font-medium tabular-nums text-emerald-800">
-                          ฿{effectiveSellPriceTier(t).toLocaleString('th-TH', { maximumFractionDigits: 2 })}
-                        </td>
-                      </tr>
-                    ) : null,
-                  )}
-                </tbody>
-              </table>
-            </div>
-          ) : null}
-          <FieldLine label="ราคาขาย (หลักในรายการ):" valueClassName="text-base font-semibold text-emerald-800">
-            <span className="tabular-nums">฿{formatBaht(selected.sellPrice)}</span>
-          </FieldLine>
-          {!allowCost ? (
-            <p className="text-xs text-slate-500">
-              หมายเหตุ: ซ่อนข้อมูลทุน/กำไรสำหรับพนักงาน (แสดงเฉพาะผู้มีสิทธิ์)
-            </p>
-          ) : null}
+                        </tr>
+                      ) : null,
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+
+          </div>
         </div>
       </section>
 
@@ -1318,10 +1254,12 @@ function ProductMasterDetailContent({
         </button>
         <button
           type="button"
-          className="inline-flex items-center gap-1.5 rounded-xl border border-rose-200 bg-white px-3 py-2 text-sm font-medium text-rose-700 hover:bg-rose-50"
+          onClick={onSoftDelete}
+          disabled={!onSoftDelete}
+          className="inline-flex items-center gap-1.5 rounded-xl border border-rose-200 bg-white px-3 py-2 text-sm font-medium text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50"
         >
           <Trash2 className="size-4" />
-          ลบสินค้า
+          ย้ายไปถังขยะ
         </button>
         <button
           type="button"
@@ -1348,8 +1286,9 @@ type ProductDataFileViewCache = {
   filterBrand: string
   filterCarBrand: string
   filterCarModel: string
-  filterYear: string
+  filterEngine: string
   filterDrive: string
+  filterYear: string
   catalogSort: MasterCatalogSort
   catalogViewMode: CatalogViewMode
   filterInStoreOnly: boolean
@@ -1376,8 +1315,9 @@ function readCache(): ProductDataFileViewCache {
     filterBrand: FILTER_ALL,
     filterCarBrand: FILTER_ALL,
     filterCarModel: FILTER_ALL,
-    filterYear: FILTER_ALL,
+    filterEngine: FILTER_ALL,
     filterDrive: FILTER_ALL,
+    filterYear: FILTER_ALL,
     catalogSort: { key: 'name', dir: 'asc' },
     catalogViewMode: 'list',
     filterInStoreOnly: true,
@@ -1411,8 +1351,9 @@ export function ProductDataFileView() {
   const [filterBrand, setFilterBrand] = useState(_c.filterBrand)
   const [filterCarBrand, setFilterCarBrand] = useState(_c.filterCarBrand)
   const [filterCarModel, setFilterCarModel] = useState(_c.filterCarModel)
-  const [filterYear, setFilterYear] = useState(_c.filterYear)
+  const [filterEngine, setFilterEngine] = useState(_c.filterEngine)
   const [filterDrive, setFilterDrive] = useState(_c.filterDrive)
+  const [filterYear, setFilterYear] = useState(_c.filterYear)
   const [catalogSort, setCatalogSort] = useState<MasterCatalogSort>(_c.catalogSort)
   /** A=ใน/กว้าง → inner, B=นอก/ยาว → outer, C=หนา/สูง → height */
   const [measA, setMeasA] = useState(_c.measA)
@@ -1428,6 +1369,26 @@ export function ProductDataFileView() {
   /** เปิด = แสดงเฉพาะรายการที่ยังไม่ถูกจัดหมวดตามระดับที่เลือก */
   const [showMissingCategoryOnly, setShowMissingCategoryOnly] = useState(_c.showMissingCategoryOnly)
   const [products, setProducts] = useState<ProductMasterDetail[]>(() => [...getProductMasterList()])
+  const [showBin, setShowBin] = useState(false)
+  const [hardDeleteTarget, setHardDeleteTarget] = useState<ProductMasterDetail | null>(null)
+
+  const activeProducts = useMemo(() => products.filter((p) => !p.deletedAt), [products])
+  const binProducts = useMemo(() => products.filter((p) => !!p.deletedAt), [products])
+
+  const softDelete = useCallback((id: string) => {
+    setProducts((prev) => prev.map((x) => x.id === id ? { ...x, deletedAt: new Date().toISOString() } : x))
+    setSelectedProductId((cur) => (cur === id ? null : cur))
+  }, [])
+
+  const restoreProduct = useCallback((id: string) => {
+    setProducts((prev) => prev.map((x) => x.id === id ? { ...x, deletedAt: undefined } : x))
+  }, [])
+
+  const permanentDelete = useCallback((id: string) => {
+    setProducts((prev) => prev.filter((x) => x.id !== id))
+    setHardDeleteTarget(null)
+  }, [])
+
   const [productModalOpen, setProductModalOpen] = useState(false)
   const [modalEditProduct, setModalEditProduct] = useState<ProductMasterDetail | null>(null)
   const [addProductCopySource, setAddProductCopySource] = useState<ProductMasterDetail | null>(null)
@@ -1445,8 +1406,9 @@ export function ProductDataFileView() {
       filterBrand,
       filterCarBrand,
       filterCarModel,
-      filterYear,
+      filterEngine,
       filterDrive,
+      filterYear,
       catalogSort,
       catalogViewMode,
       filterInStoreOnly,
@@ -1462,7 +1424,7 @@ export function ProductDataFileView() {
     }
   }, [
     navSelection, expandedMain, expandedSub, q, hasSearched,
-    filterBrand, filterCarBrand, filterCarModel, filterYear, filterDrive,
+    filterBrand, filterCarBrand, filterCarModel, filterEngine, filterDrive, filterYear,
     catalogSort, catalogViewMode, filterInStoreOnly, showMissingCategoryOnly, selectedProductId,
     measA, measA2, measB, measC, measTol, measActive, measPanelOpen,
   ])
@@ -1521,8 +1483,8 @@ export function ProductDataFileView() {
   }, [categoryTree])
 
   const fromNav = useMemo(
-    () => productsForNavSelection(navSelection, categoryTree, products),
-    [navSelection, categoryTree, products],
+    () => productsForNavSelection(navSelection, categoryTree, activeProducts),
+    [navSelection, categoryTree, activeProducts],
   )
 
   const missingCategoryMeta = useMemo(() => {
@@ -1606,8 +1568,8 @@ export function ProductDataFileView() {
   )
 
   const filtered = useMemo(
-    () => applyProductFilters(afterSearch, filterBrand, filterCarBrand, filterCarModel, filterYear, filterDrive),
-    [afterSearch, filterBrand, filterCarBrand, filterCarModel, filterYear, filterDrive],
+    () => applyProductFilters(afterSearch, filterBrand, filterCarBrand, filterCarModel, filterEngine, filterDrive, filterYear),
+    [afterSearch, filterBrand, filterCarBrand, filterCarModel, filterEngine, filterDrive, filterYear],
   )
 
   const measureInput = useMemo(() => {
@@ -1660,23 +1622,25 @@ export function ProductDataFileView() {
   }
 
   const filterOptions = useMemo(() => {
-    const base = filterInStoreOnly ? products.filter((p) => p.inStoreCatalog !== false) : products
+    const base = filterInStoreOnly ? activeProducts.filter((p) => p.inStoreCatalog !== false) : activeProducts
     const brands = [...new Set(base.map((p) => p.brand))].sort((a, b) => a.localeCompare(b, 'th'))
-    const { carBrands, models, years, driveTypes } = collectInventoryCarFilterOptions(base, {
+    const { carBrands, models, engines, driveTypes, years } = collectInventoryCarFilterOptions(base, {
       carBrand: filterCarBrand,
       carModel: filterCarModel,
+      engineLabel: filterEngine,
+      driveType: filterDrive,
       filterAll: FILTER_ALL,
     })
-    return { brands, carBrands, models, years, driveTypes }
-  }, [products, filterInStoreOnly, filterCarBrand, filterCarModel])
+    return { brands, carBrands, models, engines, driveTypes, years }
+  }, [activeProducts, filterInStoreOnly, filterCarBrand, filterCarModel, filterEngine, filterDrive])
 
   const hasOrphans = useMemo(() => {
     const names = new Set(categoryTree.map((m) => norm(m.name)))
-    return products.some((p) => !names.has(norm(p.category)))
-  }, [categoryTree, products])
+    return activeProducts.some((p) => !names.has(norm(p.category)))
+  }, [categoryTree, activeProducts])
 
   const navCounts = useMemo(() => {
-    const base = filterInStoreOnly ? products.filter((p) => p.inStoreCatalog !== false) : products
+    const base = filterInStoreOnly ? activeProducts.filter((p) => p.inStoreCatalog !== false) : activeProducts
     const mainByName = new Map<string, number>()
     const subByMainSub = new Map<string, number>()
     const subSubByMainSubSub = new Map<string, number>()
@@ -1701,7 +1665,7 @@ export function ProductDataFileView() {
       }
     }
     return { mainByName, subByMainSub, subSubByMainSubSub, orphan, total: base.length }
-  }, [categoryTree, products, filterInStoreOnly])
+  }, [categoryTree, activeProducts, filterInStoreOnly])
 
   const detailProduct = useMemo(
     () => (detailProductId ? products.find((p) => p.id === detailProductId) : undefined),
@@ -1896,6 +1860,15 @@ export function ProductDataFileView() {
                 }
               : undefined
           }
+          onSoftDelete={
+            allowCost
+              ? () => {
+                  softDelete(detailProduct.id)
+                  setPage('browse')
+                  setDetailProductId(null)
+                }
+              : undefined
+          }
           onOpenVehicleManage={openVehicleManage}
         />
         <AddProductModal
@@ -1940,10 +1913,10 @@ export function ProductDataFileView() {
         <nav className="min-h-0 max-h-[min(70vh,36rem)] flex-1 overflow-y-auto overflow-x-hidden px-1.5 py-2 pos-compact:max-h-[min(65vh,28rem)] pos-compact:py-1.5">
           <button
             type="button"
-            onClick={() => setNavSelection({ type: 'all' })}
+            onClick={() => { setNavSelection({ type: 'all' }); setShowBin(false) }}
             className={clsx(
               'mb-1 flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-sm font-medium pos-compact:py-1 pos-compact:text-[13px]',
-              navSelection.type === 'all'
+              navSelection.type === 'all' && !showBin
                 ? 'bg-teal-100 text-teal-900 ring-1 ring-teal-200/80'
                 : 'text-slate-800 hover:bg-white',
             )}
@@ -2114,10 +2087,10 @@ export function ProductDataFileView() {
           {hasOrphans && (
             <button
               type="button"
-              onClick={() => setNavSelection({ type: 'orphan' })}
+              onClick={() => { setNavSelection({ type: 'orphan' }); setShowBin(false) }}
               className={clsx(
                 'mt-2 flex w-full items-center justify-between gap-2 rounded-lg border border-amber-200/80 px-2 py-2 text-left text-[11px] font-medium leading-snug pos-compact:text-[10px]',
-                navSelection.type === 'orphan'
+                navSelection.type === 'orphan' && !showBin
                   ? 'bg-amber-100 text-amber-950 ring-1 ring-amber-200/90'
                   : 'bg-amber-50/80 text-amber-900 hover:bg-amber-100/90',
               )}
@@ -2128,10 +2101,89 @@ export function ProductDataFileView() {
               </span>
             </button>
           )}
+          {/* Bin button */}
+          <button
+            type="button"
+            onClick={() => setShowBin(true)}
+            className={clsx(
+              'mt-2 flex w-full items-center justify-between gap-2 rounded-lg border px-2 py-2 text-left text-[11px] font-medium leading-snug pos-compact:text-[10px]',
+              showBin
+                ? 'border-rose-200/80 bg-rose-100 text-rose-950 ring-1 ring-rose-200/90'
+                : 'border-slate-200/60 bg-white/60 text-slate-500 hover:bg-slate-50',
+            )}
+          >
+            <span className="flex items-center gap-1.5">
+              <Trash2 className="size-3 shrink-0" />
+              ถังขยะ
+            </span>
+            {binProducts.length > 0 && (
+              <span className={clsx('shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-semibold tabular-nums',
+                showBin ? 'bg-rose-200 text-rose-900' : 'bg-slate-100 text-slate-500'
+              )}>
+                {binProducts.length.toLocaleString('th-TH')}
+              </span>
+            )}
+          </button>
         </nav>
       </aside>
 
       <div className="min-w-0 flex-1 space-y-3 pos-compact:space-y-2">
+        {showBin ? (
+          /* ─── Bin view ─── */
+          <div className="rounded-2xl border border-rose-100 bg-white shadow-sm">
+            <div className="flex items-center justify-between gap-4 border-b border-rose-100 bg-rose-50/60 px-4 py-3">
+              <div className="flex items-center gap-2">
+                <Trash2 className="size-4 text-rose-500" />
+                <p className="text-sm font-semibold text-rose-900">ถังขยะ</p>
+                <span className="rounded-full bg-rose-200 px-2 py-0.5 text-[11px] font-bold tabular-nums text-rose-900">
+                  {binProducts.length}
+                </span>
+              </div>
+              <p className="text-xs text-rose-700">สินค้าที่ถูกลบจะอยู่ที่นี่ — กด «คืนสินค้า» เพื่อนำกลับมา หรือ «ลบถาวร» เพื่อลบออกจากระบบ</p>
+            </div>
+            {binProducts.length === 0 ? (
+              <div className="flex flex-col items-center justify-center gap-2 py-16 text-slate-400">
+                <Trash2 className="size-10 stroke-[1]" />
+                <p className="text-sm">ถังขยะว่างเปล่า</p>
+              </div>
+            ) : (
+              <ul className="divide-y divide-slate-100">
+                {binProducts.map((p) => (
+                  <li key={p.id} className="flex items-center gap-3 px-4 py-3 hover:bg-rose-50/40">
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-semibold text-slate-800">{p.name}</p>
+                      <p className="text-[11px] text-slate-500">
+                        SKU: <span className="font-mono">{p.sku}</span>
+                        {p.deletedAt && (
+                          <span className="ml-2 text-slate-400">
+                            ลบเมื่อ {new Date(p.deletedAt).toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                          </span>
+                        )}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => restoreProduct(p.id)}
+                      className="flex shrink-0 items-center gap-1.5 rounded-lg border border-teal-200 bg-teal-50 px-2.5 py-1.5 text-xs font-semibold text-teal-800 hover:bg-teal-100"
+                    >
+                      <RotateCcw className="size-3.5" />
+                      คืนสินค้า
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setHardDeleteTarget(p)}
+                      className="flex shrink-0 items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-100"
+                    >
+                      <Trash2 className="size-3.5" />
+                      ลบถาวร
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        ) : (
+        <>
         <nav className="text-[11px] text-slate-500 pos-compact:text-[10px]" aria-label="Breadcrumb">
           <span className="text-slate-400">หน้าแรก</span>
           <span className="mx-1 text-slate-300">/</span>
@@ -2202,7 +2254,7 @@ export function ProductDataFileView() {
           browseNav={navSelection}
         />
 
-        <div className="grid w-full gap-1.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        <div className="grid w-full gap-1.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
           <label className="block min-w-0">
             <span className="mb-0.5 block text-[11px] text-slate-500">แบรนด์</span>
             <select className={selectClass} value={filterBrand} onChange={(e) => setFilterBrand(e.target.value)}>
@@ -2216,7 +2268,7 @@ export function ProductDataFileView() {
           </label>
           <label className="block min-w-0">
             <span className="mb-0.5 block text-[11px] text-slate-500">ยี่ห้อรถ</span>
-            <select className={selectClass} value={filterCarBrand} onChange={(e) => { setFilterCarBrand(e.target.value); setFilterCarModel(FILTER_ALL); setFilterYear(FILTER_ALL); setFilterDrive(FILTER_ALL) }}>
+            <select className={selectClass} value={filterCarBrand} onChange={(e) => { setFilterCarBrand(e.target.value); setFilterCarModel(FILTER_ALL); setFilterEngine(FILTER_ALL); setFilterDrive(FILTER_ALL); setFilterYear(FILTER_ALL) }}>
               <option value={FILTER_ALL}>{FILTER_ALL}</option>
               {filterOptions.carBrands.map((b) => (
                 <option key={b} value={b}>
@@ -2227,7 +2279,7 @@ export function ProductDataFileView() {
           </label>
           <label className="block min-w-0">
             <span className="mb-0.5 block text-[11px] text-slate-500">รุ่นรถ</span>
-            <select className={selectClass} value={filterCarModel} onChange={(e) => { setFilterCarModel(e.target.value); setFilterYear(FILTER_ALL); setFilterDrive(FILTER_ALL) }}>
+            <select className={selectClass} value={filterCarModel} onChange={(e) => { setFilterCarModel(e.target.value); setFilterEngine(FILTER_ALL); setFilterDrive(FILTER_ALL); setFilterYear(FILTER_ALL) }}>
               <option value={FILTER_ALL}>{FILTER_ALL}</option>
               {filterOptions.models.map((m) => (
                 <option key={m} value={m}>
@@ -2237,8 +2289,17 @@ export function ProductDataFileView() {
             </select>
           </label>
           <label className="block min-w-0">
+            <span className="mb-0.5 block text-[11px] text-slate-500">เครื่องยนต์</span>
+            <select className={selectClass} value={filterEngine} onChange={(e) => { setFilterEngine(e.target.value); setFilterDrive(FILTER_ALL); setFilterYear(FILTER_ALL) }}>
+              <option value={FILTER_ALL}>{FILTER_ALL}</option>
+              {filterOptions.engines.map((en) => (
+                <option key={en} value={en}>{en}</option>
+              ))}
+            </select>
+          </label>
+          <label className="block min-w-0">
             <span className="mb-0.5 block text-[11px] text-slate-500">ขับเคลื่อน</span>
-            <select className={selectClass} value={filterDrive} onChange={(e) => setFilterDrive(e.target.value)}>
+            <select className={selectClass} value={filterDrive} onChange={(e) => { setFilterDrive(e.target.value); setFilterYear(FILTER_ALL) }}>
               <option value={FILTER_ALL}>{FILTER_ALL}</option>
               {filterOptions.driveTypes.map((d) => (
                 <option key={d} value={d}>{d}</option>
@@ -2790,25 +2851,51 @@ export function ProductDataFileView() {
                 className="block w-full rounded-md px-2 py-1.5 text-left text-xs text-red-700 hover:bg-red-50"
                 role="menuitem"
                 onClick={() => {
-                  const p = products.find((x) => x.id === ctx.productId)
-                  if (!p) return
-                  if (
-                    !window.confirm(
-                      `ลบสินค้า "${p.name}" (${p.sku}) ออกจากแฟ้มมาสเตอร์?\n\nการลบจะบันทึกทันทีและไม่สามารถกู้คืนได้`,
-                    )
-                  ) {
-                    return
-                  }
+                  const id = ctx.productId
                   setCtx(null)
-                  setProducts((prev) => prev.filter((x) => x.id !== p.id))
-                  setSelectedProductId((cur) => (cur === p.id ? null : cur))
+                  softDelete(id)
                 }}
               >
-                ลบรายการ
+                ย้ายไปถังขยะ
               </button>
             </div>
           </div>
         ) : null}
+        </>
+        )}
+
+        {/* Hard-delete confirmation modal */}
+        {hardDeleteTarget && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+            <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-xl">
+              <div className="mb-4 flex size-11 items-center justify-center rounded-full bg-rose-100">
+                <Trash2 className="size-5 text-rose-600" />
+              </div>
+              <p className="text-base font-semibold text-slate-900">ลบถาวร?</p>
+              <p className="mt-1.5 text-sm text-slate-600">
+                สินค้า <span className="font-semibold">"{hardDeleteTarget.name}"</span>{' '}
+                <span className="font-mono text-xs text-slate-500">({hardDeleteTarget.sku})</span>{' '}
+                จะถูกลบออกจากระบบทั้งหมดและไม่สามารถกู้คืนได้
+              </p>
+              <div className="mt-5 flex gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => setHardDeleteTarget(null)}
+                  className="flex-1 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                >
+                  ยกเลิก
+                </button>
+                <button
+                  type="button"
+                  onClick={() => permanentDelete(hardDeleteTarget.id)}
+                  className="flex-1 rounded-xl bg-rose-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-rose-700"
+                >
+                  ลบถาวร
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )

@@ -81,4 +81,16 @@ export const MOCK_STAFF_USERS: StaffUser[] = [
     startDate: '2021-03-20',
     status: 'active',
   },
+  {
+    id: 'staff-4',
+    username: 'herb',
+    displayNamePos: 'Herb — CEO',
+    nationalId: '0000000000000',
+    photoDataUrl: null,
+    password: '1234',
+    role: 'CEO',
+    isAdmin: true,
+    startDate: '2020-01-01',
+    status: 'active',
+  },
 ]

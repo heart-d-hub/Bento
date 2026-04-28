@@ -116,6 +116,7 @@ model Product {
   subCategory String?
   location    String?
   stockMode   String?
+  costPrice   Float    @default(0)
   minStock    Float    @default(0)
   maxStock    Float?
   isActive    Boolean  @default(true)
@@ -129,6 +130,7 @@ model Product {
   purchaseOrderLines PurchaseOrderLine[]
   stockMovements     StockMovement[]
   priceLevels        ProductPriceLevel[]
+  returnLines        SaleReturnLine[]
 
   @@index([name])
   @@index([category])
@@ -150,8 +152,61 @@ model ProductPriceLevel {
   @@unique([productId, levelCode, unitIndex])
 }
 
+model CreditNote {
+  id             String     @id @default(cuid())
+  creditNoteNo   String     @unique
+  originalSaleId String
+  originalSale   Sale       @relation(fields: [originalSaleId], references: [id], onDelete: Restrict)
+  returnId       String     @unique
+  return         SaleReturn @relation(fields: [returnId], references: [id], onDelete: Cascade)
+  creditNoteDate DateTime   @default(now())
+  beforeVat      Float      @default(0)
+  vatAmount      Float      @default(0)
+  totalAmount    Float      @default(0)
+  createdAt      DateTime   @default(now())
+
+  @@index([originalSaleId])
+}
+
+model Expense {
+  id            String   @id @default(cuid())
+  expenseDate   DateTime @db.Date
+  category      String
+  amount        Float    @default(0)
+  note          String?
+  payee         String?
+  paymentMethod String   @default("cash")
+  branchId      String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([expenseDate])
+  @@index([category])
+}
+
 /** แฟ้มข้อมูลสินค้า (มาสเตอร์) — payload = ProductMasterDetail แบบ JSON */
 model ProductMasterRow {
+  id        String   @id
+  payload   Json
+  updatedAt DateTime @updatedAt
+}
+
+/** แฟ้มผู้จำหน่าย — payload = SupplierProfile แบบ JSON */
+model SupplierRow {
+  id        String   @id
+  payload   Json
+  updatedAt DateTime @updatedAt
+}
+
+/** ใบสั่งซื้อ — payload = PurchaseOrder แบบ JSON */
+model PurchaseOrderRow {
+  id        String   @id
+  payload   Json
+  updatedAt DateTime @updatedAt
+}
+
+/** สแนปช็อตโปรโมชั่น — id = 'buyQty' | 'percentOff' | 'secondPiece' */
+model PromotionsSnapshot {
   id        String   @id
   payload   Json
   updatedAt DateTime @updatedAt
@@ -182,11 +237,48 @@ model Sale {
   memberId String?
   member   Member? @relation(fields: [memberId], references: [id], onDelete: SetNull)
 
-  lines SaleLine[]
+  lines       SaleLine[]
+  returns     SaleReturn[]
+  creditNotes CreditNote[]
+
+  voidedAt   DateTime?
+  voidReason String?
 
   @@index([docDate])
   @@index([paymentType])
   @@index([branchId, docDate])
+}
+
+model SaleReturn {
+  id             String   @id @default(cuid())
+  returnNo       String   @unique
+  originalSaleId String
+  originalSale   Sale     @relation(fields: [originalSaleId], references: [id], onDelete: Restrict)
+  returnDate     DateTime @default(now())
+  reason         String?
+  refundMethod   String   @default("cash")
+  totalRefund    Float    @default(0)
+  createdAt      DateTime @default(now())
+
+  lines      SaleReturnLine[]
+  creditNote CreditNote?
+
+  @@index([originalSaleId])
+}
+
+model SaleReturnLine {
+  id                 String     @id @default(cuid())
+  returnId           String
+  return             SaleReturn @relation(fields: [returnId], references: [id], onDelete: Cascade)
+  productId          String
+  product            Product    @relation(fields: [productId], references: [id], onDelete: Restrict)
+  originalSaleLineId String?
+  productName        String
+  qty                Float
+  unitPrice          Float
+  lineTotal          Float
+
+  @@index([returnId])
 }
 
 /** ลำดับเลขบิล POS (retail) / ใบกำกับ (tax) — คีย์ = ตามแอป (เครื่อง+สาขา+พ.ศ. 2 หลัก+เดือน) */
@@ -204,6 +296,7 @@ model SaleLine {
   unitPrice       Float
   discount        Float    @default(0)
   lineTotal       Float
+  costAtSale      Float    @default(0)
   priceLevelLabel String?
   priceLevelIndex Int?
   priceTagLabel   String?

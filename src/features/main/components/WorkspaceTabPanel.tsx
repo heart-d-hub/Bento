@@ -1,3 +1,7 @@
+import { useMemo } from 'react'
+import { BankWorkspacePage } from '@/features/bank/BankWorkspacePage'
+import { ExpenseWorkspacePage } from '@/features/expense/ExpenseWorkspacePage'
+import { ReturnsWorkspacePage } from '@/features/returns/ReturnsWorkspacePage'
 import { DashboardLayoutWorkspacePage } from '@/features/main/DashboardLayoutWorkspacePage'
 import { TaskNotepadHistoryWorkspacePage } from '@/features/main/TaskNotepadHistoryWorkspacePage'
 import { GenericTabPlaceholder } from '@/features/main/components/GenericTabPlaceholder'
@@ -17,86 +21,62 @@ import { PromotionsWorkspacePage } from '@/features/promotions/PromotionsWorkspa
 import { ReportWorkspacePage } from '@/features/report/ReportWorkspacePage'
 import { CatalogWorkspacePage } from '@/features/catalog/CatalogWorkspacePage'
 import { LabelPrintWorkspacePage } from '@/features/inventory/LabelPrintWorkspacePage'
+import { ClockInWorkspacePage } from '@/features/clockin/ClockInWorkspacePage'
+import { GlobalDashboardWorkspacePage } from '@/features/globaldashboard/GlobalDashboardWorkspacePage'
+import { TransportWorkspacePage } from '@/features/transport/TransportWorkspacePage'
 import { clsx } from 'clsx'
+
+const KNOWN_TAB_IDS = new Set([
+  'pos', 'sales-history', 'day-summary', 'car-model', 'buy', 'catalog',
+  'label-print', 'branch-stock', 'central', 'ar-ap', 'members', 'promotions',
+  'settings', 'dashboard-layout', 'task-notepad-history', 'activity',
+  'bank', 'expense', 'returns', 'report', 'clockin', 'global-dashboard', 'transport',
+])
 
 type WorkspaceTabPanelProps = {
   className?: string
 }
 
 export function WorkspaceTabPanel({ className }: WorkspaceTabPanelProps) {
-  const { activeTabId } = useWorkspaceTabs()
+  const { activeTabId, tabs } = useWorkspaceTabs()
 
-  if (!activeTabId) {
-    return null
-  }
+  const openIds = useMemo(() => new Set(tabs.map((t) => t.id)), [tabs])
 
-  if (activeTabId === 'pos') {
-    return <PosWorkspacePage className={clsx('flex-1', className)} />
-  }
+  if (openIds.size === 0) return null
 
-  if (activeTabId === 'sales-history') {
-    return <SalesHistoryWorkspacePage className={clsx('flex-1', className)} />
-  }
+  // Returns className for a tab: visible when active, hidden otherwise
+  const tab = (id: string) => clsx('flex-1', className, activeTabId !== id && 'hidden')
 
-  if (activeTabId === 'day-summary') {
-    return <DaySummaryWorkspacePage className={clsx('flex-1', className)} />
-  }
-
-  if (activeTabId === 'car-model') {
-    return <VehicleWorkspacePage className={clsx('flex-1', className)} />
-  }
-
-  if (activeTabId === 'buy') {
-    return <BuyWorkspacePage className={clsx('flex-1', className)} />
-  }
-
-  if (activeTabId === 'catalog') {
-    return <CatalogWorkspacePage className={clsx('flex-1', className)} />
-  }
-
-  if (activeTabId === 'label-print') {
-    return <LabelPrintWorkspacePage className={clsx('flex-1', className)} />
-  }
-
-  if (activeTabId === 'branch-stock') {
-    return <BranchStockWorkspacePage className={clsx('flex-1', className)} />
-  }
-
-  if (activeTabId === 'central') {
-    return <CentralWarehouseWorkspacePage className={clsx('flex-1', className)} />
-  }
-
-  if (activeTabId === 'ar-ap') {
-    return <ReceivablesPayablesWorkspacePage className={clsx('flex-1', className)} />
-  }
-
-  if (activeTabId === 'members') {
-    return <MembersWorkspacePage className={clsx('flex-1', className)} />
-  }
-
-  if (activeTabId === 'promotions') {
-    return <PromotionsWorkspacePage className={clsx('flex-1', className)} />
-  }
-
-  if (activeTabId === 'settings') {
-    return <SettingsWorkspacePage className={clsx('flex-1', className)} />
-  }
-
-  if (activeTabId === 'dashboard-layout') {
-    return <DashboardLayoutWorkspacePage className={clsx('flex-1', className)} />
-  }
-
-  if (activeTabId === 'task-notepad-history') {
-    return <TaskNotepadHistoryWorkspacePage className={clsx('flex-1', className)} />
-  }
-
-  if (activeTabId === 'activity') {
-    return <ActivityLogWorkspacePage className={clsx('flex-1', className)} />
-  }
-
-  if (activeTabId === 'report') {
-    return <ReportWorkspacePage className={clsx('flex-1', className)} />
-  }
-
-  return <GenericTabPlaceholder className={className} />
+  return (
+    <>
+      {openIds.has('pos') && <PosWorkspacePage className={tab('pos')} />}
+      {openIds.has('sales-history') && <SalesHistoryWorkspacePage className={tab('sales-history')} />}
+      {openIds.has('day-summary') && <DaySummaryWorkspacePage className={tab('day-summary')} />}
+      {openIds.has('car-model') && <VehicleWorkspacePage className={tab('car-model')} />}
+      {openIds.has('buy') && <BuyWorkspacePage className={tab('buy')} />}
+      {openIds.has('catalog') && <CatalogWorkspacePage className={tab('catalog')} />}
+      {openIds.has('label-print') && <LabelPrintWorkspacePage className={tab('label-print')} />}
+      {openIds.has('branch-stock') && <BranchStockWorkspacePage className={tab('branch-stock')} />}
+      {openIds.has('central') && <CentralWarehouseWorkspacePage className={tab('central')} />}
+      {openIds.has('ar-ap') && <ReceivablesPayablesWorkspacePage className={tab('ar-ap')} />}
+      {openIds.has('members') && <MembersWorkspacePage className={tab('members')} />}
+      {openIds.has('promotions') && <PromotionsWorkspacePage className={tab('promotions')} />}
+      {openIds.has('settings') && <SettingsWorkspacePage className={tab('settings')} />}
+      {openIds.has('dashboard-layout') && <DashboardLayoutWorkspacePage className={tab('dashboard-layout')} />}
+      {openIds.has('task-notepad-history') && <TaskNotepadHistoryWorkspacePage className={tab('task-notepad-history')} />}
+      {openIds.has('activity') && <ActivityLogWorkspacePage className={tab('activity')} />}
+      {openIds.has('bank') && <BankWorkspacePage className={tab('bank')} />}
+      {openIds.has('expense') && <ExpenseWorkspacePage className={tab('expense')} />}
+      {openIds.has('returns') && <ReturnsWorkspacePage className={tab('returns')} />}
+      {openIds.has('report') && <ReportWorkspacePage className={tab('report')} />}
+      {openIds.has('clockin') && <ClockInWorkspacePage className={tab('clockin')} />}
+      {openIds.has('global-dashboard') && <GlobalDashboardWorkspacePage className={tab('global-dashboard')} />}
+      {openIds.has('transport') && <TransportWorkspacePage className={tab('transport')} />}
+      {tabs
+        .filter((t) => !KNOWN_TAB_IDS.has(t.id))
+        .map((t) => (
+          <GenericTabPlaceholder key={t.id} className={tab(t.id)} />
+        ))}
+    </>
+  )
 }

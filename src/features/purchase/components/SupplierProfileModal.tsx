@@ -5,9 +5,22 @@ import {
   nextSupplierDisplayCode,
   upsertSupplierProfile,
   type SupplierProfile,
+  type SupplierBankAccount,
+  type EarlyPayDiscount,
 } from '@/features/purchase/data/supplierDirectoryStore'
-import { Pencil, Save, UserPlus, X } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import {
+  getSupplierCatalog,
+  saveSupplierCatalogItems,
+  type SupplierCatalogItem,
+} from '@/features/purchase/data/supplierCatalogStore'
+import { getPosCatalogProducts } from '@/features/pos/data/posCatalogMerge'
+import {
+  loadTransportDirectory,
+  TRANSPORT_DIRECTORY_CHANGED_EVENT,
+} from '@/features/transport/data/transportDirectoryStore'
+import { clsx } from 'clsx'
+import { Pencil, Plus, Save, Tag, Trash2, UserPlus, X } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 /** เลย์เอาต์ช่องตัวเลขเครดิตให้สอดคล้องกับฟอร์มสมาชิก */
 const supplierCreditTinyNumClass =
@@ -22,11 +35,7 @@ type SupplierProfileModalProps = {
   onSaved: (profile: SupplierProfile, mode: 'create' | 'edit') => void
 }
 
-const SHIPPING_PRESET_OPTIONS = [
-  { value: '', label: '-- ไม่ระบุ --' },
-  { value: 'NIM Express', label: 'NIM Express' },
-  { value: 'Kerry Express', label: 'Kerry Express' },
-  { value: 'PL ขนส่ง', label: 'PL ขนส่ง' },
+const SHIPPING_EXTRA_OPTIONS = [
   { value: 'รับสินค้าเอง', label: 'รับสินค้าเอง' },
 ] as const
 
@@ -55,11 +64,249 @@ function parseBrandsComma(s: string): string[] | undefined {
   return parts.length ? parts : undefined
 }
 
+function BrandTagInput({
+  brands,
+  onChange,
+}: {
+  brands: string[]
+  onChange: (next: string[]) => void
+}) {
+  const [input, setInput] = useState('')
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  const addBrand = (raw: string) => {
+    const tags = raw.split(/[,，]/).map((s) => s.trim()).filter(Boolean)
+    if (!tags.length) return
+    const next = [...brands]
+    for (const tag of tags) {
+      if (!next.some((b) => b.toLowerCase() === tag.toLowerCase())) {
+        next.push(tag)
+      }
+    }
+    onChange(next)
+    setInput('')
+  }
+
+  const removeBrand = (idx: number) => {
+    onChange(brands.filter((_, i) => i !== idx))
+  }
+
+  return (
+    <div
+      className="mt-1 flex min-h-[2.5rem] flex-wrap items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 focus-within:border-sky-300 focus-within:ring-2 focus-within:ring-sky-100 cursor-text"
+      onClick={() => inputRef.current?.focus()}
+    >
+      {brands.map((b, i) => (
+        <span
+          key={`${b}-${i}`}
+          className="flex items-center gap-1 rounded-full bg-indigo-50 border border-indigo-200 px-2 py-0.5 text-xs font-semibold text-indigo-800"
+        >
+          {b}
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); removeBrand(i) }}
+            className="ml-0.5 text-indigo-400 hover:text-rose-500"
+          >
+            <X className="size-3" />
+          </button>
+        </span>
+      ))}
+      <input
+        ref={inputRef}
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ',') {
+            e.preventDefault()
+            addBrand(input)
+          } else if (e.key === 'Backspace' && !input && brands.length > 0) {
+            removeBrand(brands.length - 1)
+          }
+        }}
+        onBlur={() => { if (input.trim()) addBrand(input) }}
+        placeholder={brands.length === 0 ? 'พิมพ์ชื่อแบรนด์ แล้ว Enter หรือ , เช่น Brembo' : 'เพิ่มแบรนด์…'}
+        className="min-w-[140px] flex-1 bg-transparent text-sm outline-none placeholder:text-slate-400"
+      />
+    </div>
+  )
+}
+
+type CatalogRowDraft = {
+  id: string
+  productId: string | null
+  sku: string
+  name: string
+  priceStr: string
+}
+
+function CatalogSection({
+  supplierId,
+  rows,
+  onChange,
+}: {
+  supplierId: string | null
+  rows: CatalogRowDraft[]
+  onChange: (rows: CatalogRowDraft[]) => void
+}) {
+  const [searchQ, setSearchQ] = useState<Record<string, string>>({})
+  const [dropdownId, setDropdownId] = useState<string | null>(null)
+  const dropdownRef = useRef<HTMLDivElement>(null)
+  const allProducts = useMemo(() => getPosCatalogProducts(), [])
+
+  useEffect(() => {
+    const close = (e: PointerEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) setDropdownId(null)
+    }
+    document.addEventListener('pointerdown', close, true)
+    return () => document.removeEventListener('pointerdown', close, true)
+  }, [])
+
+  const addRow = () => {
+    const id = `cr-${Date.now()}`
+    onChange([...rows, { id, productId: null, sku: '', name: '', priceStr: '' }])
+    setSearchQ((q) => ({ ...q, [id]: '' }))
+  }
+
+  const deleteRow = (id: string) =>
+    onChange(rows.filter((r) => r.id !== id))
+
+  const updatePrice = (id: string, priceStr: string) =>
+    onChange(rows.map((r) => (r.id === id ? { ...r, priceStr } : r)))
+
+  const selectProduct = (rowId: string, product: { id: string; sku: string; name: string }) => {
+    onChange(
+      rows.map((r) =>
+        r.id === rowId ? { ...r, productId: product.id, sku: product.sku, name: product.name } : r,
+      ),
+    )
+    setDropdownId(null)
+    setSearchQ((q) => ({ ...q, [rowId]: '' }))
+  }
+
+  const inputClass =
+    'w-full rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm outline-none focus:border-sky-300 focus:ring-1 focus:ring-sky-100'
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">รายการสินค้าที่จำหน่าย</p>
+        <button
+          type="button"
+          onClick={addRow}
+          className="inline-flex items-center gap-1 rounded-lg bg-sky-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-sky-700"
+        >
+          <Plus className="size-3" aria-hidden />
+          เพิ่มสินค้า
+        </button>
+      </div>
+
+      {rows.length === 0 ? (
+        <p className="py-4 text-center text-xs text-slate-400">ยังไม่มีสินค้า — กด «เพิ่มสินค้า»</p>
+      ) : (
+        <div className="space-y-1.5">
+          {rows.map((row) => {
+            const q = searchQ[row.id] ?? ''
+            const hits = q.length >= 1
+              ? allProducts
+                  .filter((p) => {
+                    const t = q.toLowerCase()
+                    return p.sku.toLowerCase().includes(t) || p.name.toLowerCase().includes(t)
+                  })
+                  .slice(0, 8)
+              : []
+
+            return (
+              <div key={row.id} className="relative flex items-center gap-1.5">
+                <div className="relative min-w-0 flex-1" ref={dropdownId === row.id ? dropdownRef : undefined}>
+                  {row.name ? (
+                    <div className="flex min-w-0 items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5">
+                      <span className="min-w-0 flex-1 truncate text-xs font-medium text-slate-800">
+                        {row.sku && <span className="mr-1 text-slate-500">[{row.sku}]</span>}
+                        {row.name}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onChange(rows.map((r) => (r.id === row.id ? { ...r, productId: null, sku: '', name: '' } : r)))
+                          setSearchQ((q2) => ({ ...q2, [row.id]: '' }))
+                        }}
+                        className="shrink-0 text-slate-400 hover:text-rose-500"
+                        title="เปลี่ยนสินค้า"
+                      >
+                        <X className="size-3.5" />
+                      </button>
+                    </div>
+                  ) : (
+                    <input
+                      className={inputClass}
+                      placeholder="ค้นหาสินค้า (SKU / ชื่อ)..."
+                      value={q}
+                      onChange={(e) => {
+                        setSearchQ((prev) => ({ ...prev, [row.id]: e.target.value }))
+                        setDropdownId(row.id)
+                      }}
+                      onFocus={() => setDropdownId(row.id)}
+                    />
+                  )}
+                  {dropdownId === row.id && hits.length > 0 && (
+                    <div className="absolute left-0 top-full z-[200] mt-0.5 max-h-52 w-full overflow-auto rounded-lg border border-slate-200 bg-white shadow-lg">
+                      {hits.map((p) => (
+                        <button
+                          key={p.id}
+                          type="button"
+                          className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-sky-50"
+                          onClick={() => selectProduct(row.id, p)}
+                        >
+                          <span className="w-16 shrink-0 text-[10px] text-slate-500">{p.sku}</span>
+                          <span className="min-w-0 flex-1 truncate text-xs text-slate-800">{p.name}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="w-24 shrink-0">
+                  <input
+                    className={inputClass}
+                    placeholder="ราคา ฿"
+                    value={row.priceStr}
+                    onChange={(e) => updatePrice(row.id, e.target.value)}
+                    inputMode="decimal"
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => deleteRow(row.id)}
+                  className="shrink-0 rounded-lg p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600"
+                  title="ลบ"
+                >
+                  <Trash2 className="size-3.5" />
+                </button>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 type SupplierMasterFormProps = {
   mode: 'create' | 'edit'
   initialProfile: SupplierProfile | null
   onClose: () => void
   onSaved: (profile: SupplierProfile, mode: 'create' | 'edit') => void
+}
+
+function catalogItemsToDrafts(items: SupplierCatalogItem[]): CatalogRowDraft[] {
+  return items.map((item, i) => ({
+    id: `cr-existing-${i}-${item.sku}`,
+    productId: item.productId,
+    sku: item.sku,
+    name: item.name,
+    priceStr: item.lastPrice > 0 ? String(item.lastPrice) : '',
+  }))
 }
 
 function SupplierMasterForm({ mode, initialProfile, onClose, onSaved }: SupplierMasterFormProps) {
@@ -76,7 +323,20 @@ function SupplierMasterForm({ mode, initialProfile, onClose, onSaved }: Supplier
   const [excludePurchaseMonth, setExcludePurchaseMonth] = useState(DEFAULT_SUPPLIER_CREDIT.excludePurchaseMonth)
   const [address, setAddress] = useState('')
   const [defaultShipping, setDefaultShipping] = useState('')
-  const [brandsText, setBrandsText] = useState('')
+  const [brands, setBrands] = useState<string[]>([])
+  const [catalogRows, setCatalogRows] = useState<CatalogRowDraft[]>([])
+  const [bankAccounts, setBankAccounts] = useState<SupplierBankAccount[]>([])
+  const [earlyPayDiscounts, setEarlyPayDiscounts] = useState<EarlyPayDiscount[]>([])
+  const [priceListVatMode, setPriceListVatMode] = useState<'vat_included' | 'vat_excluded' | 'no_vat'>('vat_excluded')
+  const [transportNames, setTransportNames] = useState<string[]>(() =>
+    loadTransportDirectory().map((c) => c.name),
+  )
+
+  useEffect(() => {
+    const onChanged = () => setTransportNames(loadTransportDirectory().map((c) => c.name))
+    window.addEventListener(TRANSPORT_DIRECTORY_CHANGED_EVENT, onChanged)
+    return () => window.removeEventListener(TRANSPORT_DIRECTORY_CHANGED_EVENT, onChanged)
+  }, [])
 
   useEffect(() => {
     if (mode === 'create') {
@@ -93,7 +353,11 @@ function SupplierMasterForm({ mode, initialProfile, onClose, onSaved }: Supplier
       setExcludePurchaseMonth(DEFAULT_SUPPLIER_CREDIT.excludePurchaseMonth)
       setAddress('')
       setDefaultShipping('')
-      setBrandsText('')
+      setBrands([])
+      setBankAccounts([])
+      setEarlyPayDiscounts([])
+      setPriceListVatMode('vat_excluded')
+      setCatalogRows([])
       return
     }
     if (!initialProfile) return
@@ -106,23 +370,31 @@ function SupplierMasterForm({ mode, initialProfile, onClose, onSaved }: Supplier
     setPrimaryPayment(primaryPaymentFromProfile(p))
     setAddress(p.address ?? '')
     setDefaultShipping(p.defaultShipping ?? '')
-    setBrandsText((p.brandsSold ?? []).join(', '))
+    setBrands(p.brandsSold ?? [])
+    setBankAccounts(p.bankAccounts ?? [])
+    setEarlyPayDiscounts(p.earlyPayDiscounts ?? [])
+    setPriceListVatMode(p.priceListVatMode ?? 'vat_excluded')
     const c = getSupplierCreditTerms(p.id)
     setCreditTermDays(Math.min(99, Math.max(0, c.creditDays)))
     setCreditTermMonths(Math.min(99, Math.max(0, c.creditMonths ?? 0)))
     setPayAtMonthEnd(c.payAtEndOfDueMonth)
     setCutOffDayOfMonth(c.statementCutoffDay)
     setExcludePurchaseMonth(c.excludePurchaseMonth)
+    setCatalogRows(catalogItemsToDrafts(getSupplierCatalog(p.id)))
   }, [mode, initialProfile])
 
   const shippingSelectOptions = useMemo(() => {
     const v = defaultShipping.trim()
-    const base = [...SHIPPING_PRESET_OPTIONS]
+    const base: { value: string; label: string }[] = [
+      { value: '', label: '-- ไม่ระบุ --' },
+      ...transportNames.map((n) => ({ value: n, label: n })),
+      ...SHIPPING_EXTRA_OPTIONS,
+    ]
     if (v && !base.some((o) => o.value === v)) {
       return [{ value: v, label: v }, ...base]
     }
     return base
-  }, [defaultShipping])
+  }, [defaultShipping, transportNames])
 
   const creditPreviewSlice = {
     creditDays: Math.min(99, Math.max(0, creditTermDays)),
@@ -156,6 +428,26 @@ function SupplierMasterForm({ mode, initialProfile, onClose, onSaved }: Supplier
       excludePurchaseMonth,
     }
 
+    const now = new Date().toISOString()
+    const catalogItems: SupplierCatalogItem[] = catalogRows
+      .filter((r) => r.name.trim())
+      .map((r) => ({
+        productId: r.productId,
+        sku: r.sku,
+        name: r.name.trim(),
+        lastPrice: parseFloat(r.priceStr.replace(/,/g, '')) || 0,
+        lastQty: 1,
+        lastBoughtAt: now,
+      }))
+
+    const cleanedBankAccounts = bankAccounts
+      .map((a) => ({
+        bankName: a.bankName?.trim() || undefined,
+        accountNo: a.accountNo?.trim() || undefined,
+        accountName: a.accountName?.trim() || undefined,
+      }))
+      .filter((a) => a.bankName || a.accountNo)
+
     if (mode === 'create') {
       const created = createSupplierProfile({
         supplierCode: nextSupplierDisplayCode(),
@@ -165,13 +457,17 @@ function SupplierMasterForm({ mode, initialProfile, onClose, onSaved }: Supplier
         address: address.trim() || undefined,
         contactName: contactName.trim() || undefined,
         lineId: lineId.trim() || undefined,
-        brandsSold: parseBrandsComma(brandsText),
+        brandsSold: brands.length ? brands : undefined,
         defaultShipping: defaultShipping.trim() || undefined,
         acceptsCash: flags.acceptsCash,
         acceptsTransfer: flags.acceptsTransfer,
-        regularProductCount: 0,
+        bankAccounts: cleanedBankAccounts.length ? cleanedBankAccounts : undefined,
+        earlyPayDiscounts: earlyPayDiscounts.length ? earlyPayDiscounts : undefined,
+        regularProductCount: catalogItems.length,
+        priceListVatMode,
       })
       setSupplierCreditTerms(created.id, termsPayload)
+      saveSupplierCatalogItems(created.id, catalogItems)
       onSaved(created, 'create')
       onClose()
       return
@@ -186,13 +482,18 @@ function SupplierMasterForm({ mode, initialProfile, onClose, onSaved }: Supplier
       address: address.trim() || undefined,
       contactName: contactName.trim() || undefined,
       lineId: lineId.trim() || undefined,
-      brandsSold: parseBrandsComma(brandsText),
+      brandsSold: brands.length ? brands : undefined,
       defaultShipping: defaultShipping.trim() || undefined,
       acceptsCash: flags.acceptsCash,
       acceptsTransfer: flags.acceptsTransfer,
+      bankAccounts: cleanedBankAccounts.length ? cleanedBankAccounts : undefined,
+      earlyPayDiscounts: earlyPayDiscounts.length ? earlyPayDiscounts : undefined,
+      regularProductCount: catalogItems.length,
+      priceListVatMode,
     }
     upsertSupplierProfile(profile)
     setSupplierCreditTerms(profile.id, termsPayload)
+    saveSupplierCatalogItems(profile.id, catalogItems)
     onSaved(profile, 'edit')
     onClose()
   }
@@ -403,15 +704,180 @@ function SupplierMasterForm({ mode, initialProfile, onClose, onSaved }: Supplier
             </label>
           </div>
 
-          <label className="block text-[11px] font-medium text-slate-700">
-            แบรนด์ / ยี่ห้อสินค้าที่จำหน่าย (คั่นด้วยลูกน้ำ ,)
-            <input
-              value={brandsText}
-              onChange={(e) => setBrandsText(e.target.value)}
-              className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-              placeholder="เช่น Brembo, NSK, BOSCH, Toyota"
-            />
-          </label>
+          <div>
+            <label className="flex items-center gap-1.5 text-[11px] font-medium text-slate-700">
+              <Tag className="size-3.5 text-indigo-500" />
+              แบรนด์ที่จำหน่าย
+              {brands.length > 0 && (
+                <span className="rounded-full bg-indigo-100 px-1.5 py-0.5 text-[10px] font-bold text-indigo-700">
+                  {brands.length}
+                </span>
+              )}
+            </label>
+            <BrandTagInput brands={brands} onChange={setBrands} />
+            <p className="mt-1 text-[10px] text-slate-400">
+              พิมพ์ชื่อแบรนด์แล้วกด Enter หรือ , เพื่อเพิ่ม · กด Backspace เพื่อลบแบรนด์สุดท้าย
+            </p>
+          </div>
+
+          {/* ─── Bank Accounts ─────────────────────────────────────────── */}
+          <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+                บัญชีธนาคาร (สำหรับโอนชำระ)
+              </p>
+              <button
+                type="button"
+                onClick={() => setBankAccounts((prev) => [...prev, { bankName: '', accountNo: '', accountName: '' }])}
+                className="inline-flex items-center gap-1 rounded-lg bg-sky-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-sky-700"
+              >
+                <Plus className="size-3" aria-hidden />
+                เพิ่มบัญชี
+              </button>
+            </div>
+
+            {bankAccounts.length === 0 ? (
+              <p className="py-3 text-center text-xs text-slate-400">ยังไม่มีบัญชีธนาคาร — กด «เพิ่มบัญชี»</p>
+            ) : (
+              <div className="space-y-2">
+                {bankAccounts.map((acct, idx) => (
+                  <div key={idx} className="grid grid-cols-[1fr_1fr_1fr_auto] items-center gap-2">
+                    <input
+                      value={acct.bankName ?? ''}
+                      onChange={(e) => setBankAccounts((prev) => prev.map((a, i) => i === idx ? { ...a, bankName: e.target.value } : a))}
+                      placeholder="ธนาคาร เช่น กสิกร"
+                      className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm outline-none focus:border-sky-300 focus:ring-1 focus:ring-sky-100"
+                    />
+                    <input
+                      value={acct.accountNo ?? ''}
+                      onChange={(e) => setBankAccounts((prev) => prev.map((a, i) => i === idx ? { ...a, accountNo: e.target.value } : a))}
+                      placeholder="เลขบัญชี"
+                      inputMode="numeric"
+                      className="rounded-lg border border-slate-200 px-2.5 py-1.5 font-mono text-sm outline-none focus:border-sky-300 focus:ring-1 focus:ring-sky-100"
+                    />
+                    <input
+                      value={acct.accountName ?? ''}
+                      onChange={(e) => setBankAccounts((prev) => prev.map((a, i) => i === idx ? { ...a, accountName: e.target.value } : a))}
+                      placeholder="ชื่อบัญชี"
+                      className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm outline-none focus:border-sky-300 focus:ring-1 focus:ring-sky-100"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setBankAccounts((prev) => prev.filter((_, i) => i !== idx))}
+                      className="rounded-lg p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600"
+                      title="ลบบัญชี"
+                    >
+                      <Trash2 className="size-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* ─── Early Payment Discounts ─────────────────────────────── */}
+          <div className="rounded-xl border border-emerald-100 bg-emerald-50/40 p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-800">
+                  ส่วนลดจ่ายก่อนกำหนด (Early Payment Discount)
+                </p>
+                <p className="mt-0.5 text-[10px] text-slate-500">จ่ายภายใน X วัน จากวันยืนยัน PO ได้ส่วนลด Y%</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEarlyPayDiscounts((prev) => [...prev, { withinDays: 10, discountPct: 2 }])}
+                className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-emerald-700"
+              >
+                <Plus className="size-3" aria-hidden />
+                เพิ่มเงื่อนไข
+              </button>
+            </div>
+            {earlyPayDiscounts.length === 0 ? (
+              <p className="py-2 text-center text-xs text-slate-400">ยังไม่มีเงื่อนไข — กด «เพิ่มเงื่อนไข»</p>
+            ) : (
+              <div className="space-y-1.5">
+                {earlyPayDiscounts.map((d, idx) => (
+                  <div key={idx} className="flex items-center gap-2">
+                    <span className="shrink-0 text-xs text-slate-600">จ่ายภายใน</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={365}
+                      value={d.withinDays}
+                      onChange={(e) =>
+                        setEarlyPayDiscounts((prev) =>
+                          prev.map((x, i) => i === idx ? { ...x, withinDays: Math.max(1, Number(e.target.value) || 1) } : x)
+                        )
+                      }
+                      className="w-16 rounded-lg border border-slate-200 bg-white px-2 py-1 text-center text-sm font-mono outline-none focus:border-emerald-400"
+                    />
+                    <span className="shrink-0 text-xs text-slate-600">วัน ได้ลด</span>
+                    <input
+                      type="number"
+                      min={0.1}
+                      max={100}
+                      step={0.5}
+                      value={d.discountPct}
+                      onChange={(e) =>
+                        setEarlyPayDiscounts((prev) =>
+                          prev.map((x, i) => i === idx ? { ...x, discountPct: Math.max(0.1, Number(e.target.value) || 0.1) } : x)
+                        )
+                      }
+                      className="w-16 rounded-lg border border-slate-200 bg-white px-2 py-1 text-center text-sm font-mono outline-none focus:border-emerald-400"
+                    />
+                    <span className="shrink-0 text-xs text-slate-600">%</span>
+                    <button
+                      type="button"
+                      onClick={() => setEarlyPayDiscounts((prev) => prev.filter((_, i) => i !== idx))}
+                      className="ml-auto rounded-lg p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600"
+                    >
+                      <Trash2 className="size-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* ─── Price List VAT Mode ──────────────────────────────────── */}
+          <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-3">
+            <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+              ราคาในใบเสนอราคา / รายการสินค้า
+            </p>
+            <div className="flex gap-2">
+              {(
+                [
+                  { value: 'vat_excluded', label: 'ยังไม่รวม VAT', sub: 'บวก VAT 7% เพิ่ม' },
+                  { value: 'vat_included', label: 'รวม VAT แล้ว', sub: 'ราคาที่เห็น = ราคาจ่ายจริง' },
+                  { value: 'no_vat', label: 'ไม่มี VAT', sub: 'ไม่อยู่ในระบบภาษี' },
+                ] as const
+              ).map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => setPriceListVatMode(opt.value)}
+                  className={clsx(
+                    'flex flex-1 flex-col items-center gap-0.5 rounded-xl border px-2 py-2.5 text-center transition-colors',
+                    priceListVatMode === opt.value
+                      ? 'border-sky-400 bg-sky-50 text-sky-800 shadow-sm'
+                      : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50',
+                  )}
+                >
+                  <span className="text-xs font-bold">{opt.label}</span>
+                  <span className={clsx('text-[10px]', priceListVatMode === opt.value ? 'text-sky-600' : 'text-slate-400')}>
+                    {opt.sub}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <CatalogSection
+            supplierId={initialProfile?.id ?? null}
+            rows={catalogRows}
+            onChange={setCatalogRows}
+          />
         </div>
 
         <div className="mt-6 flex justify-end border-t border-slate-100 pt-4">

@@ -1,4 +1,5 @@
 import { MOCK_MEMBERS, type Member } from '@/features/members/data/mockMembers'
+import { normalizePhone } from '@/features/members/data/phoneUtils'
 import { isTauri } from '@/features/desktop/isTauri'
 import { invoke } from '@tauri-apps/api/core'
 
@@ -24,8 +25,8 @@ function normalizeMember(raw: unknown): Member | null {
     taxId: typeof r.taxId === 'string' ? r.taxId : '',
     contactPerson: typeof r.contactPerson === 'string' ? r.contactPerson : '',
     email: typeof r.email === 'string' ? r.email : '',
-    phone: typeof r.phone === 'string' ? r.phone : '',
-    fax: typeof r.fax === 'string' ? r.fax : '',
+    phone: normalizePhone(typeof r.phone === 'string' ? r.phone : ''),
+    fax: normalizePhone(typeof r.fax === 'string' ? r.fax : ''),
     salesStaffId: typeof r.salesStaffId === 'string' ? r.salesStaffId : '',
     creditLimitBaht: Number(r.creditLimitBaht) || 0,
     creditTermDays: Number(r.creditTermDays) || 0,

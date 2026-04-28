@@ -9,11 +9,14 @@ import {
 import { isTauri } from '@/features/desktop/isTauri'
 import type { Member } from '@/features/members/data/mockMembers'
 import { loadMembers, loadMembersAsync, MEMBERS_CHANGED_EVENT } from '@/features/members/data/membersStore'
+import { formatPhone, phoneMatchesQuery } from '@/features/members/data/phoneUtils'
 import { BRANCHES } from '@/features/auth/branches'
 import { getStoredBranch } from '@/features/auth/authSession'
 import {
+  getBundleAvailableQty,
   getProductMasterBySku,
   masterSearchExtrasForSku,
+  resolveBundleBreakdown,
   type VehicleFitmentRef,
 } from '@/features/inventory/data/productMasterData'
 import { loadProductTagsRegistry } from '@/features/inventory/data/productTagsRegistry'
@@ -43,9 +46,15 @@ import {
 import { getStlBoltPairForMaleProduct } from '@/features/promotions/stlBoltPairRegistry'
 import { computeStlVolumePromo } from '@/features/promotions/stlVolumePromo'
 import { createPosSaleAsync, loadPosSalesHistoryByMemberAsync, type PosSalesHistoryRow } from '@/features/pos/data/posSalesDb'
-import { POS_SALE_RECORDED_EVENT } from '@/features/pos/data/posSalesHistory'
+import { appendSale, POS_SALE_RECORDED_EVENT } from '@/features/pos/data/posSalesHistory'
+import { loadTransportDirectory, TRANSPORT_DIRECTORY_CHANGED_EVENT } from '@/features/transport/data/transportDirectoryStore'
 import { printPosReceipt } from '@/features/pos/utils/posPrintReceipt'
 import { localDateYYYYMMDD, parseLocalYYYYMMDD } from '@/features/pos/utils/posLocalDate'
+import { writeCfdState, readCfdState } from '@/features/cfd/cfdBridge'
+import { getProductImageUrl, getProductImageUrls } from '@/features/inventory/data/productImages'
+import { openCfdWindow } from '@/features/cfd/openCfdWindow'
+import { loadBankAccounts, getDefaultBankAccount, BANK_CHANGED_EVENT } from '@/features/bank/bankStore'
+import { promptPayDataUrl } from '@/features/bank/promptPayQr'
 import { buildTaxInvoiceFormPrintHtml, printTaxInvoiceHtmlPreferSystemDialog, type TaxInvoiceLineItemRow } from '@/features/inventory/data/taxInvoiceFormCanvasShared'
 import { getActiveTaxInvoiceForm, loadTaxInvoiceFormDesignerState } from '@/features/inventory/data/taxInvoiceFormDesignerStore'
 import { MOCK_STORE_PROFILE } from '@/features/settings/data/mockStoreProfile'
@@ -64,6 +73,8 @@ import {
   ClipboardList,
   MapPin,
   Medal,
+  Image,
+  Monitor,
   Pause,
   Printer,
   QrCode,
@@ -105,11 +116,13 @@ type CartLine = {
   qty: number
   stlBoltRole?: 'nut' | 'washerGift'
   stlBoltMaleCode?: string
+  stockBreakdown?: { productId: string; qty: number }[]
 }
 
 type Customer = {
   accountCode: string
   name: string
+  phone: string
   taxId: string
   branch: string
   address: string
@@ -150,6 +163,7 @@ function formatDims(d: Product['dimensions']): string {
 const WALK_IN_CUSTOMER: Customer = {
   accountCode: 'WK-00001',
   name: 'ลูกค้าทั่วไป (Walk-in)',
+  phone: '',
   taxId: '',
   branch: '',
   address: '-',
@@ -200,7 +214,7 @@ function formatSuspendedBillTime(ts: number): string {
 function formatThaiBillNoticeDate(docDate: string): string {
   const d = parseLocalYYYYMMDD(docDate)
   if (Number.isNaN(d.getTime())) return docDate
-  return d.toLocaleDateString('th-TH', { day: 'numeric', month: 'numeric', year: 'numeric' })
+  return d.toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' })
 }
 
 /** รอบเครดิตตามเดือนของวันที่เอกสาร (พ.ศ.) */
@@ -312,6 +326,73 @@ function isSaleBillNoDuplicateError(error: unknown): boolean {
   return msg.includes('Sale_billNo_key') || msg.toLowerCase().includes('duplicate key value')
 }
 
+type QrModalBodyProps = {
+  amount: number
+  accountId: string
+  bankAccounts: import('@/features/bank/bankStore').BankAccountRecord[]
+  onClose: () => void
+}
+
+function QrModalBody({ amount, accountId, bankAccounts, onClose }: QrModalBodyProps) {
+  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null)
+  const [qrError, setQrError] = useState<string | null>(null)
+  const account = bankAccounts.find((a) => a.id === accountId)
+
+  useEffect(() => {
+    setQrDataUrl(null)
+    setQrError(null)
+    if (!account?.promptPayId) return
+    promptPayDataUrl(account.promptPayId, amount)
+      .then(setQrDataUrl)
+      .catch((e) => setQrError(e instanceof Error ? e.message : 'สร้าง QR ไม่สำเร็จ'))
+  }, [account?.promptPayId, amount])
+
+  return (
+    <div className="space-y-3 p-5 text-center">
+      <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 dark:border-[#2a2d3e] dark:bg-[#050508]">
+        <div className="text-[10px] font-black uppercase tracking-widest text-slate-500 dark:text-slate-400">
+          ยอดโอน
+        </div>
+        <div className="mt-1 bg-gradient-to-r from-emerald-500 to-blue-500 bg-clip-text font-mono text-2xl font-black text-transparent dark:from-emerald-400 dark:to-cyan-300">
+          {amount.toLocaleString('th-TH', { minimumFractionDigits: 2 })}
+        </div>
+
+        <div className="mt-3 flex min-h-[12rem] items-center justify-center rounded-lg border border-slate-200 bg-white dark:border-[#2a2d3e] dark:bg-[#12141c]">
+          {account?.promptPayId ? (
+            qrDataUrl ? (
+              <img src={qrDataUrl} alt="PromptPay QR" className="size-48 object-contain" />
+            ) : qrError ? (
+              <p className="text-xs text-rose-500 px-4">{qrError}</p>
+            ) : (
+              <p className="text-xs text-slate-400">กำลังสร้าง QR…</p>
+            )
+          ) : (
+            <div className="px-6 py-4 text-center">
+              <p className="text-sm font-semibold text-slate-500 dark:text-slate-400">ไม่มี PromptPay ID</p>
+              <p className="mt-1 text-xs text-slate-400">เพิ่ม PromptPay ID ในหน้า เปิด/ปิดกะ › บัญชีธนาคาร</p>
+            </div>
+          )}
+        </div>
+
+        {account && (
+          <div className="mt-2 space-y-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+            <p className="font-semibold">{account.bankName} · {account.accountNo}</p>
+            <p>{account.accountName}{account.branch ? ` (${account.branch})` : ''}</p>
+            {account.promptPayId && <p className="text-slate-400">PromptPay: {account.promptPayId}</p>}
+          </div>
+        )}
+      </div>
+      <button
+        type="button"
+        onClick={onClose}
+        className="w-full rounded-lg bg-gradient-to-r from-blue-600 to-indigo-600 py-3 text-xs font-black uppercase tracking-widest text-white hover:from-blue-500 hover:to-indigo-500 dark:from-cyan-600 dark:to-blue-600 dark:hover:from-cyan-500 dark:hover:to-blue-500"
+      >
+        ปิด
+      </button>
+    </div>
+  )
+}
+
 export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   const { theme, setTheme } = useThemePreference()
   const [mode, setMode] = useState<SaleMode>('retail')
@@ -336,12 +417,22 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   const [showPickingModal, setShowPickingModal] = useState(false)
   const [showQuotationModal, setShowQuotationModal] = useState(false)
   const [showQRModal, setShowQRModal] = useState(false)
+  const [cfdOpening, setCfdOpening] = useState(false)
+  const [posSpotlight, setPosSpotlight] = useState<{ sku: string; name: string; price: number; unit: string } | null>(null)
+  const [posSpotlightUrls, setPosSpotlightUrls] = useState<string[]>([])
+  const [posSpotlightIndex, setPosSpotlightIndex] = useState(0)
+  const [posSpotlightExpanded, setPosSpotlightExpanded] = useState(false)
+  const [showHistoryPopup, setShowHistoryPopup] = useState(false)
+  const [expandedHistoryBills, setExpandedHistoryBills] = useState<Set<string>>(new Set())
   const [fitmentPreviewSku, setFitmentPreviewSku] = useState<string | null>(null)
   const [checkoutPaymentType, setCheckoutPaymentType] = useState<CheckoutPaymentType>('cash')
+  const [checkoutShippingMethod, setCheckoutShippingMethod] = useState('รับเอง')
+  const [transportNames, setTransportNames] = useState<string[]>(() => loadTransportDirectory().map((c) => c.name))
   const [isSavingCheckout, setIsSavingCheckout] = useState(false)
 
   const [cashReceived, setCashReceived] = useState('')
-  const [selectedBank, setSelectedBank] = useState('')
+  const [selectedBank, setSelectedBank] = useState(() => getDefaultBankAccount()?.id ?? '')
+  const [bankAccounts, setBankAccounts] = useState(() => loadBankAccounts())
   const [mixedCashAmount, setMixedCashAmount] = useState('')
   const [mixedTransferAmount, setMixedTransferAmount] = useState('')
   const [billDiscount, setBillDiscount] = useState('')
@@ -356,6 +447,25 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     const on = () => setMemberTick((n) => n + 1)
     window.addEventListener(MEMBERS_CHANGED_EVENT, on)
     return () => window.removeEventListener(MEMBERS_CHANGED_EVENT, on)
+  }, [])
+
+  useEffect(() => {
+    const on = () => setTransportNames(loadTransportDirectory().map((c) => c.name))
+    window.addEventListener(TRANSPORT_DIRECTORY_CHANGED_EVENT, on)
+    return () => window.removeEventListener(TRANSPORT_DIRECTORY_CHANGED_EVENT, on)
+  }, [])
+
+  useEffect(() => {
+    const on = () => {
+      const accounts = loadBankAccounts()
+      setBankAccounts(accounts)
+      setSelectedBank((prev) => {
+        if (accounts.find((a) => a.id === prev)) return prev
+        return getDefaultBankAccount()?.id ?? ''
+      })
+    }
+    window.addEventListener(BANK_CHANGED_EVENT, on)
+    return () => window.removeEventListener(BANK_CHANGED_EVENT, on)
   }, [])
 
   useEffect(() => {
@@ -374,6 +484,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
       .map((m) => ({
         accountCode: m.memberCode,
         name: m.fullName,
+        phone: m.phone ?? '',
         taxId: m.taxId ?? '',
         branch: BRANCHES.find((b) => b.id === m.branchId)?.name ?? '',
         address: m.address ?? '',
@@ -394,6 +505,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   const [memberHistory, setMemberHistory] = useState<PosSalesHistoryRow[]>([])
 
   useEffect(() => {
+    setShowHistoryPopup(false)
     if (customer.accountCode === WALK_IN_CUSTOMER.accountCode) {
       setMemberHistory([])
       return
@@ -538,6 +650,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
           (m) =>
             m.name.toLowerCase().includes(q) ||
             m.accountCode.toLowerCase().includes(q) ||
+            phoneMatchesQuery(m.phone, q) ||
             (m.taxId && m.taxId.includes(q)),
         )
       : mockMembers
@@ -592,17 +705,42 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     const hasModelFilter = productModalModel !== 'ทั้งหมด'
     const hasTextFilter = tokens.length > 0
     if (!productModalCategory && !hasMakeFilter && !hasTextFilter) return mockProducts.slice(0, 150)
-    return mockProducts
-      .filter((p) => {
-        if (productModalCategory && p.category !== productModalCategory) return false
-        if (hasMakeFilter && p.carBrand !== productModalMake) return false
-        if (hasModelFilter && p.carModelLabel !== productModalModel) return false
-        if (hasTextFilter) {
-          const hay = productHaystackMap.get(p.code) ?? ''
-          if (!tokens.every((t) => hay.includes(t))) return false
-        }
-        return true
-      })
+
+    const passFilters = (p: InventoryProduct) => {
+      if (productModalCategory && p.category !== productModalCategory) return false
+      if (hasMakeFilter && p.carBrand !== productModalMake) return false
+      if (hasModelFilter && p.carModelLabel !== productModalModel) return false
+      return true
+    }
+    if (!hasTextFilter) return mockProducts.filter(passFilters).slice(0, 200)
+
+    const getHay = (p: InventoryProduct) => productHaystackMap.get(p.code) ?? ''
+    const q = tokens.join('')
+
+    const scoreProduct = (p: InventoryProduct): number => {
+      const hay = getHay(p)
+      const normSku  = normalizeSearchText(p.code)
+      const normOem  = normalizeSearchText(p.factoryOem ?? '')
+      const normName = normalizeSearchText(p.name)
+      if (normSku === q || normOem === q) return 100
+      if (normSku.startsWith(q) || normOem.startsWith(q)) return 80
+      if (tokens.every((t) => normSku.includes(t)) || tokens.every((t) => normOem.includes(t))) return 60
+      if (tokens.every((t) => normName.includes(t))) return 40
+      if (tokens.every((t) => hay.includes(t))) return 20
+      return (tokens.filter((t) => hay.includes(t)).length / tokens.length) * 10
+    }
+
+    const andMatches = mockProducts.filter((p) => passFilters(p) && tokens.every((t) => getHay(p).includes(t)))
+    const candidates = andMatches.length > 0
+      ? andMatches
+      : tokens.length > 1
+        ? mockProducts.filter((p) => passFilters(p) && tokens.some((t) => getHay(p).includes(t)))
+        : []
+
+    return candidates
+      .map((p) => [p, scoreProduct(p)] as const)
+      .sort((a, b) => b[1] - a[1])
+      .map(([p]) => p)
       .slice(0, 200)
   }, [mockProducts, productHaystackMap, deferredProductSearchQuery, productModalCategory, productModalMake, productModalModel])
 
@@ -615,10 +753,24 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   const quickTextMatchedProducts = useMemo(() => {
     const tokens = tokenizeSearch(deferredBarcodeInput)
     if (!tokens.length) return []
-    return mockProducts.filter((p) => {
-      const hay = productHaystackMap.get(p.code) ?? ''
-      return tokens.every((t) => hay.includes(t))
-    })
+    const q = tokens.join('')
+    return mockProducts
+      .filter((p) => {
+        const hay = productHaystackMap.get(p.code) ?? ''
+        return tokens.every((t) => hay.includes(t))
+      })
+      .map((p) => {
+        const normSku = normalizeSearchText(p.code)
+        const normOem = normalizeSearchText(p.factoryOem ?? '')
+        let s = 20
+        if (normSku === q || normOem === q) s = 100
+        else if (normSku.startsWith(q) || normOem.startsWith(q)) s = 80
+        else if (tokens.every((t) => normSku.includes(t)) || tokens.every((t) => normOem.includes(t))) s = 60
+        else if (tokens.every((t) => normalizeSearchText(p.name).includes(t))) s = 40
+        return [p, s] as const
+      })
+      .sort((a, b) => b[1] - a[1])
+      .map(([p]) => p)
   }, [deferredBarcodeInput, mockProducts, productHaystackMap])
 
   const quickSuggestProducts = useMemo(
@@ -722,6 +874,68 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     return { subtotal, discountAmt, beforeVat, vatAmount, rawGrandTotal, roundingAdjustment, grandTotal }
   }, [applyRounding, billDiscount, pricedCart, docInfo.vatType, mode])
 
+  useEffect(() => {
+    if (showQRModal) return
+    const memberName =
+      customer.accountCode !== WALK_IN_CUSTOMER.accountCode ? customer.name : null
+    writeCfdState({
+      mode: pricedCart.length > 0 ? 'active' : 'idle',
+      lines: pricedCart.map((l) => ({
+        name: l.name,
+        qty: l.qty,
+        unitLabel: l.unit,
+        unitPrice: l.price,
+        lineTotal: Math.max(0, l.price * l.qty - l.discount),
+        sku: l.code,
+      })),
+      subtotal: totals.subtotal,
+      discountAmt: totals.discountAmt,
+      vatAmount: totals.vatAmount,
+      grandTotal: totals.grandTotal,
+      memberName,
+      updatedAt: Date.now(),
+    })
+  }, [showQRModal, pricedCart, totals, customer.accountCode, customer.name])
+
+  useEffect(() => {
+    if (!showQRModal) return
+    const account = bankAccounts.find((a) => a.id === selectedBank)
+    const memberName =
+      customer.accountCode !== WALK_IN_CUSTOMER.accountCode ? customer.name : null
+    writeCfdState({
+      mode: 'qr',
+      lines: pricedCart.map((l) => ({
+        name: l.name,
+        qty: l.qty,
+        unitLabel: l.unit,
+        unitPrice: l.price,
+        lineTotal: Math.max(0, l.price * l.qty - l.discount),
+      })),
+      subtotal: totals.subtotal,
+      discountAmt: totals.discountAmt,
+      vatAmount: totals.vatAmount,
+      grandTotal: totals.grandTotal,
+      memberName,
+      qrPromptPayId: account?.promptPayId,
+      qrAmount: checkoutPaymentType === 'mixed'
+        ? (Number.parseFloat(mixedTransferAmount || '0') || 0)
+        : totals.grandTotal,
+      qrBankName: account?.bankName,
+      qrAccountName: account?.accountName,
+      updatedAt: Date.now(),
+    })
+  }, [showQRModal, bankAccounts, selectedBank, pricedCart, totals, customer.accountCode, customer.name, checkoutPaymentType, mixedTransferAmount])
+
+  useEffect(() => {
+    setPosSpotlightUrls([])
+    setPosSpotlightIndex(0)
+    setPosSpotlightExpanded(false)
+    if (!posSpotlight) return
+    getProductImageUrls(posSpotlight.sku).then((urls) => {
+      setPosSpotlightUrls(urls)
+    }).catch(() => null)
+  }, [posSpotlight])
+
   const hasAwaitTransferSuspended = useMemo(
     () => suspendedBills.some(isSuspendedAwaitTransfer),
     [suspendedBills],
@@ -746,6 +960,15 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   const mixedCashNum = useMemo(() => Number.parseFloat(mixedCashAmount || '0') || 0, [mixedCashAmount])
   const mixedTransferNum = useMemo(() => Number.parseFloat(mixedTransferAmount || '0') || 0, [mixedTransferAmount])
   const mixedSum = useMemo(() => mixedCashNum + mixedTransferNum, [mixedCashNum, mixedTransferNum])
+  const qrAmount = useMemo(
+    () => checkoutPaymentType === 'mixed' ? mixedTransferNum : totals.grandTotal,
+    [checkoutPaymentType, mixedTransferNum, totals.grandTotal],
+  )
+
+  const showProductImage = (item: { code: string; name: string; price?: number; unit?: string }) => {
+    setPosSpotlight({ sku: item.code, name: item.name, price: item.price ?? 0, unit: item.unit ?? '' })
+    writeCfdState({ ...readCfdState(), spotlightSku: item.code, updatedAt: Date.now() })
+  }
 
   const removeLine = (id: number) => {
     setCart((prev) => {
@@ -786,6 +1009,9 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
         const selectedListPrice =
           picked != null ? cfg.getListUnitPrice(picked.unit.index, picked.level.index) : p.price
         const nextId = (prev.at(-1)?.id ?? 0) + 1
+        const bundleBreakdown = p.bundleComponents?.length
+          ? resolveBundleBreakdown(p.bundleComponents)
+          : undefined
         return [
           ...prev,
           {
@@ -801,6 +1027,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
             priceLevelIndex: picked?.level.index ?? 0,
             discount: 0,
             qty: 1,
+            ...(bundleBreakdown ? { stockBreakdown: bundleBreakdown } : {}),
           },
         ]
       }
@@ -1022,6 +1249,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     setMixedCashAmount('')
     setMixedTransferAmount('')
     setCheckoutPaymentType('cash')
+    setCheckoutShippingMethod('รับเอง')
   }
 
   const openCheckoutModal = () => {
@@ -1038,6 +1266,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     setMixedCashAmount('')
     setMixedTransferAmount('')
     setCheckoutPaymentType('cash')
+    setCheckoutShippingMethod('รับเอง')
     setShowCheckoutModal(true)
   }
 
@@ -1102,14 +1331,11 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     totals.grandTotal,
   ])
 
-  const bankLabel = (code: string) =>
-    code === 'kbank'
-      ? 'กสิกรไทย'
-      : code === 'scb'
-        ? 'ไทยพาณิชย์'
-        : code === 'ktb'
-          ? 'กรุงไทย'
-          : code
+  const bankLabel = (id: string) => {
+    const acc = bankAccounts.find((a) => a.id === id)
+    if (acc) return `${acc.bankName} · ${acc.accountNo} (${acc.accountName})`
+    return id || 'ไม่ระบุ'
+  }
 
   const printCheckoutDocument = async (issuedDocNo: string, payLabel: string): Promise<void> => {
     if (mode === 'retail') {
@@ -1250,6 +1476,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
             remark: docInfo.remark,
             branchId,
             memberCode: customer.accountCode !== WALK_IN_CUSTOMER.accountCode ? customer.accountCode : undefined,
+            shippingMethod: checkoutShippingMethod !== 'รับเอง' ? checkoutShippingMethod : undefined,
             lines: saleLines,
           })
           saved = true
@@ -1269,12 +1496,45 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
       }
 
       window.alert(
-        `บันทึกการขายแล้ว\n${docLabel}: ${issuedDocNo}\nวิธีชำระ: ${payLabel}\nยอด: ${gt.toLocaleString('th-TH', { minimumFractionDigits: 2 })} บาท` +
+        `บันทึกการขายแล้ว\n${docLabel}: ${issuedDocNo}\nวิธีชำระ: ${payLabel}\nจัดส่ง: ${checkoutShippingMethod}\nยอด: ${gt.toLocaleString('th-TH', { minimumFractionDigits: 2 })} บาท` +
           (checkoutPaymentType === 'cash'
             ? `\nเงินทอน: ${Math.max(0, receivedAmount - gt).toLocaleString('th-TH', { minimumFractionDigits: 2 })} บาท`
             : ''),
       )
       window.dispatchEvent(new CustomEvent(POS_SALE_RECORDED_EVENT))
+      appendSale({
+        billNo: issuedDocNo,
+        at: new Date().toISOString(),
+        total: totals.grandTotal,
+        paymentId: checkoutPaymentType,
+        lineCount: pricedCart.length,
+        shippingMethod: checkoutShippingMethod !== 'รับเอง' ? checkoutShippingMethod : undefined,
+        lines: pricedCart.map((line) => ({
+          productId: line.productId ?? '',
+          sku: line.code,
+          name: line.name,
+          qty: line.qty,
+          unitPrice: line.price,
+        })),
+      })
+      writeCfdState({
+        mode: 'confirmed',
+        lines: pricedCart.map((l) => ({
+          name: l.name,
+          qty: l.qty,
+          unitLabel: l.unit,
+          unitPrice: l.price,
+          lineTotal: Math.max(0, l.price * l.qty - l.discount),
+        })),
+        subtotal: totals.subtotal,
+        discountAmt: totals.discountAmt,
+        vatAmount: totals.vatAmount,
+        grandTotal: gt,
+        memberName: customer.accountCode !== WALK_IN_CUSTOMER.accountCode ? customer.name : null,
+        paidAmount: checkoutPaymentType === 'cash' ? receivedAmount : gt,
+        changeAmount: checkoutPaymentType === 'cash' ? Math.max(0, receivedAmount - gt) : 0,
+        updatedAt: Date.now(),
+      })
       try {
         await printCheckoutDocument(issuedDocNo, payLabel)
       } catch (error) {
@@ -1320,6 +1580,12 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
 
         for (const line of pricedCart) {
           if (!line.productId) continue
+          if (line.stockBreakdown?.length) {
+            for (const b of line.stockBreakdown) {
+              pieceDeductions.push({ productId: b.productId, qty: b.qty * line.qty })
+            }
+            continue
+          }
           const p = catalog.find((x) => x.id === line.productId)
           if (!p) continue
           const cfg = getPosSellConfig(line.productId)
@@ -1470,6 +1736,20 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
 
           <button
             type="button"
+            onClick={() => {
+              setCfdOpening(true)
+              void openCfdWindow().finally(() => setCfdOpening(false))
+            }}
+            disabled={cfdOpening}
+            className="rounded-full border border-slate-200 bg-white p-1.5 text-slate-600 shadow-sm transition hover:bg-slate-100 disabled:opacity-50 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-indigo-400 dark:hover:bg-[#1a1f35]"
+            aria-label="เปิดจอลูกค้า"
+            title="เปิดจอลูกค้า (CFD)"
+          >
+            <Monitor className="size-4" />
+          </button>
+
+          <button
+            type="button"
             onClick={() => setTheme(isDark ? 'light' : 'dark')}
             className="rounded-full border border-slate-200 bg-white p-1.5 text-slate-600 shadow-sm transition hover:bg-slate-100 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-amber-400 dark:hover:bg-[#1a1f35]"
             aria-label="สลับธีม"
@@ -1512,7 +1792,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                       id="pos-member-search"
                       value={memberSearchQuery}
                       onChange={(e) => setMemberSearchQuery(e.target.value)}
-                      placeholder="สแกนหรือค้นหาลูกค้า..."
+                      placeholder="ชื่อ / รหัส / เบอร์โทร..."
                       className="w-full rounded-full border border-slate-200 bg-slate-50 py-1 pl-8 pr-8 text-[10px] font-semibold text-slate-800 outline-none placeholder:text-slate-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-cyan-50 dark:placeholder:text-slate-600 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30"
                     />
                     <button
@@ -1688,45 +1968,30 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                 </div>
               )}
 
-              {!isWalkIn && memberHistory.length > 0 && (
-                <div className="mt-2 border-t border-slate-100 pt-2 dark:border-[#1e2233]">
-                  <div className="mb-1.5 flex items-center gap-1 text-[9px] font-black uppercase tracking-widest text-purple-700 dark:text-fuchsia-400">
-                    <Clock className="size-3 shrink-0" aria-hidden />
-                    ประวัติการซื้อ ({memberHistory.length} บิลล่าสุด)
+              {!isWalkIn && memberHistory.length > 0 && (() => {
+                const last = memberHistory[0]
+                return (
+                  <div className="mt-2 border-t border-slate-100 pt-1.5 dark:border-[#1e2233]">
+                    <button
+                      type="button"
+                      onClick={() => { setExpandedHistoryBills(new Set()); setShowHistoryPopup(true) }}
+                      className="flex w-full items-center gap-1.5 rounded-full border border-purple-200 bg-purple-50/70 px-2.5 py-1 text-left transition hover:bg-purple-100/80 dark:border-fuchsia-800/40 dark:bg-fuchsia-950/30 dark:hover:bg-fuchsia-950/50"
+                    >
+                      <Clock className="size-3 shrink-0 text-purple-500 dark:text-fuchsia-400" aria-hidden />
+                      <span className="text-[9px] font-bold text-purple-700 dark:text-fuchsia-300">
+                        {memberHistory.length} บิล
+                      </span>
+                      <span className="text-[9px] text-slate-400 dark:text-slate-500">·</span>
+                      <span className="text-[9px] text-slate-500 dark:text-slate-400">
+                        ล่าสุด {new Date(last.at).toLocaleDateString('th-TH', { day: 'numeric', month: 'short' })}
+                      </span>
+                      <span className="ml-auto shrink-0 font-mono text-[9px] font-bold tabular-nums text-emerald-700 dark:text-emerald-400">
+                        {last.total.toLocaleString('th-TH', { minimumFractionDigits: 0 })}฿
+                      </span>
+                    </button>
                   </div>
-                  <div className="space-y-1.5">
-                    {memberHistory.map((bill) => (
-                      <div
-                        key={bill.id}
-                        className="rounded border border-slate-100 bg-slate-50 px-2 py-1.5 dark:border-[#2a2d3e] dark:bg-[#0d0f17]"
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="font-mono text-[9px] font-black text-blue-600 dark:text-cyan-400">
-                            {bill.billNo}
-                          </span>
-                          <span className="text-[9px] text-slate-400 dark:text-slate-500">
-                            {new Date(bill.at).toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: '2-digit' })}
-                          </span>
-                          <span className="shrink-0 font-mono text-[10px] font-black text-emerald-700 dark:text-emerald-400">
-                            {bill.total.toLocaleString('th-TH', { minimumFractionDigits: 0 })} ฿
-                          </span>
-                        </div>
-                        {bill.lines.slice(0, 3).map((line, i) => (
-                          <div key={i} className="mt-0.5 flex items-center gap-1 text-[9px] text-slate-600 dark:text-slate-400">
-                            <span className="truncate">{line.name}</span>
-                            <span className="shrink-0 tabular-nums text-slate-400">×{line.qty}</span>
-                          </div>
-                        ))}
-                        {bill.lines.length > 3 && (
-                          <div className="mt-0.5 text-[9px] text-slate-400 dark:text-slate-500">
-                            +{bill.lines.length - 3} รายการ
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+                )
+              })()}
 
             </section>
 
@@ -1795,7 +2060,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                                 )}
                               >
                                 {/* Thumbnail */}
-                                <ProductImage sku={p.code} size="sm" className="mt-0.5 shrink-0" />
+                                <ProductImage sku={p.code} size="sm" className="mt-0.5 shrink-0" onProject={() => showProductImage({ code: p.code, name: p.name })} />
 
                                 {/* Main info block */}
                                 <span className="min-w-0 flex-1">
@@ -1892,7 +2157,12 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                   const total = item.price * item.qty - item.discount
                   const itemProductId = item.productId ?? mockProducts.find((p) => p.code === item.code)?.id
                   const itemProduct = mockProducts.find((p) => p.id === itemProductId)
-                  const remainingStock = itemProduct ? itemProduct.stock - item.qty : null
+                  const liveStock = stockVersion >= 0
+                    ? (itemProduct?.bundleComponents?.length
+                      ? getBundleAvailableQty(itemProduct.bundleComponents, loadLiveStock())
+                      : (itemProduct ? loadLiveStock()[itemProduct.id] ?? itemProduct.stock : null))
+                    : null
+                  const remainingStock = liveStock !== null ? liveStock - item.qty : null
                   const isLowStock = remainingStock !== null && remainingStock >= 0 && remainingStock <= LOW_STOCK_THRESHOLD
                   const isOverStock = remainingStock !== null && remainingStock < 0
                   const canAddBoltNut = !item.stlBoltRole && Boolean(itemProductId && getStlBoltPairForMaleProduct(itemProductId))
@@ -2011,6 +2281,15 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                         <span className="font-mono text-xs font-black text-slate-800 dark:text-white">
                           {total.toLocaleString('th-TH', { minimumFractionDigits: 2 })}
                         </span>
+                        <button
+                          type="button"
+                          onClick={() => showProductImage({ code: item.code, name: item.name, price: item.price, unit: item.unit })}
+                          className="opacity-0 group-hover:opacity-100 text-slate-400 transition hover:text-indigo-500 dark:text-slate-600 dark:hover:text-indigo-400"
+                          aria-label="แสดงรูปสินค้าบนจอลูกค้า"
+                          title="แสดงรูปบนจอลูกค้า"
+                        >
+                          <Image className="size-4" />
+                        </button>
                         <button
                           type="button"
                           onClick={() => removeLine(item.id)}
@@ -2392,6 +2671,141 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
           document.body,
         )}
 
+      {showHistoryPopup && memberHistory.length > 0 &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-[340] flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-sm dark:bg-black/70"
+            onMouseDown={(e) => { if (e.target === e.currentTarget) setShowHistoryPopup(false) }}
+          >
+            <div className="flex w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-[#2a2d3e] dark:bg-[#0d0f17]">
+              {/* Header */}
+              <div className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3 dark:border-[#2a2d3e] dark:bg-[#12141c]">
+                <h3 className="flex items-center gap-2 text-sm font-black uppercase tracking-widest text-slate-800 dark:text-slate-100">
+                  <Clock className="size-4 text-purple-500 dark:text-fuchsia-400" aria-hidden />
+                  ประวัติการซื้อ — {customer.name}
+                </h3>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setExpandedHistoryBills((prev) =>
+                        prev.size === memberHistory.length
+                          ? new Set()
+                          : new Set(memberHistory.map((b) => b.id)),
+                      )
+                    }
+                    className="rounded-md border border-slate-200 bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-600 hover:bg-slate-50 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-slate-300 dark:hover:bg-[#1a1f35]"
+                  >
+                    {expandedHistoryBills.size === memberHistory.length ? 'ซ่อนทั้งหมด' : 'แสดงทั้งหมด'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowHistoryPopup(false)}
+                    className="rounded-full p-1 text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-[#1a1f35]"
+                    aria-label="ปิด"
+                  >
+                    <X className="size-5" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Table */}
+              <div className="min-h-0 overflow-auto">
+                <table className="w-full border-collapse text-xs">
+                  <thead className="sticky top-0 bg-slate-50 dark:bg-[#12141c]">
+                    <tr className="border-b border-slate-200 text-[10px] font-bold uppercase tracking-wide text-slate-500 dark:border-[#2a2d3e] dark:text-slate-400">
+                      <th className="px-3 py-2 text-left">เลขบิล</th>
+                      <th className="px-3 py-2 text-left">วันที่</th>
+                      <th className="px-3 py-2 text-right">รายการ</th>
+                      <th className="px-3 py-2 text-right">ยอด</th>
+                      <th className="px-3 py-2 text-center">สินค้า</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {memberHistory.map((bill) => {
+                      const expanded = expandedHistoryBills.has(bill.id)
+                      return (
+                        <>
+                          <tr
+                            key={bill.id}
+                            className="border-b border-slate-100 hover:bg-slate-50/70 dark:border-[#1e2233] dark:hover:bg-[#1a1f35]/50"
+                          >
+                            <td className="px-3 py-2 font-mono text-[11px] font-bold text-blue-600 dark:text-cyan-400">
+                              {bill.billNo}
+                            </td>
+                            <td className="whitespace-nowrap px-3 py-2 text-slate-500 dark:text-slate-400">
+                              {new Date(bill.at).toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: '2-digit' })}
+                            </td>
+                            <td className="px-3 py-2 text-right tabular-nums text-slate-500 dark:text-slate-400">
+                              {bill.lineCount}
+                            </td>
+                            <td className="px-3 py-2 text-right font-mono font-bold tabular-nums text-emerald-700 dark:text-emerald-400">
+                              {bill.total.toLocaleString('th-TH', { minimumFractionDigits: 0 })}฿
+                            </td>
+                            <td className="px-3 py-2 text-center">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setExpandedHistoryBills((prev) => {
+                                    const next = new Set(prev)
+                                    next.has(bill.id) ? next.delete(bill.id) : next.add(bill.id)
+                                    return next
+                                  })
+                                }
+                                className="rounded border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-semibold text-slate-600 hover:bg-slate-50 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-slate-300 dark:hover:bg-[#1a1f35]"
+                              >
+                                {expanded ? 'ซ่อน' : 'แสดง'}
+                              </button>
+                            </td>
+                          </tr>
+                          {expanded && (
+                            <tr key={`${bill.id}-lines`} className="border-b border-slate-100 bg-slate-50/60 dark:border-[#1e2233] dark:bg-[#0a0c14]">
+                              <td colSpan={5} className="px-4 py-2">
+                                {bill.lines.length > 0 ? (
+                                  <table className="w-full select-text text-[11px]">
+                                    <tbody className="divide-y divide-slate-100 dark:divide-[#1e2233]">
+                                      {bill.lines.map((line, i) => (
+                                        <tr key={i}>
+                                          <td className="py-0.5 pr-3 text-slate-700 dark:text-slate-300">{line.name}</td>
+                                          <td className="whitespace-nowrap py-0.5 pr-3 tabular-nums text-slate-400 dark:text-slate-500">×{line.qty}</td>
+                                          <td className="whitespace-nowrap py-0.5 text-right tabular-nums text-slate-500 dark:text-slate-400">
+                                            {line.unitPrice !== undefined
+                                              ? `${(line.qty * line.unitPrice).toLocaleString('th-TH', { minimumFractionDigits: 0 })}฿`
+                                              : '—'}
+                                          </td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                ) : (
+                                  <p className="text-[10px] text-slate-400 dark:text-slate-500">ไม่มีรายละเอียดรายการ</p>
+                                )}
+                              </td>
+                            </tr>
+                          )}
+                        </>
+                      )
+                    })}
+                  </tbody>
+                  <tfoot className="border-t-2 border-slate-300 bg-slate-50 dark:border-[#2a2d3e] dark:bg-[#12141c]">
+                    <tr className="font-bold">
+                      <td colSpan={3} className="px-3 py-2 text-xs text-slate-600 dark:text-slate-300">
+                        รวม {memberHistory.length} บิล
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono text-sm tabular-nums text-emerald-800 dark:text-emerald-300">
+                        {memberHistory.reduce((s, b) => s + b.total, 0).toLocaleString('th-TH', { minimumFractionDigits: 0 })}฿
+                      </td>
+                      <td />
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
+
       {showMemberModal &&
         typeof document !== 'undefined' &&
         createPortal(
@@ -2423,7 +2837,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                   <input
                     value={memberSearchQuery}
                     onChange={(e) => setMemberSearchQuery(e.target.value)}
-                    placeholder="ค้นหาชื่อ/รหัส/เลขผู้เสียภาษี..."
+                    placeholder="ค้นหาชื่อ / รหัส / เบอร์โทร / เลขผู้เสียภาษี..."
                     autoFocus
                     className="w-full rounded-lg border border-slate-200 bg-slate-50 py-2 pl-10 pr-3 text-sm text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-cyan-100 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30"
                   />
@@ -2433,7 +2847,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
               <div className="max-h-[70vh] overflow-auto p-2">
                 <div className="grid grid-cols-12 gap-2 border-b border-slate-200 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-slate-500 dark:border-[#2a2d3e] dark:text-slate-400">
                   <div className="col-span-3">Account</div>
-                  <div className="col-span-7">Name</div>
+                  <div className="col-span-7">Name / Phone</div>
                   <div className="col-span-2 text-center">Action</div>
                 </div>
                 {filteredMembers.map((m) => (
@@ -2444,8 +2858,11 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                     <div className="col-span-3 font-mono text-[11px] font-black text-purple-700 dark:text-fuchsia-400">
                       {m.accountCode}
                     </div>
-                    <div className="col-span-7 truncate text-[12px] font-semibold text-slate-700 dark:text-slate-200">
-                      {m.name}
+                    <div className="col-span-7 min-w-0">
+                      <p className="truncate text-[12px] font-semibold text-slate-700 dark:text-slate-200">{m.name}</p>
+                      {m.phone && (
+                        <p className="font-mono text-[10px] text-slate-400 dark:text-slate-500">{formatPhone(m.phone)}</p>
+                      )}
                     </div>
                     <div className="col-span-2 flex justify-center">
                       <button
@@ -2650,7 +3067,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                       <div className="flex h-full flex-col gap-4 p-5">
                         {/* Image + title */}
                         <div className="flex gap-4">
-                          <ProductImage sku={sp.code} size="lg" className="shrink-0" zoomable />
+                          <ProductImage sku={sp.code} size="lg" className="shrink-0" zoomable onProject={() => showProductImage({ code: sp.code, name: sp.name, price: displayPrice, unit: picked?.unit.label ?? '' })} />
                           <div className="min-w-0">
                             <div className="mb-1.5 flex flex-wrap gap-1">
                               {sp.brand && <span className="rounded bg-blue-50 px-1.5 py-px text-[10px] font-bold uppercase tracking-wide text-blue-600 dark:bg-blue-900/30 dark:text-blue-300">{sp.brand}</span>}
@@ -3029,16 +3446,24 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                       <label className="block text-[10px] font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">
                         เลือกบัญชีรับโอน
                       </label>
-                      <select
-                        value={selectedBank}
-                        onChange={(e) => setSelectedBank(e.target.value)}
-                        className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-semibold text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-slate-600 dark:bg-[#1a1f2e] dark:text-cyan-100"
-                      >
-                        <option value="">เลือกบัญชี...</option>
-                        <option value="kbank">กสิกรไทย</option>
-                        <option value="scb">ไทยพาณิชย์</option>
-                        <option value="ktb">กรุงไทย</option>
-                      </select>
+                      {bankAccounts.length === 0 ? (
+                        <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                          ยังไม่มีบัญชีธนาคาร — กรุณาเพิ่มที่เมนู เปิด/ปิดกะ › บัญชีธนาคาร
+                        </p>
+                      ) : (
+                        <select
+                          value={selectedBank}
+                          onChange={(e) => setSelectedBank(e.target.value)}
+                          className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-semibold text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-slate-600 dark:bg-[#1a1f2e] dark:text-cyan-100"
+                        >
+                          <option value="">เลือกบัญชี...</option>
+                          {bankAccounts.map((a) => (
+                            <option key={a.id} value={a.id}>
+                              {a.bankName} · {a.accountNo} ({a.accountName})
+                            </option>
+                          ))}
+                        </select>
+                      )}
                       <button
                         type="button"
                         onClick={() => setShowQRModal(true)}
@@ -3102,16 +3527,34 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                         <label className="block text-[10px] font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">
                           บัญชีรับโอน (ส่วนโอน)
                         </label>
-                        <select
-                          value={selectedBank}
-                          onChange={(e) => setSelectedBank(e.target.value)}
-                          className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-slate-600 dark:bg-[#1a1f2e] dark:text-cyan-100"
-                        >
-                          <option value="">เลือกบัญชี...</option>
-                          <option value="kbank">กสิกรไทย</option>
-                          <option value="scb">ไทยพาณิชย์</option>
-                          <option value="ktb">กรุงไทย</option>
-                        </select>
+                        {bankAccounts.length === 0 ? (
+                          <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                            ยังไม่มีบัญชีธนาคาร — กรุณาเพิ่มที่เมนู เปิด/ปิดกะ › บัญชีธนาคาร
+                          </p>
+                        ) : (
+                          <select
+                            value={selectedBank}
+                            onChange={(e) => setSelectedBank(e.target.value)}
+                            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-slate-600 dark:bg-[#1a1f2e] dark:text-cyan-100"
+                          >
+                            <option value="">เลือกบัญชี...</option>
+                            {bankAccounts.map((a) => (
+                              <option key={a.id} value={a.id}>
+                                {a.bankName} · {a.accountNo} ({a.accountName})
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                        {selectedBank && mixedTransferNum > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => setShowQRModal(true)}
+                            className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-700 transition hover:bg-slate-50 dark:border-slate-600 dark:bg-[#1a1f2e] dark:text-slate-200 dark:hover:bg-[#2d3445]"
+                          >
+                            <QrCode className="size-4" aria-hidden />
+                            แสดง QR ส่วนโอน ({mixedTransferNum.toLocaleString('th-TH', { minimumFractionDigits: 2 })} บาท)
+                          </button>
+                        )}
                       </div>
                       <div className="flex justify-between rounded-xl border border-slate-100 bg-white px-3 py-2 text-[11px] font-black uppercase tracking-widest dark:border-slate-600 dark:bg-[#1a1f2e]">
                         <span className="text-slate-500 dark:text-slate-400">รวมตรวจสอบ</span>
@@ -3129,6 +3572,29 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                       </div>
                     </div>
                   )}
+                </div>
+
+                <div className="space-y-1.5">
+                  <p className="text-center text-[11px] font-semibold uppercase tracking-widest text-slate-500 dark:text-slate-400">
+                    วิธีจัดส่ง
+                  </p>
+                  <div className="flex flex-wrap justify-center gap-2">
+                    {['รับเอง', 'ส่งเอง', ...transportNames].map((method) => (
+                      <button
+                        key={method}
+                        type="button"
+                        onClick={() => setCheckoutShippingMethod(method)}
+                        className={clsx(
+                          'rounded-xl border-2 px-3 py-1.5 text-[11px] font-bold transition-all',
+                          checkoutShippingMethod === method
+                            ? 'border-sky-500 bg-sky-50 text-sky-700 dark:bg-sky-900/20 dark:text-sky-300'
+                            : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 dark:border-slate-600 dark:bg-[#252a38] dark:text-slate-400',
+                        )}
+                      >
+                        {method}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
                 <div className="space-y-2">
@@ -3171,6 +3637,114 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
           document.body,
         )}
 
+      {posSpotlight &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          (() => {
+            const currentUrl = posSpotlightUrls[posSpotlightIndex] ?? null
+            const selectImage = (idx: number) => {
+              setPosSpotlightIndex(idx)
+              writeCfdState({ ...readCfdState(), spotlightImageIndex: idx, updatedAt: Date.now() })
+            }
+            const thumbnails = posSpotlightUrls.length > 1 ? (
+              <div className="flex items-center justify-center gap-2">
+                {posSpotlightUrls.map((u, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); selectImage(i) }}
+                    className={`size-12 overflow-hidden rounded-lg border-2 transition ${i === posSpotlightIndex ? 'border-orange-400 shadow-md' : 'border-slate-200 opacity-60 hover:opacity-100'}`}
+                  >
+                    <img src={u} alt={`${i + 1}`} className="h-full w-full object-contain" />
+                  </button>
+                ))}
+              </div>
+            ) : null
+
+            if (posSpotlightExpanded) {
+              return (
+                <div
+                  className="fixed inset-0 z-[360] flex flex-col items-center justify-center gap-5 bg-white/95 backdrop-blur-md dark:bg-[#0d0f17]/95 cursor-zoom-out"
+                  onClick={() => { setPosSpotlightExpanded(false); writeCfdState({ ...readCfdState(), spotlightExpanded: false, updatedAt: Date.now() }) }}
+                >
+                  <div className="flex h-[60vh] w-[60vh] max-w-[85vw] items-center justify-center overflow-hidden rounded-3xl border border-slate-100 bg-slate-50 shadow-2xl dark:border-[#2a2d3e] dark:bg-[#12141c]">
+                    {currentUrl ? (
+                      <img src={currentUrl} alt={posSpotlight.name} className="h-full w-full object-contain" />
+                    ) : (
+                      <svg viewBox="0 0 24 24" className="size-32 text-slate-200 dark:text-slate-700" fill="none" stroke="currentColor" strokeWidth={1}>
+                        <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
+                      </svg>
+                    )}
+                  </div>
+                  {thumbnails}
+                  <div className="text-center space-y-1 px-8" onClick={(e) => e.stopPropagation()}>
+                    <p className="text-2xl font-black leading-tight text-slate-900 dark:text-white">{posSpotlight.name}</p>
+                    {posSpotlight.price > 0 && (
+                      <p className="text-lg font-semibold text-orange-500">
+                        ฿{posSpotlight.price.toLocaleString('th-TH', { minimumFractionDigits: 2 })}{' '}
+                        <span className="text-sm font-normal text-slate-400">/ {posSpotlight.unit}</span>
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); setPosSpotlight(null); writeCfdState({ ...readCfdState(), spotlightSku: undefined, updatedAt: Date.now() }) }}
+                    className="rounded-xl border border-slate-200 bg-white px-5 py-2 text-sm font-semibold text-slate-500 shadow-sm transition hover:bg-slate-50 dark:border-[#2a2d3e] dark:bg-[#1a1f35] dark:text-slate-300"
+                  >
+                    ปิด
+                  </button>
+                </div>
+              )
+            }
+
+            return (
+              <div className="fixed inset-0 z-[360] flex items-center justify-center p-4 pointer-events-none">
+                <div className="pointer-events-auto w-72 overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl dark:border-[#2a2d3e] dark:bg-[#0d0f17]">
+                  <div
+                    className="flex h-56 items-center justify-center bg-slate-50 dark:bg-[#12141c] cursor-zoom-in"
+                    onClick={() => { setPosSpotlightExpanded(true); writeCfdState({ ...readCfdState(), spotlightExpanded: true, updatedAt: Date.now() }) }}
+                  >
+                    {currentUrl ? (
+                      <img src={currentUrl} alt={posSpotlight.name} className="h-full w-full object-contain" />
+                    ) : (
+                      <svg viewBox="0 0 24 24" className="size-20 text-slate-200 dark:text-slate-700" fill="none" stroke="currentColor" strokeWidth={1}>
+                        <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
+                      </svg>
+                    )}
+                  </div>
+                  {posSpotlightUrls.length > 1 && (
+                    <div className="flex items-center justify-center gap-1.5 border-b border-slate-100 py-2 dark:border-[#2a2d3e]">
+                      {posSpotlightUrls.map((u, i) => (
+                        <button key={i} type="button" onClick={() => selectImage(i)}
+                          className={`size-9 overflow-hidden rounded-md border transition ${i === posSpotlightIndex ? 'border-orange-400 shadow' : 'border-slate-200 opacity-50 hover:opacity-100'}`}
+                        >
+                          <img src={u} alt={`${i + 1}`} className="h-full w-full object-contain" />
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <div className="space-y-0.5 p-4">
+                    <p className="text-base font-black leading-snug text-slate-900 dark:text-white">{posSpotlight.name}</p>
+                    {posSpotlight.price > 0 && (
+                      <p className="text-sm text-slate-500 dark:text-slate-400">
+                        ฿{posSpotlight.price.toLocaleString('th-TH', { minimumFractionDigits: 2 })} / {posSpotlight.unit}
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => { setPosSpotlight(null); writeCfdState({ ...readCfdState(), spotlightSku: undefined, updatedAt: Date.now() }) }}
+                    className="w-full border-t border-slate-100 py-2.5 text-xs font-semibold text-slate-400 transition hover:bg-slate-50 dark:border-[#2a2d3e] dark:hover:bg-[#1a1f35]"
+                  >
+                    ปิด
+                  </button>
+                </div>
+              </div>
+            )
+          })(),
+          document.body,
+        )}
+
       {showQRModal &&
         typeof document !== 'undefined' &&
         createPortal(
@@ -3195,29 +3769,12 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                   <X className="size-5" />
                 </button>
               </div>
-              <div className="space-y-3 p-5 text-center">
-                <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 dark:border-[#2a2d3e] dark:bg-[#050508]">
-                  <div className="text-[10px] font-black uppercase tracking-widest text-slate-500 dark:text-slate-400">
-                    ยอดโอน
-                  </div>
-                  <div className="mt-1 bg-gradient-to-r from-emerald-500 to-blue-500 bg-clip-text font-mono text-2xl font-black text-transparent dark:from-emerald-400 dark:to-cyan-300">
-                    {totals.grandTotal.toLocaleString('th-TH', { minimumFractionDigits: 2 })}
-                  </div>
-                  <div className="mt-3 flex h-48 items-center justify-center rounded-lg border border-dashed border-slate-300 bg-white text-slate-400 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-slate-500">
-                    QR PLACEHOLDER
-                  </div>
-                  <div className="mt-2 text-[11px] font-semibold text-slate-500 dark:text-slate-400">
-                    บัญชี: {selectedBank || '-'}
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setShowQRModal(false)}
-                  className="w-full rounded-lg bg-gradient-to-r from-blue-600 to-indigo-600 py-3 text-xs font-black uppercase tracking-widest text-white hover:from-blue-500 hover:to-indigo-500 dark:from-cyan-600 dark:to-blue-600 dark:hover:from-cyan-500 dark:hover:to-blue-500"
-                >
-                  ปิด
-                </button>
-              </div>
+              <QrModalBody
+                amount={qrAmount}
+                accountId={selectedBank}
+                bankAccounts={bankAccounts}
+                onClose={() => setShowQRModal(false)}
+              />
             </div>
           </div>,
           document.body,

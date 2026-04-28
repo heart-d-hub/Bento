@@ -13,8 +13,8 @@ type MainTitleBarProps = {
 
 function formatDisplayDate(d: Date) {
   return d.toLocaleDateString('th-TH', {
-    day: '2-digit',
-    month: '2-digit',
+    day: 'numeric',
+    month: 'short',
     year: 'numeric',
   })
 }

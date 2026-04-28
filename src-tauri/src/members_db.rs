@@ -225,3 +225,67 @@ pub async fn members_delete(member_id: String) -> Result<(), String> {
   Ok(())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberArRow {
+  pub id: String,
+  pub member_code: String,
+  pub full_name: String,
+  pub phone: String,
+  pub ar_balance: f64,
+  pub credit_limit_baht: f64,
+  pub branch_id: String,
+  pub last_sale_at: Option<String>,
+}
+
+#[tauri::command]
+pub async fn member_ar_list() -> Result<Vec<MemberArRow>, String> {
+  let pool = get_pool().await?;
+  let rows = sqlx::query_as::<_, MemberArRow>(
+    r#"
+    SELECT
+      m.id,
+      m."memberCode"        AS member_code,
+      m."fullName"          AS full_name,
+      COALESCE(m.phone, '') AS phone,
+      m."arBalance"         AS ar_balance,
+      m."creditLimitBaht"   AS credit_limit_baht,
+      COALESCE(m."branchId", '') AS branch_id,
+      to_char(MAX(s."docDate"), 'YYYY-MM-DD') AS last_sale_at
+    FROM "Member" m
+    LEFT JOIN "Sale" s ON s."memberId" = m.id AND s."voidedAt" IS NULL
+    WHERE m."arBalance" > 0.001
+    GROUP BY m.id, m."memberCode", m."fullName", m.phone, m."arBalance", m."creditLimitBaht", m."branchId"
+    ORDER BY m."arBalance" DESC
+    "#,
+  )
+  .fetch_all(&pool)
+  .await
+  .map_err(|e| format!("member_ar_list failed: {e}"))?;
+  Ok(rows)
+}
+
+#[tauri::command]
+pub async fn member_receive_payment(member_id: String, amount: f64, note: String) -> Result<(), String> {
+  if amount <= 0.0 {
+    return Err("amount must be positive".to_string());
+  }
+  let pool = get_pool().await?;
+  let rows = sqlx::query(
+    r#"UPDATE "Member"
+       SET "arBalance" = GREATEST(0, "arBalance" - $1),
+           "updatedAt" = now() AT TIME ZONE 'Asia/Bangkok'
+       WHERE id = $2"#,
+  )
+  .bind(amount)
+  .bind(&member_id)
+  .execute(&pool)
+  .await
+  .map_err(|e| format!("member_receive_payment failed: {e}"))?;
+  if rows.rows_affected() == 0 {
+    return Err(format!("member not found: {member_id}"));
+  }
+  let _ = note; // reserved for future audit log
+  Ok(())
+}
+

@@ -1,0 +1,10 @@
+[[permission]]
+identifier = "allow-vendors-db"
+description = "Allows vendor / payee book management."
+commands.allow = [
+  "vendor_list",
+  "vendor_create",
+  "vendor_update",
+  "vendor_delete",
+  "vendor_spending"
+]

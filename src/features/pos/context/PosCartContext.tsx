@@ -1,6 +1,7 @@
 /* eslint-disable react-refresh/only-export-components */
 import { type InventoryProduct } from '@/features/inventory/data/mockInventory'
 import {
+  getBundleAvailableQty,
   getProductMasterById,
   getProductMasterBySku,
   masterPosDisplayNoteForSku,
@@ -8,6 +9,7 @@ import {
   posDisplayProductName,
   PRODUCT_MASTER_LIST_CHANGED_EVENT,
   productPosEligibleByInventorySku,
+  resolveBundleBreakdown,
   type ProductMasterDetail,
 } from '@/features/inventory/data/productMasterData'
 import { PRODUCT_TAGS_CHANGED_EVENT } from '@/features/inventory/data/productTagsRegistry'
@@ -328,6 +330,7 @@ function availableAmount(
   box: Record<string, BoxPieceStockState>,
   unitIndex: number,
 ): number {
+  if (p.bundleComponents?.length) return getBundleAvailableQty(p.bundleComponents, piece)
   const cfg = getPosSellConfig(p.id)
   const { isRoll, isMeter } = unitMeta(cfg, unitIndex)
   if (isBoxPieceProduct(p)) {
@@ -416,6 +419,9 @@ function buildLine(
 
   const maxQty = Math.floor(avail / Math.max(1, u.baseUnits))
   if (maxQty < 1) return null
+  const bundleBreakdown = p.bundleComponents?.length
+    ? resolveBundleBreakdown(p.bundleComponents).map((b) => ({ productId: b.productId, qty: b.qty * Math.max(1, u.baseUnits) }))
+    : undefined
   return {
     lineId: newLineId(),
     productId: p.id,
@@ -429,6 +435,7 @@ function buildLine(
     priceLevelIndex: lv.index,
     priceLevelLabel: lv.label,
     ...(note ? { posDisplayNote: note } : {}),
+    ...(bundleBreakdown ? { stockBreakdown: bundleBreakdown } : {}),
   }
 }
 

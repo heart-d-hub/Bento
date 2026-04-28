@@ -1,3 +1,5 @@
+import type { BarcodeEntry, BundleComponent, VehicleFitmentRef } from '@/features/inventory/data/productMasterData'
+
 export type InventoryActivity = {
   id: string
   text: string
@@ -83,6 +85,14 @@ export type InventoryProduct = {
   productTagIds?: string[]
   /** หมายเหตุแสดงบน POS — โชว์หลังชื่อสินค้าในตะกร้า */
   posDisplayNote?: string
+  /** รุ่นรถแบบผูกรหัสแคตตาล็อก — ใช้ค้นหาจากยี่ห้อ/รุ่น/ปี/ระบบขับเคลื่อน */
+  vehicleFitments?: VehicleFitmentRef[]
+  /** true = ราคาซื้อรวมค่าขนส่งแล้ว — ข้ามการแบ่งค่าขนส่งเข้าต้นทุนตอนรับสินค้า */
+  shippingCostExcluded?: boolean
+  /** บาร์โค้ดทั้งหมด — รองรับหลายบาร์โค้ด (ชิ้น / กล่อง / ลัง) */
+  barcodes?: BarcodeEntry[]
+  /** ส่วนประกอบของสินค้าชุด — ตัดสต็อกจากส่วนประกอบแทนสต็อกตัวเอง */
+  bundleComponents?: BundleComponent[]
 }
 
 export const INVENTORY_SUMMARY = {

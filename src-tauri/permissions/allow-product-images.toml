@@ -1,0 +1,11 @@
+[[permission]]
+identifier = "allow-product-images"
+description = "Allows reading and writing product images in the local data directory."
+commands.allow = [
+  "get_product_images_dir",
+  "get_product_image_b64",
+  "get_product_images_b64",
+  "list_product_image_skus",
+  "save_product_image_from_path",
+  "delete_product_image",
+]

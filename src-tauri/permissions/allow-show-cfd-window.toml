@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-show-cfd-window"
+description = "Allows showing the Customer Facing Display window."
+commands.allow = ["show_cfd_window"]

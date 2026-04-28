@@ -8,7 +8,12 @@ import {
   type InventoryColumnKey,
 } from '@/features/inventory/data/inventoryColumns'
 import { WarehouseStockAdjustModal } from '@/features/inventory/components/WarehouseStockAdjustModal'
-import { PRODUCT_MASTER_LIST_CHANGED_EVENT } from '@/features/inventory/data/productMasterData'
+import {
+  PRODUCT_MASTER_LIST_CHANGED_EVENT,
+  collectInventoryCarFilterOptions,
+  productMatchesInventoryCarFilters,
+  type ProductMasterDetail,
+} from '@/features/inventory/data/productMasterData'
 import { type InventoryProduct } from '@/features/inventory/data/mockInventory'
 import {
   applyWarehouseThresholds,
@@ -127,6 +132,11 @@ export function InventoryTable() {
   const [category, setCategory] = useState('ทั้งหมด')
   const [brand, setBrand] = useState('ทั้งหมด')
   const [location, setLocation] = useState('ทั้งหมด')
+  const [filterCarBrand, setFilterCarBrand] = useState('ทั้งหมด')
+  const [filterCarModel, setFilterCarModel] = useState('ทั้งหมด')
+  const [filterYear, setFilterYear] = useState('ทั้งหมด')
+  const [filterEngine, setFilterEngine] = useState('ทั้งหมด')
+  const [filterDrive, setFilterDrive] = useState('ทั้งหมด')
   const [q, setQ] = useState('')
   const [visibility, setVisibility] = useState(loadColumnVisibility)
   const [columnModalOpen, setColumnModalOpen] = useState(false)
@@ -219,6 +229,18 @@ export function InventoryTable() {
     return ['ทั้งหมด', ...(hasEmpty ? ['__loc_empty__'] : []), ...u]
   }, [catalogBase])
 
+  const carFilterOptions = useMemo(
+    () =>
+      collectInventoryCarFilterOptions(catalogBase as unknown as ProductMasterDetail[], {
+        carBrand: filterCarBrand,
+        carModel: filterCarModel,
+        engineLabel: filterEngine,
+        driveType: filterDrive,
+        filterAll: 'ทั้งหมด',
+      }),
+    [catalogBase, filterCarBrand, filterCarModel, filterEngine, filterDrive],
+  )
+
   const productsLive = useMemo(
     () => applyWarehouseThresholds(mergeInventoryProductsWithLiveStock(catalogBase)),
     [catalogBase, thresholdTick],
@@ -244,6 +266,13 @@ export function InventoryTable() {
   }, [catalogBase])
 
   const filtered = useMemo(() => {
+    const hasVehicleFilter =
+      filterCarBrand !== 'ทั้งหมด' ||
+      filterCarModel !== 'ทั้งหมด' ||
+      filterYear !== 'ทั้งหมด' ||
+      filterEngine !== 'ทั้งหมด' ||
+      filterDrive !== 'ทั้งหมด'
+
     return productsLive.filter((p) => {
       if (category !== 'ทั้งหมด' && p.category !== category) return false
       if (brand !== 'ทั้งหมด') {
@@ -256,6 +285,13 @@ export function InventoryTable() {
           if (p.location.trim()) return false
         } else if (p.location !== location) return false
       }
+      if (hasVehicleFilter &&
+        !productMatchesInventoryCarFilters(
+          p as unknown as ProductMasterDetail,
+          { brand: 'ทั้งหมด', carBrand: filterCarBrand, carModel: filterCarModel, year: filterYear, engineLabel: filterEngine, driveType: filterDrive },
+          'ทั้งหมด',
+        )
+      ) return false
       if (q.trim()) {
         const s = q.trim().toLowerCase()
         const inText =
@@ -267,7 +303,7 @@ export function InventoryTable() {
       }
       return true
     })
-  }, [category, brand, location, q, productsLive])
+  }, [category, brand, location, q, productsLive, filterCarBrand, filterCarModel, filterYear, filterEngine, filterDrive])
 
   const rows = useMemo(() => sortProducts(filtered, sortRules), [filtered, sortRules])
 
@@ -353,6 +389,89 @@ export function InventoryTable() {
               <option key={l} value={l}>
                 {l === '__loc_empty__' ? '(ไม่ระบุตำแหน่ง)' : l}
               </option>
+            ))}
+          </select>
+        </label>
+        <label className="min-w-[7rem] flex-1">
+          <span className="mb-0.5 block text-xs text-slate-500">ยี่ห้อรถ</span>
+          <select
+            className="w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-sm"
+            value={filterCarBrand}
+            onChange={(e) => {
+              setFilterCarBrand(e.target.value)
+              setFilterCarModel('ทั้งหมด')
+              setFilterEngine('ทั้งหมด')
+              setFilterDrive('ทั้งหมด')
+              setFilterYear('ทั้งหมด')
+            }}
+          >
+            <option value="ทั้งหมด">ทั้งหมด</option>
+            {carFilterOptions.carBrands.map((b) => (
+              <option key={b} value={b}>{b}</option>
+            ))}
+          </select>
+        </label>
+        <label className="min-w-[7rem] flex-1">
+          <span className="mb-0.5 block text-xs text-slate-500">รุ่นรถ</span>
+          <select
+            className="w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-sm"
+            value={filterCarModel}
+            onChange={(e) => {
+              setFilterCarModel(e.target.value)
+              setFilterEngine('ทั้งหมด')
+              setFilterDrive('ทั้งหมด')
+              setFilterYear('ทั้งหมด')
+            }}
+          >
+            <option value="ทั้งหมด">ทั้งหมด</option>
+            {carFilterOptions.models.map((m) => (
+              <option key={m} value={m}>{m}</option>
+            ))}
+          </select>
+        </label>
+        <label className="min-w-[7rem] flex-1">
+          <span className="mb-0.5 block text-xs text-slate-500">เครื่องยนต์</span>
+          <select
+            className="w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-sm"
+            value={filterEngine}
+            onChange={(e) => {
+              setFilterEngine(e.target.value)
+              setFilterDrive('ทั้งหมด')
+              setFilterYear('ทั้งหมด')
+            }}
+          >
+            <option value="ทั้งหมด">ทั้งหมด</option>
+            {carFilterOptions.engines.map((en) => (
+              <option key={en} value={en}>{en}</option>
+            ))}
+          </select>
+        </label>
+        <label className="min-w-[7rem] flex-1">
+          <span className="mb-0.5 block text-xs text-slate-500">ขับเคลื่อน</span>
+          <select
+            className="w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-sm"
+            value={filterDrive}
+            onChange={(e) => {
+              setFilterDrive(e.target.value)
+              setFilterYear('ทั้งหมด')
+            }}
+          >
+            <option value="ทั้งหมด">ทั้งหมด</option>
+            {carFilterOptions.driveTypes.map((d) => (
+              <option key={d} value={d}>{d}</option>
+            ))}
+          </select>
+        </label>
+        <label className="min-w-[7rem] flex-1">
+          <span className="mb-0.5 block text-xs text-slate-500">รุ่นปี</span>
+          <select
+            className="w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-sm"
+            value={filterYear}
+            onChange={(e) => setFilterYear(e.target.value)}
+          >
+            <option value="ทั้งหมด">ทั้งหมด</option>
+            {carFilterOptions.years.map((y) => (
+              <option key={y} value={y}>{y}</option>
             ))}
           </select>
         </label>

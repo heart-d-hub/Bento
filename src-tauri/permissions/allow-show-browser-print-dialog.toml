@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-show-browser-print-dialog"
+description = "Opens the WebView2 browser print preview (Save as PDF option)."
+commands.allow = ["show_browser_print_dialog"]

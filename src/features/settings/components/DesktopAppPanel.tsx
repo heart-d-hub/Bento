@@ -1,6 +1,10 @@
 import { isTauri } from '@/features/desktop/isTauri'
+import { openCfdWindow } from '@/features/cfd/openCfdWindow'
+import { readCfdVideoPath, writeCfdVideoPath } from '@/features/cfd/cfdBridge'
+import { getProductImagesDir } from '@/features/inventory/data/productImages'
 import { loadShortcuts, saveShortcuts, type ShortcutActionId, type ShortcutMap } from '@/features/desktop/shortcuts'
 import { useThemePreference } from '@/features/settings/themePreference'
+import { getClaudeApiKey, setClaudeApiKey } from '@/features/settings/data/claudeApiKey'
 import {
   ACTION_TILE_ORDER_CHANGED_EVENT,
   loadActionTileOrder,
@@ -19,7 +23,7 @@ import {
   type WindowPresetId,
 } from '@/features/desktop/windowControls'
 import { clsx } from 'clsx'
-import { ArrowDown, ArrowUp, Expand, GripVertical, Keyboard, LayoutGrid, Moon, Printer, RotateCcw, Sun } from 'lucide-react'
+import { ArrowDown, ArrowUp, Bot, Check, Expand, Film, FolderOpen, GripVertical, ImageIcon, Keyboard, LayoutGrid, Moon, Monitor, Printer, RotateCcw, Sun, Trash2 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 
 type ShortcutRow = { id: ShortcutActionId; label: string; hint?: string }
@@ -37,6 +41,58 @@ function prettifyKey(key: string): string {
   if (!key) return ''
   if (key === ' ') return 'Space'
   return key
+}
+
+function ClaudeApiKeySection() {
+  const [key, setKey] = useState(() => getClaudeApiKey())
+  const [saved, setSaved] = useState(false)
+
+  const handleSave = () => {
+    setClaudeApiKey(key)
+    setSaved(true)
+    setTimeout(() => setSaved(false), 2000)
+  }
+
+  return (
+    <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="flex items-start gap-3">
+        <span className="mt-0.5 inline-flex size-9 items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-slate-700">
+          <Bot className="size-4" aria-hidden />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-semibold text-slate-900">Claude AI — นำเข้าราคาลิสต์</p>
+          <p className="mt-0.5 text-xs leading-relaxed text-slate-500">
+            ใส่ API Key เพื่อใช้ฟีเจอร์ถ่ายรูป/PDF ราคาลิสต์แล้วให้ AI อ่านรายการสินค้าให้อัตโนมัติ
+          </p>
+          <div className="mt-3 flex items-center gap-2">
+            <input
+              type="password"
+              value={key}
+              onChange={(e) => { setKey(e.target.value); setSaved(false) }}
+              placeholder="sk-ant-api03-…"
+              className="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-xs font-mono outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-100"
+            />
+            <button
+              type="button"
+              onClick={handleSave}
+              className={clsx(
+                'flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold transition',
+                saved
+                  ? 'bg-emerald-100 text-emerald-700'
+                  : 'bg-emerald-600 text-white hover:bg-emerald-700',
+              )}
+            >
+              {saved ? <Check className="size-3.5" /> : null}
+              {saved ? 'บันทึกแล้ว' : 'บันทึก'}
+            </button>
+          </div>
+          <p className="mt-1.5 text-[10px] text-slate-400">
+            Key เก็บในเครื่องนี้เท่านั้น ไม่ส่งออกไปที่อื่น · ขอ Key ได้ที่ console.anthropic.com
+          </p>
+        </div>
+      </div>
+    </section>
+  )
 }
 
 export function DesktopAppPanel() {
@@ -111,8 +167,184 @@ export function DesktopAppPanel() {
     saveActionTileOrder(next)
   }
 
+  const [cfdOpening, setCfdOpening] = useState(false)
+  const [cfdVideoPath, setCfdVideoPath] = useState<string | null>(() => readCfdVideoPath())
+  const [imagesDir, setImagesDir] = useState<string | null>(null)
+  const [imagesDirOpening, setImagesDirOpening] = useState(false)
+  const [detectedImages, setDetectedImages] = useState<Record<string, string> | null>(null)
+  const [loadingImages, setLoadingImages] = useState(false)
+
+  useEffect(() => {
+    void getProductImagesDir().then(setImagesDir)
+  }, [])
+
+  const handleOpenCfd = () => {
+    setCfdOpening(true)
+    void openCfdWindow().finally(() => setCfdOpening(false))
+  }
+
+  const handlePickCfdVideo = async () => {
+    if (!isTauri()) return
+    const { open } = await import('@tauri-apps/plugin-dialog')
+    const selected = await open({
+      title: 'เลือกวิดีโอสำหรับจอลูกค้า',
+      filters: [{ name: 'Video', extensions: ['mp4', 'webm', 'mov', 'avi', 'mkv'] }],
+      multiple: false,
+    })
+    if (typeof selected === 'string') {
+      writeCfdVideoPath(selected)
+      setCfdVideoPath(selected)
+    }
+  }
+
+  const handleClearCfdVideo = () => {
+    writeCfdVideoPath(null)
+    setCfdVideoPath(null)
+  }
+
+  const handleOpenImagesDir = () => {
+    if (!isTauri()) return
+    setImagesDirOpening(true)
+    void import('@tauri-apps/api/core')
+      .then(({ invoke }) => invoke('open_product_images_dir'))
+      .finally(() => setImagesDirOpening(false))
+  }
+
+  const handleCheckImages = () => {
+    if (!isTauri()) return
+    setLoadingImages(true)
+    void import('@tauri-apps/api/core')
+      .then(({ invoke }) => invoke<Record<string, string>>('list_product_image_skus'))
+      .then(setDetectedImages)
+      .finally(() => setLoadingImages(false))
+  }
+
   return (
     <div className="space-y-6">
+      <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex items-start gap-3">
+          <span className="mt-0.5 inline-flex size-9 items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-slate-700">
+            <Monitor className="size-4" aria-hidden />
+          </span>
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-slate-900">Customer-Facing Display (CFD)</p>
+            <p className="mt-0.5 text-xs leading-relaxed text-slate-600">
+              เปิดหน้าจอลูกค้า (จอที่ 2) — แสดงรายการสินค้า ราคา และยอดรวมตามเวลาจริงจาก POS
+            </p>
+          </div>
+        </div>
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={handleOpenCfd}
+            disabled={cfdOpening}
+            className="inline-flex items-center gap-2 rounded-lg border border-indigo-300 bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-indigo-700 disabled:opacity-60"
+          >
+            <Monitor className="size-4" aria-hidden />
+            {cfdOpening ? 'กำลังเปิด…' : 'เปิดหน้าจอลูกค้า'}
+          </button>
+          <p className="text-xs text-slate-500">
+            {isTauri() ? 'เปิดหน้าต่างใหม่ — วางไว้บนจอที่ 2 แล้วกด F11 เต็มจอ' : 'เปิดในแท็บใหม่ (เว็บ)'}
+          </p>
+        </div>
+        {isTauri() && (
+          <div className="mt-4 border-t border-slate-100 pt-4">
+            <p className="mb-2 text-xs font-medium text-slate-700">วิดีโอโปรโมชัน (แสดงบนจอลูกค้า)</p>
+            {cfdVideoPath ? (
+              <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                <Film className="size-4 shrink-0 text-orange-500" aria-hidden />
+                <span className="min-w-0 flex-1 truncate text-xs text-slate-700" title={cfdVideoPath}>
+                  {cfdVideoPath.split(/[\\/]/).pop()}
+                </span>
+                <button
+                  type="button"
+                  onClick={handlePickCfdVideo}
+                  className="shrink-0 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-100"
+                >
+                  เปลี่ยน
+                </button>
+                <button
+                  type="button"
+                  onClick={handleClearCfdVideo}
+                  className="shrink-0 rounded-md p-1 text-slate-400 hover:text-rose-500"
+                  title="ลบวิดีโอ"
+                >
+                  <Trash2 className="size-3.5" aria-hidden />
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={handlePickCfdVideo}
+                className="inline-flex items-center gap-2 rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-2 text-sm text-slate-600 hover:border-orange-400 hover:text-orange-600"
+              >
+                <Film className="size-4" aria-hidden />
+                เลือกวิดีโอ…
+              </button>
+            )}
+          </div>
+        )}
+      </section>
+
+      <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex items-start gap-3">
+          <span className="mt-0.5 inline-flex size-9 items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-slate-700">
+            <ImageIcon className="size-4" aria-hidden />
+          </span>
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-slate-900">รูปภาพสินค้า</p>
+            <p className="mt-0.5 text-xs leading-relaxed text-slate-600">
+              วางรูปภาพสินค้าในโฟลเดอร์นี้ — ตั้งชื่อไฟล์เป็น <strong className="font-medium text-slate-800">รหัสสินค้า</strong> ตัวพิมพ์เล็ก เช่น{' '}
+              <code className="rounded bg-slate-100 px-1 font-mono text-[10px]">ab-1234.jpg</code>{' '}
+              รองรับ .jpg .jpeg .png .webp .gif
+            </p>
+          </div>
+        </div>
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={handleOpenImagesDir}
+            disabled={!isDesktop || imagesDirOpening}
+            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-800 shadow-sm hover:bg-slate-50 disabled:opacity-60"
+          >
+            <FolderOpen className="size-4" aria-hidden />
+            {imagesDirOpening ? 'กำลังเปิด…' : 'เปิดโฟลเดอร์รูปภาพ'}
+          </button>
+          <button
+            type="button"
+            onClick={handleCheckImages}
+            disabled={!isDesktop || loadingImages}
+            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-800 shadow-sm hover:bg-slate-50 disabled:opacity-60"
+          >
+            <ImageIcon className="size-4" aria-hidden />
+            {loadingImages ? 'กำลังตรวจ…' : 'ตรวจสอบไฟล์รูป'}
+          </button>
+          {imagesDir && (
+            <p className="w-full break-all font-mono text-[10px] text-slate-400">{imagesDir}</p>
+          )}
+        </div>
+        {detectedImages !== null && (
+          <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
+            {Object.keys(detectedImages).length === 0 ? (
+              <p className="text-xs text-slate-500">ไม่พบไฟล์รูปภาพในโฟลเดอร์ — ตรวจสอบว่าวางไฟล์ถูกโฟลเดอร์แล้ว</p>
+            ) : (
+              <>
+                <p className="mb-2 text-xs font-semibold text-slate-700">พบ {Object.keys(detectedImages).length} ไฟล์ — รหัสสินค้าที่จะจับคู่กับรูป:</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {Object.entries(detectedImages).map(([sku, file]) => (
+                    <span key={sku} className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-0.5 font-mono text-[11px] text-slate-800" title={file}>
+                      <span className="font-bold text-indigo-700">{sku}</span>
+                      <span className="text-slate-400">→ {file}</span>
+                    </span>
+                  ))}
+                </div>
+                <p className="mt-2 text-[10px] text-slate-500">รหัสสินค้าในระบบต้องตรงกับ <span className="font-bold text-indigo-700">ชื่อซ้ายมือ</span> (ตัวพิมพ์เล็ก) จึงจะแสดงรูป</p>
+              </>
+            )}
+          </div>
+        )}
+      </section>
+
       <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
         <div className="flex items-start gap-3">
           <span className="mt-0.5 inline-flex size-9 items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-slate-700">
@@ -430,6 +662,8 @@ export function DesktopAppPanel() {
           </p>
         )}
       </section>
+
+      <ClaudeApiKeySection />
 
       <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
         <div className="flex items-start gap-3">

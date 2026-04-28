@@ -26,10 +26,12 @@ import {
   computeCostFromSupplierList,
   deriveVehicleSummaryFromFitments,
   getProductMasterById,
+  getProductMasterList,
   MM_PER_HUN,
   normalizeSalesUnits,
   primarySellPriceFromTiers,
   sellPriceSmallUnitFromTier,
+  type BarcodeEntry,
   type PhysicalDimensions,
   type ProductMasterDetail,
   type ProductSalesStatus,
@@ -43,7 +45,7 @@ import {
   type PaperDimLayout,
 } from '@/features/inventory/data/paperDimensionLayout'
 import { VehicleFitPicker, type VehicleFitRow } from '@/features/inventory/components/VehicleFitPicker'
-import { ProductImage } from '@/features/inventory/components/ProductImage'
+import { ProductImageGrid } from '@/features/inventory/components/ProductImageGrid'
 import { isTauri } from '@/features/desktop/isTauri'
 import { clsx } from 'clsx'
 import { ChevronDown, Coins, ExternalLink, Plus, RotateCcw, Trash2, X } from 'lucide-react'
@@ -396,7 +398,8 @@ export function AddProductModal({
   browseNav,
 }: Props) {
   const [sku, setSku] = useState('')
-  const [boxBarcode, setBoxBarcode] = useState('')
+  const [receiveBonusRules, setReceiveBonusRules] = useState<import('@/features/inventory/data/productMasterData').ReceiveBonusRule[]>([])
+  const [bundleRows, setBundleRows] = useState<{ id: string; sku: string; qtyStr: string }[]>([])
   const [oemText, setOemText] = useState('')
   const [factoryNo, setFactoryNo] = useState('')
   const [crossRefText, setCrossRefText] = useState('')
@@ -407,6 +410,8 @@ export function AddProductModal({
   const [vatMode, setVatMode] = useState<'vat' | 'no_vat'>('vat')
   /** สินค้าแบ่งขาย — ชื่อบิล/POS ไม่แสดงท้ายวงเล็บ */
   const [splitSale, setSplitSale] = useState(false)
+  /** ราคาซื้อรวมค่าขนส่งแล้ว — ไม่แบ่งค่าขนส่งเข้าต้นทุนตอนรับสินค้า */
+  const [shippingCostExcluded, setShippingCostExcluded] = useState(false)
   /** piece | kg_roll | meter_roll | box_piece — ควบคุมการตัดสต็อก POS / หน้าแบ่งขาย */
   const [stockModeChoice, setStockModeChoice] = useState<'piece' | 'kg_roll' | 'meter_roll' | 'box_piece'>('piece')
   /** เปิดรายละเอียดโหมดม้วน/กล่อง — ค่าเริ่มปิดเพื่อไม่ให้ดูเหมือนต้องเป็นม้วนตั้งแต่แรก */
@@ -415,7 +420,7 @@ export function AddProductModal({
   const [nominalMetersRollStr, setNominalMetersRollStr] = useState('')
   const [piecesPerBoxStr, setPiecesPerBoxStr] = useState('')
   const [salesUnitRows, setSalesUnitRows] = useState(() => [
-    { id: `u-${Date.now()}`, label: 'ชิ้น', baseUnits: '1' },
+    { id: `u-${Date.now()}`, label: 'ชิ้น', baseUnits: '1', barcode: '' },
   ])
   const [packaging, setPackaging] = useState('')
   const [storageLocation, setStorageLocation] = useState('')
@@ -440,6 +445,7 @@ export function AddProductModal({
   const [pd4, setPd4] = useState('')
   const [costStr, setCostStr] = useState('')
   const [costManualOverride, setCostManualOverride] = useState(false)
+  const [costSource, setCostSource] = useState<'manual' | 'avg' | 'last'>('manual')
   const [sellRows, setSellRows] = useState(() =>
     Array.from({ length: 5 }, () => ({ markup: '', prices: [''] as string[] })),
   )
@@ -460,6 +466,12 @@ export function AddProductModal({
   const [productTagIds, setProductTagIds] = useState<string[]>([])
   const [productTagsEpoch, setProductTagsEpoch] = useState(0)
   const [error, setError] = useState<string | null>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
+
+  function setErrorAndScroll(msg: string) {
+    setError(msg)
+    scrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
+  }
   /** ส่วนมิติ — พับได้; เปิดอัตโนมัติเมื่อแก้ไขสินค้าที่มีมิติ */
   const [dimsOpen, setDimsOpen] = useState(false)
   /** ผู้ใช้เปลี่ยนหมวดในฟอร์มแล้ว — ใช้ป้ายมิติจากหมวดที่เลือก (จัดการหมวด) แทนค่าจาก browseNav */
@@ -602,6 +614,15 @@ export function AddProductModal({
   }, [])
 
   useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open, onClose])
+
+  useEffect(() => {
     if (!priceRoundingInfoOpen) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setPriceRoundingInfoOpen(false)
@@ -712,7 +733,8 @@ export function AddProductModal({
 
   const reset = useCallback((browse?: AddProductBrowseNav) => {
     setSku('')
-    setBoxBarcode('')
+    setReceiveBonusRules([])
+    setBundleRows([])
     setOemText('')
     setFactoryNo('')
     setCrossRefText('')
@@ -722,6 +744,7 @@ export function AddProductModal({
     setIsGenuine(false)
     setVatMode('vat')
     setSplitSale(false)
+    setShippingCostExcluded(false)
     setStockModeChoice('piece')
     setStockModeDetailsOpen(false)
     setNominalKgRollStr('')
@@ -734,8 +757,8 @@ export function AddProductModal({
       if (allowedNav?.includes(HOSE_SOFT_TAG_ID)) {
         const ts = Date.now()
         setSalesUnitRows([
-          { id: `u-${ts}-kg`, label: 'กก.', baseUnits: '1' },
-          { id: `u-${ts}-roll`, label: 'ม้วน', baseUnits: '1' },
+          { id: `u-${ts}-kg`, label: 'กก.', baseUnits: '1', barcode: '' },
+          { id: `u-${ts}-roll`, label: 'ม้วน', baseUnits: '1', barcode: '' },
         ])
         setSplitSale(true)
         if (allowedNav.length === 1 && allowedNav[0] === HOSE_SOFT_TAG_ID) {
@@ -745,12 +768,12 @@ export function AddProductModal({
         setStockModeChoice('box_piece')
         setStockModeDetailsOpen(true)
         setSplitSale(true)
-        setSalesUnitRows([{ id: `u-${Date.now()}`, label: 'ชิ้น', baseUnits: '1' }])
+        setSalesUnitRows([{ id: `u-${Date.now()}`, label: 'ชิ้น', baseUnits: '1', barcode: '' }])
         if (allowedNav.length === 1 && allowedNav[0] === NUT_STOCK_TAG_ID) {
           setProductTagIds([NUT_STOCK_TAG_ID])
         }
       } else {
-        setSalesUnitRows([{ id: `u-${Date.now()}`, label: 'ชิ้น', baseUnits: '1' }])
+        setSalesUnitRows([{ id: `u-${Date.now()}`, label: 'ชิ้น', baseUnits: '1', barcode: '' }])
       }
     }
     setPackaging('')
@@ -824,7 +847,8 @@ export function AddProductModal({
       setCategoryPickerTouched(false)
       const p = editingProduct
       setSku(p.sku)
-      setBoxBarcode(p.boxBarcode ?? '')
+      setReceiveBonusRules(p.receiveBonusRules ? [...p.receiveBonusRules] : [])
+      setBundleRows(p.bundleComponents ? p.bundleComponents.map((c, i) => ({ id: `bc-${i}`, sku: c.sku, qtyStr: String(c.qty) })) : [])
       setOemText(p.oemTags.join('\n'))
       setFactoryNo(p.factoryNo ?? '')
       setCrossRefText((p.crossReferenceTags ?? []).join('\n'))
@@ -834,6 +858,7 @@ export function AddProductModal({
       setIsGenuine(Boolean(p.isGenuine))
       setVatMode(p.vatMode === 'no_vat' ? 'no_vat' : 'vat')
       setSplitSale(Boolean(p.splitSale))
+      setShippingCostExcluded(Boolean(p.shippingCostExcluded))
       const sm = p.stockMode
       if (sm === 'kg_roll') {
         setStockModeChoice('kg_roll')
@@ -863,6 +888,7 @@ export function AddProductModal({
           id: u.id || `u-edit-${i}`,
           label: u.label,
           baseUnits: i === 0 ? '1' : String(u.baseUnits),
+          barcode: p.barcodes?.[i]?.code ?? '',
         })),
       )
       setPackaging(p.packaging ?? '')
@@ -896,8 +922,9 @@ export function AddProductModal({
       setPd3(pcts[2] ? String(pcts[2]) : '')
       setPd4(pcts[3] ? String(pcts[3]) : '')
       setBuyScheme(parseBuyScheme(p.scheme)?.normalized ?? p.scheme)
-      setCostStr(formatMoneyInput(p.costPrice))
-      setCostManualOverride(Boolean(p.costEnteredManually))
+      setCostStr(p.costPrice > 0 ? formatMoneyInput(p.costPrice) : '')
+      setCostManualOverride(p.costPrice > 0 || Boolean(p.costEnteredManually))
+      setCostSource('manual')
       const nCols = Math.max(1, nu.length)
       const tiers = p.sellPriceTiers ?? []
       setSellTierPercentBasis(p.sellTierPercentBasis === 'list_discount' ? 'list_discount' : 'cost_markup')
@@ -964,6 +991,7 @@ export function AddProductModal({
         id: `u-copy-${i}-${u.id}`,
         label: u.label,
         baseUnits: i === 0 ? '1' : String(u.baseUnits),
+        barcode: '',
       })),
     )
     setOemText('')
@@ -972,6 +1000,7 @@ export function AddProductModal({
     setIsGenuine(Boolean(copySource.isGenuine))
     setVatMode(copySource.vatMode === 'no_vat' ? 'no_vat' : 'vat')
     setSplitSale(Boolean(copySource.splitSale))
+    setShippingCostExcluded(Boolean(copySource.shippingCostExcluded))
     const csm = copySource.stockMode
     if (csm === 'kg_roll') {
       setStockModeChoice('kg_roll')
@@ -1038,7 +1067,8 @@ export function AddProductModal({
     setStlBoltPairWasherSku(copySource.stlBoltPairWasherSku?.trim() ?? '')
     setStlBoltPairMaleSkusText((copySource.stlBoltPairMaleSkus ?? []).join('\n'))
     setSku(suggestedSku ?? '')
-    setBoxBarcode(copySource.boxBarcode ?? '')
+    setReceiveBonusRules(copySource.receiveBonusRules ? [...copySource.receiveBonusRules] : [])
+    setBundleRows(copySource.bundleComponents ? copySource.bundleComponents.map((c, i) => ({ id: `bc-copy-${i}`, sku: c.sku, qtyStr: String(c.qty) })) : [])
     setError(null)
     setCategoryPickerTouched(true)
   }, [open, categoryTree, reset, copySource, suggestedSku, editingProduct, browseNav])
@@ -1057,7 +1087,7 @@ export function AddProductModal({
 
   const addSalesUnit = useCallback(() => {
     const nid = `u-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
-    setSalesUnitRows((prev) => [...prev, { id: nid, label: '', baseUnits: '1' }])
+    setSalesUnitRows((prev) => [...prev, { id: nid, label: '', baseUnits: '1', barcode: '' }])
   }, [])
 
   const removeSalesUnit = useCallback((idx: number) => {
@@ -1107,34 +1137,36 @@ export function AddProductModal({
     setDimUnit(next)
   }
 
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
+  function doSave() {
+    try {
     const isEdit = Boolean(editingProduct)
     const skuTrim = sku.trim()
     const nameTrim = name.trim()
     if (!skuTrim) {
-      setError('กรุณากรอกรหัสสินค้า')
+      setErrorAndScroll('กรุณากรอกรหัสสินค้า')
       return
     }
     const skuLower = skuTrim.toLowerCase()
     const prevSkuLower = editingProduct?.sku.trim().toLowerCase() ?? ''
     if (skuLower !== prevSkuLower && existingSkus.has(skuLower)) {
-      setError('รหัสสินค้านี้มีในระบบแล้ว — เปลี่ยนรหัสหรือแก้สินค้าเดิม')
+      setErrorAndScroll('รหัสสินค้านี้มีในระบบแล้ว — เปลี่ยนรหัสหรือแก้สินค้าเดิม')
       return
     }
-    const bcTrim = boxBarcode.trim()
-    if (bcTrim && checkBarcodeConflicts?.(bcTrim)) {
-      setError('บาร์โค้ดบนกล่องซ้ำกับรหัสหรือบาร์โค้ดของสินค้าอื่น — ใช้รหัสไม่ซ้ำหรือเว้นว่าง')
-      return
+    for (const row of salesUnitRows) {
+      const bc = row.barcode?.trim()
+      if (bc && checkBarcodeConflicts?.(bc)) {
+        setErrorAndScroll(`บาร์โค้ด "${bc}" ซ้ำกับรหัสหรือบาร์โค้ดของสินค้าอื่น`)
+        return
+      }
     }
     const branch = getStoredBranch()
     if (!branch?.id) {
-      setError('ไม่พบสาขาที่ล็อกอิน — กรุณาเลือกสาขาใหม่')
+      setErrorAndScroll('ไม่พบสาขาที่ล็อกอิน — กรุณาเลือกสาขาใหม่')
       return
     }
     const branchId = branch.id
     if (!nameTrim) {
-      setError('กรุณากรอกชื่อสินค้า')
+      setErrorAndScroll('กรุณากรอกชื่อสินค้า')
       return
     }
     const hasAnyDim =
@@ -1148,25 +1180,25 @@ export function AddProductModal({
     if (formVis.showPhysicalDimensions && !deferOptionalCategoryUi && hasAnyDim) {
       if (dimLayout.slotCount === 2) {
         if (b === undefined && c === undefined) {
-          setError('ถ้ากรอกมิติ ต้องกรอกอย่างน้อย 1 ช่อง (มม.) ให้ถูกต้อง')
+          setErrorAndScroll('ถ้ากรอกมิติ ต้องกรอกอย่างน้อย 1 ช่อง (มม.) ให้ถูกต้อง')
           return
         }
       } else if (b === undefined || c === undefined) {
-        setError('ถ้ากรอกมิติ ต้องกรอกค่าช่อง B และ C (มม.) ให้ครบ')
+        setErrorAndScroll('ถ้ากรอกมิติ ต้องกรอกค่าช่อง B และ C (มม.) ให้ครบ')
         return
       }
     }
     const effectiveMainId = mainCatId.trim() || categoryTree[0]?.id
     const m = effectiveMainId ? categoryTree.find((x) => x.id === effectiveMainId) : undefined
     if (!m) {
-      setError('เลือกหมวดหมู่หลัก')
+      setErrorAndScroll('เลือกหมวดหมู่หลัก')
       return
     }
     const sub = subCatId ? m.subcategories.find((s) => s.id === subCatId) : undefined
     const subSub =
       sub && subSubCatId ? sub.subSubcategories.find((ss) => ss.id === subSubCatId) : undefined
     if (subSubCatId && sub && !subSub) {
-      setError('หมวดย่อย 2 ไม่ถูกต้อง — เลือกใหม่หรือเว้นว่าง')
+      setErrorAndScroll('หมวดย่อย 2 ไม่ถูกต้อง — เลือกใหม่หรือเว้นว่าง')
       return
     }
 
@@ -1186,36 +1218,8 @@ export function AddProductModal({
     const crossReferenceTags = crossRefResolved.length ? crossRefResolved : undefined
     const id = isEdit ? editingProduct!.id : `pm-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
 
-    if (isEdit) {
-      const latest = getProductMasterById(editingProduct!.id)
-      if (latest) {
-        const conflict = detectConcurrentMasterEdit(editingProduct!, latest)
-        if (conflict) {
-          const who = `${conflict.otherBranchName}${conflict.editor ? ` · ${conflict.editor}` : ''}`
-          const ok = window.confirm(
-            `มีการบันทึกแฟ้มมาสเตอร์ SKU นี้ใหม่แล้วจากสาขาอื่น (${who}) — ต้องการบันทึกทับข้อมูลล่าสุดหรือไม่?`,
-          )
-          if (!ok) return
-        }
-      }
-    }
-
-    const listP = parseMoney(supplierListStr)
-    const costParsed = parseMoney(costStr)
-    const pcts: [number, number, number, number] = [parsePct(pd1), parsePct(pd2), parsePct(pd3), parsePct(pd4)]
-    const parsedScheme = parseBuyScheme(buyScheme)
-    if (!parsedScheme) {
-      setError('กรุณาระบุ Scheme ซื้อรูปแบบ X+Y เช่น 10+1')
-      return
-    }
-
-    let costPrice = 0
-    if (costParsed !== undefined) {
-      costPrice = costParsed
-    } else if (listP !== undefined && listP > 0) {
-      const totalAfterDiscount = computeCostFromSupplierList(listP, pcts) * vatMultiplier
-      costPrice = Math.round((totalAfterDiscount / parsedScheme.effectiveQty) * 100) / 100
-    }
+    const parsedScheme = parseBuyScheme(buyScheme) ?? { normalized: '1+0', buyQty: 1, freeQty: 0, effectiveQty: 1 }
+    const costPrice = parseMoney(costStr) ?? editingProduct?.costPrice ?? 0
 
     const salesUnitsAligned: SalesUnit[] = salesUnitRows.map((row, i) => {
       const label = row.label.trim() || `หน่วย${i + 1}`
@@ -1223,8 +1227,11 @@ export function AddProductModal({
         i === 0
           ? 1
           : Math.max(1, Math.round(Number(String(row.baseUnits).replace(',', '.')) || 1))
-      return { id: row.id || `u-${id}-${i}`, label, baseUnits }
+      return { id: row.id || `u-${id}-${i}`, label, baseUnits, barcode: row.barcode?.trim() || undefined }
     })
+    const derivedBarcodes: BarcodeEntry[] = salesUnitsAligned
+      .filter((u) => u.barcode)
+      .map((u) => ({ code: u.barcode!, qtyPerScan: u.baseUnits }))
     const nCols = Math.max(1, salesUnitsAligned.length)
 
     /** บรรจุใช้เพื่อแสดงผลเท่านั้น — ไม่ใช้คำนวณราคาขาย */
@@ -1251,6 +1258,7 @@ export function AddProductModal({
       }
     })
 
+    const listP = parseMoney(supplierListStr.trim())
     const pricingCtxSubmit = {
       supplierListPrice: listP !== undefined && listP > 0 ? listP : undefined,
       sellTierPercentBasis,
@@ -1425,21 +1433,21 @@ export function AddProductModal({
     if (stockModeChoice === 'kg_roll') {
       const nk = Number(String(nominalKgRollStr).replace(',', '.'))
       if (!Number.isFinite(nk) || nk <= 0) {
-        setError('โหมดม้วน/กก. — กรอก กก. ต่อม้วนให้มากกว่า 0')
+        setErrorAndScroll('โหมดม้วน/กก. — กรอก กก. ต่อม้วนให้มากกว่า 0')
         return
       }
     }
     if (stockModeChoice === 'meter_roll') {
       const nm = Number(String(nominalMetersRollStr).replace(',', '.'))
       if (!Number.isFinite(nm) || nm <= 0) {
-        setError('โหมดม้วน/เมตร — กรอก เมตร ต่อม้วนให้มากกว่า 0')
+        setErrorAndScroll('โหมดม้วน/เมตร — กรอก เมตร ต่อม้วนให้มากกว่า 0')
         return
       }
     }
     if (stockModeChoice === 'box_piece') {
       const pb = Math.floor(Number(String(piecesPerBoxStr).replace(',', '.')) || 0)
       if (!Number.isFinite(pb) || pb < 1) {
-        setError('โหมดกล่อง+ตัว — กรอกชิ้นต่อกล่องเป็นจำนวนเต็มตั้งแต่ 1')
+        setErrorAndScroll('โหมดกล่อง+ตัว — กรอกชิ้นต่อกล่องเป็นจำนวนเต็มตั้งแต่ 1')
         return
       }
     }
@@ -1460,7 +1468,13 @@ export function AddProductModal({
       ...(prev ?? {}),
       id,
       sku: skuTrim,
-      boxBarcode: boxBarcode.trim() || undefined,
+      barcodes: derivedBarcodes.length > 0 ? derivedBarcodes : undefined,
+      receiveBonusRules: receiveBonusRules.filter((r) => r.bonusSku.trim()).length > 0
+        ? receiveBonusRules.filter((r) => r.bonusSku.trim())
+        : undefined,
+      bundleComponents: bundleRows.filter((r) => r.sku.trim()).length > 0
+        ? bundleRows.filter((r) => r.sku.trim()).map((r) => ({ sku: r.sku.trim(), qty: Math.max(1, Math.round(Number(r.qtyStr) || 1)) }))
+        : undefined,
       name: nameTrim,
       brand: brand.trim() || '—',
       category: m.name,
@@ -1481,12 +1495,12 @@ export function AddProductModal({
       vehicleFitments,
       costPrice,
       scheme: parsedScheme.normalized,
-      avgCost: costPrice,
+      avgCost: (editingProduct?.avgCost ?? 0) > 0 ? editingProduct!.avgCost : costPrice,
       sellPrice,
-      vatMode: vatMode === 'no_vat' ? 'no_vat' : undefined,
-      supplierListPrice: listP !== undefined && listP > 0 ? listP : undefined,
-      purchaseDiscountPcts: pcts.some((p) => p > 0) ? pcts : undefined,
-      costEnteredManually: (costManualOverride && costParsed !== undefined) || undefined,
+      vatMode: undefined,
+      supplierListPrice: undefined,
+      purchaseDiscountPcts: undefined,
+      costEnteredManually: costManualOverride || costPrice > 0 ? true : undefined,
       sellTierPercentBasis: sellTierPercentBasis === 'list_discount' ? 'list_discount' : undefined,
       sellPriceTiers,
       isGenuine: isGenuine || undefined,
@@ -1512,6 +1526,7 @@ export function AddProductModal({
       salesStatus: salesStatus === 'active' ? undefined : salesStatus,
       physicalDimensions,
       splitSale: splitSale || undefined,
+      shippingCostExcluded: shippingCostExcluded || undefined,
       crossBranch,
       productTagIds: productTagsFiltered.length > 0 ? productTagsFiltered : undefined,
       stlBoltPairNutSku:
@@ -1534,6 +1549,14 @@ export function AddProductModal({
     }
     reset()
     onClose()
+    } catch (err) {
+      setErrorAndScroll(`เกิดข้อผิดพลาด: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    doSave()
   }
 
   return (
@@ -1564,7 +1587,7 @@ export function AddProductModal({
         </div>
 
         <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
-          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-2 sm:px-4">
+          <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-2 sm:px-4">
             {error ? (
               <p className="mb-2 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-sm text-rose-800">{error}</p>
             ) : null}
@@ -1578,48 +1601,28 @@ export function AddProductModal({
               <div className={sectionClass}>
                 <div className="flex items-start gap-3">
                   <p className={clsx(sectionTitleClass, 'flex-1')}>ข้อมูลหลัก</p>
-                  {isTauri() && <ProductImage sku={sku} size="sm" zoomable />}
+                  {isTauri() && <ProductImageGrid sku={sku} className="mb-4" />}
                 </div>
-                <div className="grid gap-2 sm:grid-cols-2">
-                  <label className="block min-w-0 sm:col-span-1">
-                    <span className={labelClass}>รหัสสินค้า *</span>
-                    <input
-                      className={inputClass}
-                      value={sku}
-                      onChange={(e) => {
-                        setSku(e.target.value)
-                        setError(null)
-                      }}
-                      placeholder="เช่น ABC-12345"
-                      autoComplete="off"
-                    />
-                    {sku.trim() &&
-                    (!editingProduct || sku.trim().toLowerCase() !== editingProduct.sku.trim().toLowerCase()) &&
-                    existingSkus.has(sku.trim().toLowerCase()) ? (
-                      <p className="mt-0.5 text-[10px] leading-snug text-amber-800">
-                        รหัสนี้มีในระบบแล้ว — เปลี่ยนรหัสหรือแก้สินค้าเดิม
-                      </p>
-                    ) : null}
-                  </label>
-                  <label className="block min-w-0 sm:col-span-1">
-                    <span className={labelClass}>บาร์โค้ดบนกล่อง</span>
-                    <input
-                      className={inputClass}
-                      value={boxBarcode}
-                      onChange={(e) => {
-                        setBoxBarcode(e.target.value)
-                        setError(null)
-                      }}
-                      placeholder="ต่างจากรหัสสินค้าได้"
-                      autoComplete="off"
-                    />
-                    {boxBarcode.trim() && checkBarcodeConflicts?.(boxBarcode.trim()) ? (
-                      <p className="mt-0.5 text-[10px] leading-snug text-amber-800">
-                        บาร์โค้ดนี้ซ้ำกับรหัสหรือบาร์โค้ดของสินค้าอื่น
-                      </p>
-                    ) : null}
-                  </label>
-                </div>
+                <label className="block min-w-0">
+                  <span className={labelClass}>รหัสสินค้า *</span>
+                  <input
+                    className={inputClass}
+                    value={sku}
+                    onChange={(e) => {
+                      setSku(e.target.value)
+                      setError(null)
+                    }}
+                    placeholder="เช่น ABC-12345"
+                    autoComplete="off"
+                  />
+                  {sku.trim() &&
+                  (!editingProduct || sku.trim().toLowerCase() !== editingProduct.sku.trim().toLowerCase()) &&
+                  existingSkus.has(sku.trim().toLowerCase()) ? (
+                    <p className="mt-0.5 text-[10px] leading-snug text-amber-800">
+                      รหัสนี้มีในระบบแล้ว — เปลี่ยนรหัสหรือแก้สินค้าเดิม
+                    </p>
+                  ) : null}
+                </label>
 
                 <div className="mt-1.5 grid gap-1.5 sm:grid-cols-12 sm:items-end">
                   <label className="block min-w-0 sm:col-span-7">
@@ -1836,6 +1839,27 @@ export function AddProductModal({
                             />
                           )}
                         </label>
+                        <label className="block min-w-0 flex-1">
+                          <span className={labelClass}>บาร์โค้ด</span>
+                          <input
+                            className={inputClass}
+                            value={row.barcode ?? ''}
+                            onChange={(e) => {
+                              const v = e.target.value
+                              setSalesUnitRows((prev) =>
+                                prev.map((r) => (r.id === row.id ? { ...r, barcode: v } : r)),
+                              )
+                              setError(null)
+                            }}
+                            placeholder="บาร์โค้ด"
+                            autoComplete="off"
+                          />
+                          {row.barcode?.trim() && checkBarcodeConflicts?.(row.barcode.trim()) ? (
+                            <p className="mt-0.5 text-[10px] leading-snug text-amber-800">
+                              ซ้ำกับสินค้าอื่น
+                            </p>
+                          ) : null}
+                        </label>
                         <button
                           type="button"
                           disabled={salesUnitRows.length <= 1}
@@ -1898,21 +1922,89 @@ export function AddProductModal({
                   </label>
                 </div>
 
+                {/* Bundle / Kit components */}
+                <div className="mt-1.5 rounded-lg border border-indigo-100 bg-indigo-50/40 p-3">
+                  <p className="mb-2 text-[11px] font-bold uppercase tracking-wide text-indigo-800">
+                    สินค้าชุด / Bundle — ส่วนประกอบ
+                  </p>
+                  <div className="space-y-1.5">
+                    {bundleRows.map((row, i) => (
+                      <div key={row.id} className="grid grid-cols-[1fr_56px_20px] gap-1.5 items-center">
+                        <input
+                          className={clsx(inputClass, 'text-xs font-mono')}
+                          value={row.sku}
+                          onChange={(e) => setBundleRows((prev) => prev.map((r, j) => j === i ? { ...r, sku: e.target.value } : r))}
+                          placeholder="SKU ส่วนประกอบ"
+                        />
+                        <div className="relative">
+                          <input
+                            type="number" min={1} step={1}
+                            className={clsx(inputClass, 'text-xs text-right pr-6')}
+                            value={row.qtyStr}
+                            onChange={(e) => setBundleRows((prev) => prev.map((r, j) => j === i ? { ...r, qtyStr: e.target.value } : r))}
+                            title="จำนวนต่อ 1 ชุด"
+                          />
+                          <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[9px] text-slate-400">ชิ้น</span>
+                        </div>
+                        <button type="button" onClick={() => setBundleRows((prev) => prev.filter((_, j) => j !== i))}
+                          className="flex items-center justify-center text-slate-300 hover:text-rose-500">
+                          <X className="size-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                    <button type="button"
+                      onClick={() => setBundleRows((prev) => [...prev, { id: `bc-${Date.now()}`, sku: '', qtyStr: '1' }])}
+                      className="flex items-center gap-1 text-[11px] font-semibold text-indigo-700 hover:text-indigo-900">
+                      <Plus className="size-3" /> เพิ่มส่วนประกอบ
+                    </button>
+                    {bundleRows.length > 0 && (
+                      <p className="text-[10px] text-slate-400">ขายสินค้าชุดนี้ → POS ตัดสต็อกจากส่วนประกอบโดยอัตโนมัติ</p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Receive bonus rules */}
+                <div className="mt-1.5 rounded-lg border border-amber-100 bg-amber-50/40 p-3">
+                  <p className="mb-2 text-[11px] font-bold uppercase tracking-wide text-amber-800">
+                    สินค้าแถมตอนรับของ (Receive Bonus)
+                  </p>
+                  <div className="space-y-1.5">
+                    {receiveBonusRules.map((rule, i) => (
+                      <div key={rule.id} className="grid grid-cols-[1fr_64px_20px] gap-1.5 items-center">
+                        <input
+                          className={clsx(inputClass, 'text-xs')}
+                          value={rule.bonusSku}
+                          onChange={(e) => setReceiveBonusRules((prev) => prev.map((r, j) => j === i ? { ...r, bonusSku: e.target.value } : r))}
+                          placeholder="SKU สินค้าแถม"
+                        />
+                        <div className="relative">
+                          <input
+                            type="number" min={0.01} step={0.01}
+                            className={clsx(inputClass, 'text-xs text-right pr-6')}
+                            value={rule.bonusQtyPerUnit}
+                            onChange={(e) => setReceiveBonusRules((prev) => prev.map((r, j) => j === i ? { ...r, bonusQtyPerUnit: Math.max(0.01, Number(e.target.value) || 1) } : r))}
+                            title="จำนวนแถมต่อ 1 ชิ้นที่รับ"
+                          />
+                          <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[9px] text-slate-400">/ชิ้น</span>
+                        </div>
+                        <button type="button" onClick={() => setReceiveBonusRules((prev) => prev.filter((_, j) => j !== i))}
+                          className="flex items-center justify-center text-slate-300 hover:text-rose-500">
+                          <X className="size-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                    <button type="button"
+                      onClick={() => setReceiveBonusRules((prev) => [...prev, { id: `rb-${Date.now()}`, bonusSku: '', bonusQtyPerUnit: 1 }])}
+                      className="flex items-center gap-1 text-[11px] font-semibold text-amber-700 hover:text-amber-900">
+                      <Plus className="size-3" /> เพิ่มสินค้าแถม
+                    </button>
+                    {receiveBonusRules.length > 0 && (
+                      <p className="text-[10px] text-slate-400">รับสินค้านี้ 1 ชิ้น → ระบบเพิ่มสต็อกสินค้าแถมให้อัตโนมัติ</p>
+                    )}
+                  </div>
+                </div>
+
                 <div className="mt-1.5 grid gap-1.5 sm:grid-cols-2">
-                  <label className="flex min-w-0 cursor-pointer items-start gap-2 rounded-lg border border-slate-200 bg-slate-50/60 px-2.5 py-2">
-                    <input
-                      type="checkbox"
-                      className="mt-1 rounded border-slate-300"
-                      checked={inStoreCatalog}
-                      onChange={(e) => setInStoreCatalog(e.target.checked)}
-                    />
-                    <span className="min-w-0">
-                      <span className={labelClass}>อยู่ในพอร์ตร้าน</span>
-                      <span className="mt-0.5 block text-[11px] font-normal leading-snug text-slate-500">
-                        ปิด = เก็บเป็นอ้างอิงเท่านั้น — ไม่แสดงใน POS / ค้นหาหน้าร้าน
-                      </span>
-                    </span>
-                  </label>
                   <label className="block min-w-0">
                     <span className={labelClass}>สถานะการขาย</span>
                     <select
@@ -2257,86 +2349,115 @@ export function AddProductModal({
                   </details>
                 ) : null}
 
-                <div className="rounded-md border border-slate-200 bg-white p-1.5">
-                  <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
-                    <p className="text-xs font-semibold text-slate-900">ราคาซื้อ / ทุน</p>
-                    <label className="flex cursor-pointer items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-2 py-1">
-                      <input
-                        type="checkbox"
-                        checked={vatMode !== 'no_vat'}
-                        onChange={(e) => setVatMode(e.target.checked ? 'vat' : 'no_vat')}
-                        className="size-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
-                      />
-                      <span className="text-[11px] font-medium text-slate-800">มี VAT</span>
-                    </label>
-                    <span className="text-[10px] text-slate-500">ติ๊กแล้วระบบบวก VAT 7% ในต้นทุนอัตโนมัติ</span>
-                  </div>
-                  <div className="flex flex-wrap items-end gap-1.5">
-                    <label className="block min-w-[7rem] flex-1">
-                      <span className={labelClass}>ราคาตั้ง</span>
-                      <input
-                        className={inputClass}
-                        value={supplierListStr}
-                        onChange={(e) => setSupplierListStr(e.target.value)}
-                        placeholder="บาท"
-                        inputMode="decimal"
-                      />
-                    </label>
-                    {[pd1, pd2, pd3, pd4].map((pd, i) => (
-                      <label key={i} className="block w-[4rem] shrink-0">
-                        <span className={labelClass}>ลด{i + 1} %</span>
-                        <input
-                          className={inputClass}
-                          value={pd}
-                          onChange={(e) => [setPd1, setPd2, setPd3, setPd4][i](e.target.value)}
-                          inputMode="decimal"
-                        />
-                      </label>
-                    ))}
-                  </div>
-                  <div className="mt-1.5 grid gap-1.5 sm:grid-cols-2">
-                    <label className="block min-w-0">
-                      <span className={labelClass}>Scheme ซื้อ (เช่น 10+1)</span>
-                      <input
-                        className={inputClass}
-                        value={buyScheme}
-                        onChange={(e) => setBuyScheme(e.target.value)}
-                        placeholder="1+0"
-                        inputMode="numeric"
-                      />
-                    </label>
-                    <div className="rounded-md border border-slate-200 bg-slate-50/70 px-2 py-1.5">
-                      <span className="text-[10px] font-medium text-slate-600">รับเข้าตาม Scheme</span>
-                      <p className="text-xs font-semibold tabular-nums text-slate-900">
-                        {schemePreview ? `${schemePreview.buyQty}+${schemePreview.freeQty} = ${schemePreview.effectiveQty}` : '—'}
-                      </p>
+                <div className="mt-1.5 grid gap-1.5 sm:grid-cols-2">
+                  <label className="flex min-w-0 cursor-pointer items-start gap-2 rounded-lg border border-slate-200 bg-slate-50/60 px-2.5 py-2">
+                    <input
+                      type="checkbox"
+                      className="mt-1 rounded border-slate-300"
+                      checked={inStoreCatalog}
+                      onChange={(e) => setInStoreCatalog(e.target.checked)}
+                    />
+                    <span className="min-w-0">
+                      <span className={labelClass}>อยู่ในพอร์ตร้าน</span>
+                      <span className="mt-0.5 block text-[11px] font-normal leading-snug text-slate-500">
+                        ปิด = เก็บเป็นอ้างอิงเท่านั้น — ไม่แสดงใน POS / ค้นหาหน้าร้าน
+                      </span>
+                    </span>
+                  </label>
+                  <label className="flex min-w-0 cursor-pointer items-start gap-2 rounded-lg border border-slate-200 bg-slate-50/60 px-2.5 py-2">
+                    <input
+                      type="checkbox"
+                      className="mt-1 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                      checked={shippingCostExcluded}
+                      onChange={(e) => setShippingCostExcluded(e.target.checked)}
+                    />
+                    <span className="min-w-0">
+                      <span className={labelClass}>ราคาซื้อรวมค่าขนส่งแล้ว</span>
+                      <span className="mt-0.5 block text-[11px] font-normal leading-snug text-slate-500">
+                        ติ๊ก = ไม่แบ่งค่าขนส่งเข้าต้นทุนสินค้านี้ตอนรับของ
+                      </span>
+                    </span>
+                  </label>
+                </div>
+
+                <div className="rounded-md border border-slate-200 bg-slate-50/60 px-2 py-2 mb-2">
+                  <p className="mb-1.5 text-[10px] font-semibold text-slate-600">ต้นทุน / ชิ้น (บาท)</p>
+
+                  {/* Cost source picker — only when editing a product that has calc costs */}
+                  {editingProduct && ((editingProduct.avgCost ?? 0) > 0 || (editingProduct.lastCost ?? 0) > 0) && (
+                    <div className="mb-2 flex gap-1.5">
+                      {/* Average cost */}
+                      {(editingProduct.avgCost ?? 0) > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const v = editingProduct.avgCost!.toFixed(2)
+                            setCostStr(v); setCostManualOverride(true); setCostSource('avg')
+                          }}
+                          className={`flex flex-1 flex-col items-center rounded-md border px-2 py-1.5 transition ${
+                            costSource === 'avg'
+                              ? 'border-sky-400 bg-sky-50 shadow-sm ring-1 ring-sky-400'
+                              : 'border-slate-200 bg-white/60 hover:border-sky-200 hover:bg-sky-50/50'
+                          }`}
+                        >
+                          <span className={`text-[8px] font-medium ${costSource === 'avg' ? 'text-sky-700' : 'text-slate-400'}`}>ต้นทุนเฉลี่ย</span>
+                          <span className={`mt-0.5 text-[12px] font-bold tabular-nums leading-tight ${costSource === 'avg' ? 'text-sky-700' : 'text-slate-500'}`}>
+                            {editingProduct.avgCost!.toFixed(2)}
+                          </span>
+                        </button>
+                      )}
+
+                      {/* Latest cost */}
+                      {(editingProduct.lastCost ?? 0) > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const v = editingProduct.lastCost!.toFixed(2)
+                            setCostStr(v); setCostManualOverride(true); setCostSource('last')
+                          }}
+                          className={`flex flex-1 flex-col items-center rounded-md border px-2 py-1.5 transition ${
+                            costSource === 'last'
+                              ? 'border-amber-400 bg-amber-50 shadow-sm ring-1 ring-amber-400'
+                              : 'border-slate-200 bg-white/60 hover:border-amber-200 hover:bg-amber-50/50'
+                          }`}
+                        >
+                          <span className={`text-[8px] font-medium ${costSource === 'last' ? 'text-amber-700' : 'text-slate-400'}`}>ต้นทุนล่าสุด</span>
+                          <span className={`mt-0.5 text-[12px] font-bold tabular-nums leading-tight ${costSource === 'last' ? 'text-amber-700' : 'text-slate-500'}`}>
+                            {editingProduct.lastCost!.toFixed(2)}
+                          </span>
+                        </button>
+                      )}
                     </div>
-                  </div>
-                  <div className="mt-1.5 grid gap-1.5 sm:grid-cols-2">
-                    <div className="rounded-md border border-sky-100 bg-sky-50/90 px-2 py-1.5">
-                      <span className="text-[10px] font-medium text-sky-800">ทุนสุทธิ (ใช้คำนวณราคาขาย)</span>
+                  )}
+
+                  {/* Cost input row */}
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[9px] text-slate-400">
+                      {costSource === 'avg' ? 'จากต้นทุนเฉลี่ย — แก้ไขเองได้' : costSource === 'last' ? 'จากต้นทุนล่าสุด — แก้ไขเองได้' : 'แก้ไขเองได้'}
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      {costManualOverride && autoCostPreview !== null && (
+                        <button
+                          type="button"
+                          onClick={() => { setCostManualOverride(false); setCostSource('manual') }}
+                          className="text-[9px] text-slate-400 underline hover:text-slate-600"
+                        >
+                          รีเซตอัตโนมัติ
+                        </button>
+                      )}
                       <input
-                        className={clsx(inputClass, 'mt-1 tabular-nums')}
+                        type="text"
+                        inputMode="decimal"
                         value={costStr}
-                        onChange={(e) => {
-                          const v = e.target.value
-                          setCostStr(v)
-                          setCostManualOverride(v.trim().length > 0)
-                        }}
-                        placeholder="ใส่เอง/ระบบคำนวณ"
-                        inputMode="decimal"
+                        onChange={(e) => { setCostStr(e.target.value); setCostManualOverride(true); setCostSource('manual') }}
+                        placeholder={autoCostPreview !== null ? String(autoCostPreview) : '0.00'}
+                        className="w-24 rounded border border-slate-200 bg-white px-2 py-0.5 text-right text-xs tabular-nums text-slate-800 outline-none focus:border-amber-400"
                       />
                     </div>
-                    <div className="rounded-md border border-sky-100 bg-sky-50/90 px-2 py-1.5">
-                      <span className="text-[10px] font-medium text-sky-800">คำนวณอัตโนมัติจากราคาตั้ง</span>
-                      <p className="text-sm font-semibold tabular-nums text-sky-950">
-                        {autoCostPreview !== null ? `฿${autoCostPreview.toLocaleString('th-TH', { maximumFractionDigits: 2 })}` : '—'}
-                      </p>
-                    </div>
                   </div>
-                  <p className="mt-1 text-[10px] text-slate-500">
-                    ใส่เอง/ระบบคำนวณ
-                  </p>
+                  {autoCostPreview !== null && !costManualOverride && (
+                    <p className="mt-0.5 text-[9px] text-slate-400">คำนวณจากราคาตั้ง + ส่วนลดซัพพลายเออร์</p>
+                  )}
                 </div>
 
                 <div className="rounded-md border border-emerald-200 bg-emerald-50/40 p-1.5">
@@ -2437,7 +2558,8 @@ export function AddProductModal({
                                 onChange={(e) => {
                                   const v = sanitizeSignedPercentInput(e.target.value)
                                   const next = [...sellRows]
-                                  next[i] = { ...next[i], markup: v }
+                                  // Clear explicit prices so the formula recalculates
+                                  next[i] = { ...next[i]!, markup: v, prices: next[i]!.prices.map(() => '') }
                                   setSellRows(next)
                                 }}
                                 placeholder="—"
@@ -2520,23 +2642,31 @@ export function AddProductModal({
             </div>
           </div>
 
-          <div className="flex shrink-0 flex-wrap justify-end gap-2 border-t border-slate-100 bg-slate-50/90 px-3 py-2 sm:px-4">
-            <button
-              type="button"
-              onClick={() => {
-                reset()
-                onClose()
-              }}
-              className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-800 hover:bg-slate-50"
-            >
-              ยกเลิก
-            </button>
-            <button
-              type="submit"
-              className="rounded-lg border border-emerald-700 bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-800"
-            >
-              {editingProduct ? 'บันทึกการแก้ไข' : 'บันทึกสินค้า'}
-            </button>
+          <div className="flex shrink-0 flex-col gap-2 border-t border-slate-100 bg-slate-50/90 px-3 py-2 sm:px-4">
+            {error && (
+              <p className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-sm text-rose-800">
+                {error}
+              </p>
+            )}
+            <div className="flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  reset()
+                  onClose()
+                }}
+                className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-800 hover:bg-slate-50"
+              >
+                ยกเลิก
+              </button>
+              <button
+                type="button"
+                onClick={doSave}
+                className="rounded-lg border border-emerald-700 bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-800"
+              >
+                {editingProduct ? 'บันทึกการแก้ไข' : 'บันทึกสินค้า'}
+              </button>
+            </div>
           </div>
         </form>
       </div>
@@ -2636,6 +2766,7 @@ export function AddProductModal({
           </div>
         </div>
       ) : null}
+
     </div>
   )
 }

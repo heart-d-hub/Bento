@@ -173,9 +173,11 @@ export function posPriceLevelsForUnit(cfg: PosSellConfig, unitIndex: number): Po
   )
 }
 
-/** หน่วยขายที่มีอย่างน้อยหนึ่งระดับราคา > 0 */
+/** หน่วยขายที่มีราคา > 0 (รวมราคาคำนวณจากหน่วยฐาน) */
 export function posUnitsWithSellPrice(cfg: PosSellConfig): PosSellUnitOption[] {
-  return cfg.units.filter((u) => firstPosPriceLevelWithPrice(cfg, u.index) != null)
+  return cfg.units.filter((u) =>
+    cfg.priceLevels.some((lv) => cfg.getUnitPrice(u.index, lv.index) > 0),
+  )
 }
 
 /** หน่วย+ระดับราคาเริ่มต้นสำหรับเพิ่มบรรทัด POS — หน่วยแรกที่มีราคาตั้งแล้ว */

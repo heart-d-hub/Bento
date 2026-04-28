@@ -18,6 +18,9 @@ export type PosSaleRecord = {
   lineCount: number
   /** รายการสินค้า (สำหรับสถิติแดชบอร์ด — บันทึกหลังเวอร์ชันนี้) */
   lines?: PosSaleLine[]
+  voidedAt?: string | null
+  /** วิธีจัดส่ง เช่น รับเอง, ส่งเอง, Kerry Express */
+  shippingMethod?: string
 }
 
 /** แจ้ง UI อื่น (เช่น แดชบอร์ด) ให้รีเฟรชหลังบันทึกการขาย */

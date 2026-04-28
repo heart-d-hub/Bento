@@ -2,9 +2,12 @@ import type { LucideIcon } from 'lucide-react'
 import {
   Boxes,
   BookOpen,
+  Building2,
+  Clock,
   FileText,
   Gift,
   History,
+  Landmark,
   NotebookPen,
   Package,
   RotateCcw,
@@ -12,9 +15,8 @@ import {
   Barcode,
   Settings,
   ShoppingBag,
-  Truck,
-  SlidersHorizontal,
   Users,
+  Wallet,
 } from 'lucide-react'
 import { NEUTRAL_ICON_WRAP } from '@/ui/tokens'
 
@@ -26,6 +28,7 @@ export type ActionTile = {
 }
 
 export const ACTION_TILES: ActionTile[] = [
+  { id: 'transport', label: 'บริษัทขนส่ง', icon: Building2, iconWrap: NEUTRAL_ICON_WRAP },
   { id: 'buy', label: 'ซื้อ', icon: ShoppingBag, iconWrap: NEUTRAL_ICON_WRAP },
   { id: 'members', label: 'สมาชิก', icon: Users, iconWrap: NEUTRAL_ICON_WRAP },
   {
@@ -38,27 +41,18 @@ export const ACTION_TILES: ActionTile[] = [
   { id: 'branch-stock', label: 'คลังสินค้า', icon: Package, iconWrap: NEUTRAL_ICON_WRAP },
   { id: 'central', label: 'คลังกลาง', icon: Boxes, iconWrap: NEUTRAL_ICON_WRAP },
   { id: 'returns', label: 'คืนสินค้า / เคลม', icon: RotateCcw, iconWrap: NEUTRAL_ICON_WRAP },
-  {
-    id: 'customer-order',
-    label: 'สั่งสินค้าให้ลูกค้า',
-    icon: Truck,
-    iconWrap: NEUTRAL_ICON_WRAP,
-  },
   { id: 'catalog', label: 'Catalog', icon: BookOpen, iconWrap: NEUTRAL_ICON_WRAP },
   { id: 'label-print', label: 'พิมพ์ป้ายสินค้า', icon: Barcode, iconWrap: NEUTRAL_ICON_WRAP },
-  {
-    id: 'dashboard-layout',
-    label: 'Dashboard',
-    icon: SlidersHorizontal,
-    iconWrap: NEUTRAL_ICON_WRAP,
-  },
   {
     id: 'task-notepad-history',
     label: 'ประวัติโน้ตสั่งงาน',
     icon: NotebookPen,
     iconWrap: NEUTRAL_ICON_WRAP,
   },
-  { id: 'report', label: 'Report', icon: FileText, iconWrap: NEUTRAL_ICON_WRAP },
+  { id: 'bank', label: 'เปิด/ปิดกะ', icon: Landmark, iconWrap: NEUTRAL_ICON_WRAP },
+  { id: 'clockin', label: 'ลงเวลา', icon: Clock, iconWrap: NEUTRAL_ICON_WRAP },
+  { id: 'expense', label: 'ค่าใช้จ่าย', icon: Wallet, iconWrap: NEUTRAL_ICON_WRAP },
+{ id: 'report', label: 'Report', icon: FileText, iconWrap: NEUTRAL_ICON_WRAP },
   { id: 'activity', label: 'Log Activity', icon: History, iconWrap: NEUTRAL_ICON_WRAP },
   { id: 'settings', label: 'ตั้งค่า', icon: Settings, iconWrap: NEUTRAL_ICON_WRAP },
 ]

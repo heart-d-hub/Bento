@@ -1,0 +1,9 @@
+[[permission]]
+identifier = "allow-budgets-db"
+description = "Allows expense budget management."
+commands.allow = [
+  "budget_list",
+  "budget_upsert",
+  "budget_delete",
+  "report_budget_vs_actual"
+]

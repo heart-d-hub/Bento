@@ -3,13 +3,21 @@
   "identifier": "default",
   "description": "enables the default permissions",
   "windows": [
-    "main"
+    "main",
+    "cfd"
   ],
   "permissions": [
     "allow-show-system-print-dialog",
+    "allow-show-browser-print-dialog",
     "allow-members-db",
     "allow-products-master",
     "allow-sales-db",
+    "allow-reports-db",
+    "allow-expenses-db",
+    "allow-budgets-db",
+    "allow-vendors-db",
+    "allow-sale-adjustments-db",
+    "allow-returns-db",
     "core:default",
     "core:window:allow-set-size",
     "core:window:allow-center",
@@ -18,6 +26,15 @@
     "core:window:allow-is-maximized",
     "core:window:allow-unmaximize",
     "core:window:allow-set-resizable",
-    "core:window:allow-current-monitor"
+    "core:window:allow-current-monitor",
+    "core:webview:allow-create-webview-window",
+    "core:window:allow-show",
+    "core:window:allow-set-focus",
+    "core:window:allow-close",
+    "core:window:allow-get-all-windows",
+    "allow-show-cfd-window",
+    "dialog:allow-open",
+    "allow-open-product-images-dir",
+    "allow-product-images"
   ]
 }

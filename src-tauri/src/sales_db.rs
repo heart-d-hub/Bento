@@ -99,6 +99,7 @@ pub struct SalesHistoryRow {
   pub payment_id: String,
   pub line_count: i64,
   pub lines: serde_json::Value,
+  pub voided_at: Option<String>,
 }
 
 #[tauri::command]
@@ -107,11 +108,30 @@ pub async fn sales_create(payload: SaleCreatePayload) -> Result<SaleCreateResult
   let mut tx = pool.begin().await.map_err(|e| format!("begin tx failed: {e}"))?;
 
   let member_id: Option<String> = if let Some(code) = payload.member_code.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-    sqlx::query_scalar::<_, String>(r#"SELECT id FROM "Member" WHERE "memberCode" = $1 LIMIT 1"#)
+    let existing = sqlx::query_scalar::<_, String>(r#"SELECT id FROM "Member" WHERE "memberCode" = $1 LIMIT 1"#)
       .bind(code)
       .fetch_optional(&mut *tx)
       .await
-      .map_err(|e| format!("resolve member failed: {e}"))?
+      .map_err(|e| format!("resolve member failed: {e}"))?;
+    if existing.is_some() {
+      existing
+    } else {
+      // Member exists in localStorage but not yet in PG — auto-create a stub so the FK link is preserved.
+      sqlx::query(
+        r#"INSERT INTO "Member" (id, "memberCode", "fullName", "createdAt", "updatedAt")
+           VALUES (gen_random_uuid()::text, $1, $1, (now() AT TIME ZONE 'Asia/Bangkok'), (now() AT TIME ZONE 'Asia/Bangkok'))
+           ON CONFLICT ("memberCode") DO NOTHING"#,
+      )
+      .bind(code)
+      .execute(&mut *tx)
+      .await
+      .map_err(|e| format!("auto-create member stub failed: {e}"))?;
+      sqlx::query_scalar::<_, String>(r#"SELECT id FROM "Member" WHERE "memberCode" = $1 LIMIT 1"#)
+        .bind(code)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| format!("re-fetch member after stub failed: {e}"))?
+    }
   } else {
     None
   };
@@ -143,13 +163,13 @@ pub async fn sales_create(payload: SaleCreatePayload) -> Result<SaleCreateResult
   .bind(payload.grand_total)
   .bind(payload.remark.clone().unwrap_or_default())
   .bind(payload.branch_id.clone().unwrap_or_default())
-  .bind(member_id)
+  .bind(&member_id)
   .execute(&mut *tx)
   .await
   .map_err(|e| format!("insert sale failed: {e}"))?;
 
   for line in &payload.lines {
-    let product_id = sqlx::query_scalar::<_, String>(
+    let (product_id, cost_price) = sqlx::query_as::<_, (String, f64)>(
       r#"
       INSERT INTO "Product" (
         id, sku, name, category, "isActive", "createdAt", "updatedAt"
@@ -159,7 +179,7 @@ pub async fn sales_create(payload: SaleCreatePayload) -> Result<SaleCreateResult
       ON CONFLICT (sku) DO UPDATE SET
         name = EXCLUDED.name,
         "updatedAt" = (now() AT TIME ZONE 'Asia/Bangkok')
-      RETURNING id
+      RETURNING id, "costPrice"
       "#,
     )
     .bind(format!("prod-{}", line.product_code))
@@ -173,10 +193,10 @@ pub async fn sales_create(payload: SaleCreatePayload) -> Result<SaleCreateResult
       r#"
       INSERT INTO "SaleLine" (
         id, qty, "unitLabel", "unitIndex", "unitPrice", discount, "lineTotal",
-        "priceLevelLabel", "priceLevelIndex", "priceTagLabel", "createdAt", "saleId", "productId"
+        "costAtSale", "priceLevelLabel", "priceLevelIndex", "priceTagLabel", "createdAt", "saleId", "productId"
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7,
-        NULLIF($8, ''), $9, NULLIF($10, ''), (now() AT TIME ZONE 'Asia/Bangkok'), $11, $12
+        $8, NULLIF($9, ''), $10, NULLIF($11, ''), (now() AT TIME ZONE 'Asia/Bangkok'), $12, $13
       )
       "#,
     )
@@ -187,14 +207,46 @@ pub async fn sales_create(payload: SaleCreatePayload) -> Result<SaleCreateResult
     .bind(line.unit_price)
     .bind(line.discount)
     .bind(line.line_total)
+    .bind(cost_price)
     .bind(line.price_level_label.clone().unwrap_or_default())
     .bind(line.price_level_index)
     .bind(line.price_tag_label.clone().unwrap_or_default())
     .bind(payload.id.clone())
-    .bind(product_id)
+    .bind(&product_id)
     .execute(&mut *tx)
     .await
     .map_err(|e| format!("insert sale line {} failed: {e}", line.id))?;
+
+    sqlx::query(
+      r#"
+      INSERT INTO "StockMovement"
+        (id, "movementAt", type, "qtyDelta", "refType", "refId", "branchId", "productId", "createdAt")
+      VALUES
+        (gen_random_uuid()::text, now() AT TIME ZONE 'Asia/Bangkok',
+         'sale_out'::"StockMovementType", $1, 'sale', $2, NULLIF($3,''), $4,
+         now() AT TIME ZONE 'Asia/Bangkok')
+      "#,
+    )
+    .bind(-line.qty)
+    .bind(&payload.id)
+    .bind(payload.branch_id.clone().unwrap_or_default())
+    .bind(&product_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("stock movement sale_out failed: {e}"))?;
+  }
+
+  if payload.payment_type == "account" {
+    if let Some(ref mid) = member_id {
+      sqlx::query(
+        r#"UPDATE "Member" SET "arBalance" = "arBalance" + $1, "updatedAt" = now() AT TIME ZONE 'Asia/Bangkok' WHERE id = $2"#,
+      )
+      .bind(payload.grand_total)
+      .bind(mid)
+      .execute(&mut *tx)
+      .await
+      .map_err(|e| format!("ar balance update failed: {e}"))?;
+    }
   }
 
   tx.commit().await.map_err(|e| format!("commit tx failed: {e}"))?;
@@ -270,7 +322,8 @@ pub async fn sales_history_list(limit: Option<i64>) -> Result<Vec<SalesHistoryRo
           )
         ) FILTER (WHERE sl.id IS NOT NULL),
         '[]'::jsonb
-      ) as lines
+      ) as lines,
+      to_char(s."voidedAt" AT TIME ZONE 'Asia/Bangkok', 'YYYY-MM-DD"T"HH24:MI:SS') as voided_at
     FROM "Sale" s
     LEFT JOIN "SaleLine" sl ON sl."saleId" = s.id
     LEFT JOIN "Product" p ON p.id = sl."productId"
@@ -309,7 +362,8 @@ pub async fn sales_get_by_bill_no(bill_no: String) -> Result<Option<SalesHistory
           )
         ) FILTER (WHERE sl.id IS NOT NULL),
         '[]'::jsonb
-      ) as lines
+      ) as lines,
+      to_char(s."voidedAt" AT TIME ZONE 'Asia/Bangkok', 'YYYY-MM-DD"T"HH24:MI:SS') as voided_at
     FROM "Sale" s
     LEFT JOIN "SaleLine" sl ON sl."saleId" = s.id
     LEFT JOIN "Product" p ON p.id = sl."productId"
@@ -326,9 +380,10 @@ pub async fn sales_get_by_bill_no(bill_no: String) -> Result<Option<SalesHistory
 }
 
 #[tauri::command]
-pub async fn sales_history_by_member(member_code: String, limit: Option<i64>) -> Result<Vec<SalesHistoryRow>, String> {
+pub async fn sales_history_by_member(member_code: String, limit: Option<i64>, offset: Option<i64>) -> Result<Vec<SalesHistoryRow>, String> {
   let pool = get_pool().await?;
-  let lim = limit.unwrap_or(5).clamp(1, 50);
+  let lim = limit.unwrap_or(10).clamp(1, 50);
+  let off = offset.unwrap_or(0).max(0);
   let rows = sqlx::query_as::<_, SalesHistoryRow>(
     r#"
     SELECT
@@ -349,7 +404,8 @@ pub async fn sales_history_by_member(member_code: String, limit: Option<i64>) ->
           )
         ) FILTER (WHERE sl.id IS NOT NULL),
         '[]'::jsonb
-      ) as lines
+      ) as lines,
+      to_char(s."voidedAt" AT TIME ZONE 'Asia/Bangkok', 'YYYY-MM-DD"T"HH24:MI:SS') as voided_at
     FROM "Sale" s
     JOIN "Member" m ON m.id = s."memberId"
     LEFT JOIN "SaleLine" sl ON sl."saleId" = s.id
@@ -357,15 +413,83 @@ pub async fn sales_history_by_member(member_code: String, limit: Option<i64>) ->
     WHERE m."memberCode" = $1
     GROUP BY s.id
     ORDER BY s."docDate" DESC, s."createdAt" DESC
-    LIMIT $2
+    LIMIT $2 OFFSET $3
     "#,
   )
   .bind(member_code)
   .bind(lim)
+  .bind(off)
   .fetch_all(&pool)
   .await
   .map_err(|e| format!("query sales by member failed: {e}"))?;
   Ok(rows)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberSalesSummary {
+  pub visit_count: i64,
+  pub total_spent: f64,
+  pub avg_bill: f64,
+  pub last_visit_at: Option<String>,
+}
+
+#[tauri::command]
+pub async fn sales_member_summary(member_code: String) -> Result<MemberSalesSummary, String> {
+  let pool = get_pool().await?;
+  let row = sqlx::query_as::<_, (i64, f64, f64, Option<String>)>(
+    r#"
+    SELECT
+      COUNT(*)::bigint,
+      COALESCE(SUM(s."grandTotal"), 0)::double precision,
+      COALESCE(AVG(s."grandTotal"), 0)::double precision,
+      MAX(to_char(s."docDate", 'YYYY-MM-DD"T"HH24:MI:SS'))
+    FROM "Sale" s
+    JOIN "Member" m ON m.id = s."memberId"
+    WHERE m."memberCode" = $1
+    "#,
+  )
+  .bind(member_code)
+  .fetch_one(&pool)
+  .await
+  .map_err(|e| format!("query member summary failed: {e}"))?;
+  Ok(MemberSalesSummary {
+    visit_count: row.0,
+    total_spent: row.1,
+    avg_bill: row.2,
+    last_visit_at: row.3,
+  })
+}
+
+/// Link an existing Sale (by billNo) to a Member (by memberCode).
+/// Used to fix sales that were saved before the member existed in PG.
+#[tauri::command]
+pub async fn sales_link_member_by_bill(bill_no: String, member_code: String) -> Result<(), String> {
+  let pool = get_pool().await?;
+  let mut tx = pool.begin().await.map_err(|e| format!("begin tx: {e}"))?;
+  // Ensure member exists (auto-create stub if needed)
+  sqlx::query(
+    r#"INSERT INTO "Member" (id, "memberCode", "fullName", "createdAt", "updatedAt")
+       VALUES (gen_random_uuid()::text, $1, $1, (now() AT TIME ZONE 'Asia/Bangkok'), (now() AT TIME ZONE 'Asia/Bangkok'))
+       ON CONFLICT ("memberCode") DO NOTHING"#,
+  )
+  .bind(&member_code)
+  .execute(&mut *tx)
+  .await
+  .map_err(|e| format!("ensure member: {e}"))?;
+  let member_id = sqlx::query_scalar::<_, String>(r#"SELECT id FROM "Member" WHERE "memberCode" = $1 LIMIT 1"#)
+    .bind(&member_code)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| format!("fetch member id: {e}"))?;
+  sqlx::query(r#"UPDATE "Sale" SET "memberId" = $1, "updatedAt" = now() WHERE "billNo" = $2"#)
+    .bind(&member_id)
+    .bind(&bill_no)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("update sale: {e}"))?;
+  tx.commit().await.map_err(|e| format!("commit: {e}"))?;
+  Ok(())
 }
 
 // --- POS bill / tax invoice sequence (Postgres, แทน localStorage) ---

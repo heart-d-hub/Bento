@@ -34,6 +34,9 @@ export function masterToInventoryProduct(m: ProductMasterDetail): InventoryProdu
     splitSale: m.splitSale,
     productTagIds: m.productTagIds?.length ? [...m.productTagIds] : undefined,
     posDisplayNote: m.posDisplayNote,
+    vehicleFitments: m.vehicleFitments?.length ? m.vehicleFitments : undefined,
+    barcodes: m.barcodes?.length ? m.barcodes : undefined,
+    bundleComponents: m.bundleComponents?.length ? m.bundleComponents : undefined,
   }
 }
 

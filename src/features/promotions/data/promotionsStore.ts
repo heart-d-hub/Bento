@@ -1,4 +1,6 @@
 import type { BuyQtyPromotion } from '@/features/promotions/data/promotionTypes'
+import { isTauri } from '@/features/desktop/isTauri'
+import { invoke } from '@tauri-apps/api/core'
 
 const LS_KEY = 'bento.promotions.buyQty.v1'
 
@@ -34,4 +36,23 @@ export function loadPromotions(): BuyQtyPromotion[] {
 export function savePromotions(promotions: BuyQtyPromotion[]): void {
   localStorage.setItem(LS_KEY, JSON.stringify(promotions))
   window.dispatchEvent(new CustomEvent(PROMOTIONS_CHANGED_EVENT))
+}
+
+export async function loadPromotionsAsync(): Promise<BuyQtyPromotion[]> {
+  if (isTauri()) {
+    try {
+      const rows = await invoke<BuyQtyPromotion[]>('promotions_load', { kind: 'buyQty' })
+      if (Array.isArray(rows) && rows.length > 0) return rows
+    } catch (e) {
+      console.warn('promotions_load buyQty failed, falling back to localStorage', e)
+    }
+  }
+  return loadPromotions()
+}
+
+export async function savePromotionsAsync(promotions: BuyQtyPromotion[]): Promise<void> {
+  savePromotions(promotions)
+  if (isTauri()) {
+    await invoke('promotions_save', { kind: 'buyQty', rows: promotions })
+  }
 }

@@ -3,6 +3,7 @@ import type {
   BuyQtyPromotion,
   PercentOffPromotion,
   SecondPieceDiscountPromotion,
+  VendorPromotion,
 } from '@/features/promotions/data/promotionTypes'
 import {
   loadPercentOffPromotions,
@@ -17,10 +18,19 @@ import {
   loadPromotions,
   savePromotions,
 } from '@/features/promotions/data/promotionsStore'
+import {
+  loadVendorPromotions,
+  saveVendorPromotions,
+} from '@/features/promotions/data/vendorPromotionsStore'
 import { isPercentPromotionActive } from '@/features/promotions/evaluatePercentOff'
 import { isSecondPiecePromotionActive } from '@/features/promotions/evaluateSecondPiece'
 import { isPromotionActive } from '@/features/promotions/evaluateBuyQty'
+import { isVendorPromotionActive } from '@/features/promotions/evaluateVendorPromo'
 import { getPosSellConfig } from '@/features/pos/data/posUnitPricing'
+import {
+  loadSupplierDirectory,
+} from '@/features/purchase/data/supplierDirectoryStore'
+import type { SupplierProfile } from '@/features/purchase/data/supplierDirectoryStore'
 import { clsx } from 'clsx'
 import {
   Check,
@@ -32,6 +42,7 @@ import {
   Plus,
   RotateCcw,
   Sparkles,
+  Store,
   Trash2,
   X,
 } from 'lucide-react'
@@ -56,6 +67,8 @@ const btnAmber =
   `${btnAddPromoSize} border border-amber-500/20 bg-gradient-to-b from-amber-600 to-orange-700 text-white shadow-amber-600/20 hover:from-amber-500 hover:to-orange-600`
 const btnDanger =
   'inline-flex min-h-8 items-center gap-1 rounded-xl border border-red-200 bg-red-50 px-2.5 py-1.5 text-[11px] font-semibold text-red-800 transition hover:bg-red-100'
+const btnBlue =
+  `${btnAddPromoSize} border border-blue-500/20 bg-gradient-to-b from-blue-600 to-blue-700 text-white shadow-blue-600/20 hover:from-blue-500 hover:to-blue-600`
 
 function newId(): string {
   return `promo-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
@@ -109,10 +122,45 @@ function newSecondPiecePromotion(): SecondPieceDiscountPromotion {
   }
 }
 
+function newVendorPromotion(productId: string): VendorPromotion {
+  return {
+    id: newId(),
+    name: 'โปรผู้จัดจำหน่ายใหม่',
+    enabled: true,
+    startDate: new Date().toISOString().slice(0, 10),
+    endDate: '2099-12-31',
+    productId,
+    brand: '',
+    category: '',
+    supplierId: '',
+    tiers: [{ minQty: 1, extraDiscountPct: 3, freeQty: 0 }],
+  }
+}
+
+function vendorTierLabel(t: { extraDiscountPct: number; freeQty: number }): string {
+  const parts: string[] = []
+  if (t.extraDiscountPct > 0) parts.push(`-${t.extraDiscountPct}%`)
+  if (t.freeQty > 0) parts.push(`แถม ${t.freeQty}`)
+  return parts.join('/')
+}
+
+function staffReadableVendorSummary(p: VendorPromotion, suppliers: SupplierProfile[]): string {
+  const scope = p.productId ? productLabel(p.productId) : p.brand ? `แบรนด์ ${p.brand}` : p.category ? `หมวด ${p.category}` : 'ทุกสินค้า'
+  const sup = p.supplierId
+    ? (suppliers.find((s) => s.id === p.supplierId)?.name ?? p.supplierId)
+    : 'ทุก supplier'
+  const tierStr = [...p.tiers]
+    .sort((a, b) => a.minQty - b.minQty)
+    .map((t) => `ซื้อ ${t.minQty}+: ${vendorTierLabel(t)}`)
+    .join(' | ')
+  return `${scope} จาก ${sup} — ${tierStr}`
+}
+
 type PromoModal =
   | { kind: 'gift'; id: string | null }
   | { kind: 'percent'; id: string | null }
   | { kind: 'second'; id: string | null }
+  | { kind: 'vendor'; id: string | null }
 
 function productLabel(productId: string): string {
   const p = MOCK_PRODUCTS.find((x) => x.id === productId)
@@ -150,7 +198,7 @@ type PromotionsWorkspacePageProps = {
   className?: string
 }
 
-type PromoEditorTab = 'gift' | 'percent' | 'second'
+type PromoEditorTab = 'gift' | 'percent' | 'second' | 'vendor'
 
 export function PromotionsWorkspacePage({ className }: PromotionsWorkspacePageProps) {
   const [promotions, setPromotions] = useState<BuyQtyPromotion[]>(() => loadPromotions())
@@ -158,11 +206,14 @@ export function PromotionsWorkspacePage({ className }: PromotionsWorkspacePagePr
   const [secondPiecePromos, setSecondPiecePromos] = useState<SecondPieceDiscountPromotion[]>(() =>
     loadSecondPiecePromotions(),
   )
+  const [vendorPromos, setVendorPromos] = useState<VendorPromotion[]>(() => loadVendorPromotions())
+  const [vendors, setVendors] = useState<SupplierProfile[]>(() => loadSupplierDirectory())
   const [savedHint, setSavedHint] = useState(false)
   const [promoModal, setPromoModal] = useState<PromoModal | null>(null)
   const [giftDraft, setGiftDraft] = useState<BuyQtyPromotion | null>(null)
   const [percentDraft, setPercentDraft] = useState<PercentOffPromotion | null>(null)
   const [secondDraft, setSecondDraft] = useState<SecondPieceDiscountPromotion | null>(null)
+  const [vendorDraft, setVendorDraft] = useState<VendorPromotion | null>(null)
 
   const productOptions = useMemo(
     () => [...MOCK_PRODUCTS].sort((a, b) => a.name.localeCompare(b.name, 'th')),
@@ -190,11 +241,19 @@ export function PromotionsWorkspacePage({ className }: PromotionsWorkspacePagePr
     window.setTimeout(() => setSavedHint(false), 2000)
   }, [])
 
+  const persistVendor = useCallback((next: VendorPromotion[]) => {
+    setVendorPromos(next)
+    saveVendorPromotions(next)
+    setSavedHint(true)
+    window.setTimeout(() => setSavedHint(false), 2000)
+  }, [])
+
   const closePromoModal = useCallback(() => {
     setPromoModal(null)
     setGiftDraft(null)
     setPercentDraft(null)
     setSecondDraft(null)
+    setVendorDraft(null)
   }, [])
 
   const removePromotion = useCallback(
@@ -226,6 +285,14 @@ export function PromotionsWorkspacePage({ className }: PromotionsWorkspacePagePr
     [secondPiecePromos, persistSecondPiece],
   )
 
+  const removeVendorPromotion = useCallback(
+    (id: string) => {
+      if (!window.confirm('ลบโปรผู้จัดจำหน่ายนี้?')) return
+      persistVendor(vendorPromos.filter((p) => p.id !== id))
+    },
+    [vendorPromos, persistVendor],
+  )
+
   const saveGiftDraft = useCallback(() => {
     if (!giftDraft) return
     const exists = promotions.some((p) => p.id === giftDraft.id)
@@ -253,6 +320,17 @@ export function PromotionsWorkspacePage({ className }: PromotionsWorkspacePagePr
     closePromoModal()
   }, [secondDraft, secondPiecePromos, persistSecondPiece, closePromoModal])
 
+  const saveVendorDraft = useCallback(() => {
+    if (!vendorDraft) return
+    const exists = vendorPromos.some((p) => p.id === vendorDraft.id)
+    if (exists) {
+      persistVendor(vendorPromos.map((p) => (p.id === vendorDraft.id ? vendorDraft : p)))
+    } else {
+      persistVendor([...vendorPromos, vendorDraft])
+    }
+    closePromoModal()
+  }, [vendorDraft, vendorPromos, persistVendor, closePromoModal])
+
   useEffect(() => {
     if (!promoModal) return
     if (promoModal.kind === 'gift') {
@@ -264,6 +342,7 @@ export function PromotionsWorkspacePage({ className }: PromotionsWorkspacePagePr
       }
       setPercentDraft(null)
       setSecondDraft(null)
+      setVendorDraft(null)
     } else if (promoModal.kind === 'percent') {
       if (promoModal.id) {
         const p = percentPromos.find((x) => x.id === promoModal.id)
@@ -273,7 +352,8 @@ export function PromotionsWorkspacePage({ className }: PromotionsWorkspacePagePr
       }
       setGiftDraft(null)
       setSecondDraft(null)
-    } else {
+      setVendorDraft(null)
+    } else if (promoModal.kind === 'second') {
       if (promoModal.id) {
         const p = secondPiecePromos.find((x) => x.id === promoModal.id)
         setSecondDraft(p ? { ...p } : null)
@@ -282,8 +362,19 @@ export function PromotionsWorkspacePage({ className }: PromotionsWorkspacePagePr
       }
       setGiftDraft(null)
       setPercentDraft(null)
+      setVendorDraft(null)
+    } else {
+      if (promoModal.id) {
+        const p = vendorPromos.find((x) => x.id === promoModal.id)
+        setVendorDraft(p ? { ...p } : null)
+      } else {
+        setVendorDraft(newVendorPromotion(productOptions[0]?.id ?? 'p1'))
+      }
+      setGiftDraft(null)
+      setPercentDraft(null)
+      setSecondDraft(null)
     }
-  }, [promoModal, promotions, percentPromos, secondPiecePromos])
+  }, [promoModal, promotions, percentPromos, secondPiecePromos, vendorPromos, productOptions])
 
   useEffect(() => {
     if (!promoModal) return
@@ -309,11 +400,22 @@ export function PromotionsWorkspacePage({ className }: PromotionsWorkspacePagePr
     return secondPiecePromos.filter((p) => isSecondPiecePromotionActive(p, now))
   }, [secondPiecePromos])
 
+  const activeVendorForStaff = useMemo(() => {
+    const now = new Date()
+    return vendorPromos.filter((p) => isVendorPromotionActive(p, now))
+  }, [vendorPromos])
+
   const staffHasAnyActive =
-    activeForStaff.length > 0 || activePercentForStaff.length > 0 || activeSecondPieceForStaff.length > 0
+    activeForStaff.length > 0 ||
+    activePercentForStaff.length > 0 ||
+    activeSecondPieceForStaff.length > 0 ||
+    activeVendorForStaff.length > 0
 
   const activePromoCount =
-    activeForStaff.length + activePercentForStaff.length + activeSecondPieceForStaff.length
+    activeForStaff.length +
+    activePercentForStaff.length +
+    activeSecondPieceForStaff.length +
+    activeVendorForStaff.length
 
   const [editorTab, setEditorTab] = useState<PromoEditorTab>('gift')
   const [staffExpanded, setStaffExpanded] = useState(false)
@@ -449,6 +551,30 @@ export function PromotionsWorkspacePage({ className }: PromotionsWorkspacePagePr
                   </ul>
                 </div>
               ) : null}
+              {activeVendorForStaff.length > 0 ? (
+                <div>
+                  <p className="mb-2 flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-emerald-800/90">
+                    <Store className="size-3.5 text-blue-600" aria-hidden />
+                    โปรผู้จัดจำหน่าย
+                  </p>
+                  <ul className="space-y-2.5">
+                    {activeVendorForStaff.map((p) => (
+                      <li
+                        key={p.id}
+                        className="rounded-xl border border-white/80 bg-white/85 px-3 py-2.5 leading-snug shadow-sm ring-1 ring-emerald-100/60 backdrop-blur-sm"
+                      >
+                        <p className="font-semibold text-slate-900">{p.name}</p>
+                        <p className="mt-1 text-[11px] leading-relaxed text-emerald-900/90">
+                          {staffReadableVendorSummary(p, vendors)}
+                        </p>
+                        <p className="mt-2 inline-flex items-center rounded-md bg-emerald-50/90 px-2 py-0.5 text-[10px] font-medium text-emerald-800">
+                          {p.startDate} → {p.endDate}
+                        </p>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
             </div>
           )}
             </div>
@@ -506,6 +632,21 @@ export function PromotionsWorkspacePage({ className }: PromotionsWorkspacePagePr
           >
             <Layers2 className="size-[18px] shrink-0 sm:size-5" aria-hidden />
             <span className="px-0.5 leading-tight">ชิ้นถัดไป</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={editorTab === 'vendor'}
+            onClick={() => setEditorTab('vendor')}
+            className={clsx(
+              'flex w-full flex-col items-center gap-1 rounded-lg px-1.5 py-2 text-center text-[10px] font-semibold leading-snug transition sm:gap-1.5 sm:py-2.5 sm:text-[11px]',
+              editorTab === 'vendor'
+                ? 'bg-white text-blue-900 shadow-sm ring-1 ring-blue-200/80'
+                : 'text-slate-600 hover:bg-white/70 hover:text-slate-900',
+            )}
+          >
+            <Store className="size-[18px] shrink-0 sm:size-5" aria-hidden />
+            <span className="px-0.5 leading-tight">ผู้จัดจำหน่าย</span>
           </button>
         </nav>
 
@@ -702,6 +843,77 @@ export function PromotionsWorkspacePage({ className }: PromotionsWorkspacePagePr
                             แก้ไข
                           </button>
                           <button type="button" onClick={() => removeSecondPiecePromotion(p.id)} className={btnDanger}>
+                            <Trash2 className="size-3.5" aria-hidden />
+                            ลบ
+                          </button>
+                        </div>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        ) : null}
+
+        {editorTab === 'vendor' ? (
+          <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden">
+            <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
+              <p className="max-w-md text-[11px] leading-snug text-slate-500">
+                ซื้อสินค้าถึงจำนวนขั้นต่ำจากผู้จัดจำหน่าย → ได้ส่วนลดเพิ่มเติม % ใน PO
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  setEditorTab('vendor')
+                  setPromoModal({ kind: 'vendor', id: null })
+                }}
+                className={btnBlue}
+              >
+                <Plus className="size-3 shrink-0 sm:size-3.5" aria-hidden />
+                เพิ่มโปร
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-slate-200/80 bg-slate-50/50 p-2 ring-1 ring-slate-100/80">
+              {vendorPromos.length === 0 ? (
+                <p className="py-10 text-center text-[12px] text-slate-500">ยังไม่มีโปรผู้จัดจำหน่าย — กด &quot;เพิ่มโปร&quot;</p>
+              ) : (
+                <ul className="space-y-2">
+                  {vendorPromos.map((p) => (
+                    <li
+                      key={p.id}
+                      className="rounded-xl border border-slate-200/80 bg-white/95 p-3 shadow-sm ring-1 ring-slate-100/60"
+                    >
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                        <div className="min-w-0 flex-1">
+                          <p className="font-semibold text-slate-900">{p.name}</p>
+                          <p className="mt-1 text-[11px] leading-relaxed text-slate-600">
+                            {staffReadableVendorSummary(p, vendors)}
+                          </p>
+                          <p className="mt-2 text-[10px] text-slate-500">
+                            {p.startDate} → {p.endDate}
+                            <span className={p.enabled ? ' text-emerald-700' : ' text-slate-400'}>
+                              {' '}
+                              · {p.enabled ? 'เปิดใช้งาน' : 'ปิด'} ·{' '}
+                              <span className="tabular-nums text-blue-700">
+                                {[...p.tiers].sort((a, b) => a.minQty - b.minQty).map((t) => `${t.minQty}+:${vendorTierLabel(t)}`).join(' ')}
+                              </span>
+                            </span>
+                          </p>
+                        </div>
+                        <div className="flex shrink-0 gap-1.5 sm:flex-col">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditorTab('vendor')
+                              setPromoModal({ kind: 'vendor', id: p.id })
+                            }}
+                            className="inline-flex items-center justify-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-[10px] font-semibold text-blue-900 hover:bg-blue-100"
+                          >
+                            <Pencil className="size-3" aria-hidden />
+                            แก้ไข
+                          </button>
+                          <button type="button" onClick={() => removeVendorPromotion(p.id)} className={btnDanger}>
                             <Trash2 className="size-3.5" aria-hidden />
                             ลบ
                           </button>
@@ -1166,6 +1378,156 @@ export function PromotionsWorkspacePage({ className }: PromotionsWorkspacePagePr
                     ยกเลิก
                   </button>
                   <button type="button" onClick={saveSecondDraft} className={btnAmber}>
+                    บันทึก
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : null}
+        {promoModal?.kind === 'vendor' && vendorDraft ? (
+          <div
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/45 p-3 backdrop-blur-[1px]"
+            onClick={closePromoModal}
+            role="presentation"
+          >
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="promo-modal-vendor-title"
+              className="max-h-[min(92vh,40rem)] w-full max-w-lg overflow-y-auto rounded-2xl border border-slate-200/90 bg-white p-4 shadow-2xl ring-1 ring-slate-200/60 sm:p-5"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="mb-3 flex items-start justify-between gap-2 border-b border-slate-100 pb-2">
+                <h2 id="promo-modal-vendor-title" className="text-sm font-bold text-slate-900">
+                  {promoModal.id ? 'แก้ไขโปรผู้จัดจำหน่าย' : 'เพิ่มโปรผู้จัดจำหน่าย'}
+                </h2>
+                <button
+                  type="button"
+                  onClick={closePromoModal}
+                  className="rounded-lg p-1 text-slate-500 transition hover:bg-slate-100"
+                  aria-label="ปิด"
+                >
+                  <X className="size-5" />
+                </button>
+              </div>
+              <div className="flex flex-col gap-2.5">
+                <label className="block">
+                  <span className={labelEditor}>รหัส (id)</span>
+                  <input readOnly value={vendorDraft.id} className={fieldEditorReadonly} />
+                </label>
+                <label className="block">
+                  <span className={labelEditor}>ชื่อโปร</span>
+                  <input
+                    value={vendorDraft.name}
+                    onChange={(e) => setVendorDraft((d) => (d ? { ...d, name: e.target.value } : null))}
+                    className={fieldEditor}
+                  />
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 rounded-lg border border-slate-100 bg-slate-50/50 px-2.5 py-1.5 text-[11px] font-medium text-slate-800">
+                  <input
+                    type="checkbox"
+                    className="size-3.5 rounded border-slate-300 text-blue-600"
+                    checked={vendorDraft.enabled}
+                    onChange={(e) => setVendorDraft((d) => (d ? { ...d, enabled: e.target.checked } : null))}
+                  />
+                  เปิดใช้งาน
+                </label>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <label className="block">
+                    <span className={labelEditor}>เริ่ม</span>
+                    <input
+                      type="date"
+                      value={vendorDraft.startDate}
+                      onChange={(e) => setVendorDraft((d) => (d ? { ...d, startDate: e.target.value } : null))}
+                      className={fieldEditor}
+                    />
+                  </label>
+                  <label className="block">
+                    <span className={labelEditor}>สิ้นสุด</span>
+                    <input
+                      type="date"
+                      value={vendorDraft.endDate}
+                      onChange={(e) => setVendorDraft((d) => (d ? { ...d, endDate: e.target.value } : null))}
+                      className={fieldEditor}
+                    />
+                  </label>
+                </div>
+                <label className="block">
+                  <span className={labelEditor}>สินค้า</span>
+                  <select
+                    value={vendorDraft.productId}
+                    onChange={(e) => setVendorDraft((d) => (d ? { ...d, productId: e.target.value } : null))}
+                    className={fieldEditor}
+                  >
+                    {productOptions.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.sku} — {p.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block">
+                  <span className={labelEditor}>ผู้จัดจำหน่าย — ว่าง = ทุก supplier</span>
+                  <select
+                    value={vendorDraft.supplierId}
+                    onChange={(e) => setVendorDraft((d) => (d ? { ...d, supplierId: e.target.value } : null))}
+                    className={fieldEditor}
+                  >
+                    <option value="">— ทุก supplier —</option>
+                    {vendors.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.supplierCode} — {s.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div>
+                  <div className="mb-1 flex items-center justify-between">
+                    <span className={labelEditor}>ขั้นส่วนลด</span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setVendorDraft((d) => {
+                          if (!d) return d
+                          const last = d.tiers[d.tiers.length - 1]
+                          return { ...d, tiers: [...d.tiers, { minQty: (last?.minQty ?? 0) + 50, extraDiscountPct: 0, freeQty: 0 }] }
+                        })
+                      }
+                      className="text-[10px] font-bold text-blue-600 hover:underline"
+                    >
+                      + เพิ่มขั้น
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-[1fr_1fr_1fr_auto] mb-0.5 gap-1 text-[9px] font-semibold text-slate-400">
+                    <span>ซื้อขั้นต่ำ</span><span>ลด %</span><span>แถมฟรี</span><span />
+                  </div>
+                  {vendorDraft.tiers.map((t, idx) => (
+                    <div key={idx} className="mb-1 grid grid-cols-[1fr_1fr_1fr_auto] gap-1">
+                      <input type="number" min={1} value={t.minQty}
+                        onChange={(e) => setVendorDraft((d) => d && { ...d, tiers: d.tiers.map((x, i) => i === idx ? { ...x, minQty: Math.max(1, parseInt(e.target.value) || 1) } : x) })}
+                        className={fieldEditor} />
+                      <input type="number" min={0} max={100} step={0.5} value={t.extraDiscountPct}
+                        onChange={(e) => setVendorDraft((d) => d && { ...d, tiers: d.tiers.map((x, i) => i === idx ? { ...x, extraDiscountPct: Math.min(100, Math.max(0, parseFloat(e.target.value) || 0)) } : x) })}
+                        className={fieldEditor} />
+                      <input type="number" min={0} value={t.freeQty}
+                        onChange={(e) => setVendorDraft((d) => d && { ...d, tiers: d.tiers.map((x, i) => i === idx ? { ...x, freeQty: Math.max(0, parseInt(e.target.value) || 0) } : x) })}
+                        className={fieldEditor} />
+                      <button type="button" disabled={vendorDraft.tiers.length <= 1}
+                        onClick={() => setVendorDraft((d) => d && { ...d, tiers: d.tiers.filter((_, i) => i !== idx) })}
+                        className="flex items-center justify-center rounded border border-rose-200 bg-rose-50 p-1 text-rose-400 hover:bg-rose-100 disabled:opacity-30"
+                      >✕</button>
+                    </div>
+                  ))}
+                </div>
+                <p className="rounded-lg border border-blue-200/60 bg-blue-50/90 px-2.5 py-2 text-[10px] text-blue-950">
+                  เมื่อสั่งซื้อครบจำนวน ระบบจะแนะนำให้ต่อท้าย discountChain ใน PO โดยอัตโนมัติ
+                </p>
+                <div className="mt-2 flex flex-wrap justify-end gap-2 border-t border-slate-100 pt-3">
+                  <button type="button" onClick={closePromoModal} className={btnGhost}>
+                    ยกเลิก
+                  </button>
+                  <button type="button" onClick={saveVendorDraft} className={btnBlue}>
                     บันทึก
                   </button>
                 </div>

@@ -1,5 +1,6 @@
 import { type StoreProfile } from '@/features/settings/data/mockStoreProfile'
 import { loadStoreProfile, saveStoreProfile } from '@/features/settings/data/storeProfileStore'
+import { loadCostingMethod, saveCostingMethod, type CostingMethod } from '@/features/settings/data/costingMethodStore'
 import { type ChangeEvent, type ReactNode, useState } from 'react'
 
 function Field({
@@ -24,6 +25,12 @@ function Field({
 export function StoreProfilePanel() {
   const [values, setValues] = useState<StoreProfile>(() => loadStoreProfile())
   const [savedAt, setSavedAt] = useState<number | null>(null)
+  const [costingMethod, setCostingMethodState] = useState<CostingMethod>(() => loadCostingMethod())
+
+  const handleCostingMethod = (m: CostingMethod) => {
+    setCostingMethodState(m)
+    saveCostingMethod(m)
+  }
 
   const patchField =
     (key: keyof StoreProfile) =>
@@ -91,6 +98,62 @@ export function StoreProfilePanel() {
                 className="w-full resize-y rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm shadow-sm outline-none focus:border-slate-400 focus:ring-1 focus:ring-slate-300"
               />
             </Field>
+          </div>
+
+          {/* VAT registration toggle */}
+          <div className="sm:col-span-2">
+            <div className={`rounded-xl border p-4 ${values.vatRegistered ? 'border-emerald-200 bg-emerald-50' : 'border-slate-200 bg-white'}`}>
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <p className="text-sm font-semibold text-slate-800">จดทะเบียนภาษีมูลค่าเพิ่ม (VAT)</p>
+                  <p className="mt-0.5 text-xs text-slate-500">
+                    {values.vatRegistered
+                      ? 'เปิด — ระบบจะหัก VAT ออกจากต้นทุนสต็อก (VAT ขอคืนจากสรรพากรได้)'
+                      : 'ปิด — VAT ที่จ่ายให้ vendor ถือเป็นต้นทุนสินค้า (บวกเข้าราคาทุน)'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={values.vatRegistered}
+                  onClick={() => setValues((v) => ({ ...v, vatRegistered: !v.vatRegistered }))}
+                  className={`relative inline-flex h-7 w-12 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none ${values.vatRegistered ? 'bg-emerald-500' : 'bg-slate-300'}`}
+                >
+                  <span
+                    className={`inline-block size-5 translate-y-0.5 rounded-full bg-white shadow-sm transition-transform ${values.vatRegistered ? 'translate-x-5' : 'translate-x-0.5'}`}
+                  />
+                </button>
+              </div>
+            </div>
+          </div>
+          {/* Costing method */}
+          <div className="sm:col-span-2">
+            <div className="rounded-xl border border-slate-200 bg-white p-4">
+              <p className="text-sm font-semibold text-slate-800">วิธีคิดต้นทุนสินค้า</p>
+              <p className="mt-0.5 text-xs text-slate-500">ใช้สำหรับแนะนำราคาใน PO และแสดงต้นทุนในรายงาน</p>
+              <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:gap-3">
+                {([
+                  { value: 'average' as const, label: 'ต้นทุนเฉลี่ย (Moving Average)', desc: 'เฉลี่ยราคาทุกล็อตที่รับเข้า — ราคาคงที่สม่ำเสมอ' },
+                  { value: 'latest'  as const, label: 'ต้นทุนล่าสุด (Latest Cost)',    desc: 'ใช้ราคา PO receive ล่าสุด — สะท้อนราคาตลาดปัจจุบัน' },
+                ]).map((opt) => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => handleCostingMethod(opt.value)}
+                    className={`flex flex-1 flex-col gap-0.5 rounded-xl border px-4 py-3 text-left transition ${
+                      costingMethod === opt.value
+                        ? 'border-amber-400 bg-amber-50 ring-1 ring-amber-400'
+                        : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50'
+                    }`}
+                  >
+                    <span className={`text-sm font-semibold ${costingMethod === opt.value ? 'text-amber-800' : 'text-slate-700'}`}>
+                      {opt.label}
+                    </span>
+                    <span className="text-xs text-slate-500">{opt.desc}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
         </div>
 
