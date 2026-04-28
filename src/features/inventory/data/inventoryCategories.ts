@@ -199,6 +199,87 @@ function newId(prefix: string) {
   return `${prefix}-${crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`}`
 }
 
+// ---- Dimension presets -------------------------------------------------------
+
+const DIM_PRESET_RULES: Array<{ keywords: string[]; labels: string[] }> = [
+  // กรองน้ำมัน / กรองโซล่า / ดักน้ำ
+  { keywords: ['กรองน้ำมัน'],  labels: ['Ø ใน', 'Ø นอก', 'สูง'] },
+  { keywords: ['กรองโซล่า'],   labels: ['Ø ใน', 'Ø นอก', 'สูง'] },
+  { keywords: ['ดักน้ำ'],      labels: ['Ø ใน', 'Ø นอก', 'สูง'] },
+  { keywords: ['กรองอากาศ'],   labels: ['Ø ใน', 'Ø นอก', 'หนา'] },
+  // ช่วงล่าง
+  { keywords: ['ลูกหมาก'],     labels: ['Ø ใน', 'Ø นอก', 'ยาว'] },
+  { keywords: ['บูช'],         labels: ['Ø ใน', 'Ø นอก', 'ยาว'] },
+  { keywords: ['ยางกันฝุ่น'],   labels: ['Ø ใน', 'Ø นอก', 'ยาว'] },
+  { keywords: ['แบริ่ง'],      labels: ['Ø ใน', 'Ø นอก', 'หนา'] },
+  { keywords: ['ผ้าเบรก'],     labels: ['กว้าง', 'ยาว', 'หนา'] },
+  { keywords: ['ดิสก์'],       labels: ['Ø นอก', 'หนา'] },          // 2 labels → slotCount 2
+  { keywords: ['โช๊ค'],        labels: ['Ø', 'ยาว'] },              // 2 labels
+  // ท่อ / สาย
+  { keywords: ['สายยาง'],      labels: ['Ø ใน', 'Ø นอก', 'ยาว'] },
+  { keywords: ['ท่อน้ำ'],      labels: ['Ø ใน', 'Ø นอก', 'ยาว'] },
+  // น็อต / สกรู / แหวน
+  { keywords: ['แหวน'],        labels: ['Ø ใน', 'Ø นอก', 'หนา'] },
+  { keywords: ['น็อต'],        labels: ['Ø เกลียว', 'ยาว'] },       // 2 labels
+  { keywords: ['สกรู'],        labels: ['Ø เกลียว', 'ยาว'] },       // 2 labels
+  // Main-level fallbacks (broader match — checked last)
+  { keywords: ['เครื่องยนต์'],  labels: ['Ø ใน', 'Ø นอก', 'สูง'] },
+  { keywords: ['ช่วงล่าง'],    labels: ['Ø ใน', 'Ø นอก', 'ยาว'] },
+  { keywords: ['ท่อและสาย'],   labels: ['Ø ใน', 'Ø นอก', 'ยาว'] },
+]
+
+function presetLabelsForName(name: string): string[] | null {
+  const lower = name.trim().toLowerCase()
+  for (const rule of DIM_PRESET_RULES) {
+    if (rule.keywords.every((k) => lower.includes(k))) return rule.labels
+  }
+  return null
+}
+
+function labelsToFields(labels: string[]): CategoryPaperField[] {
+  return labels.map((label, i) => ({ id: `dp-${i}`, label }))
+}
+
+const PRESET_MIGRATION_KEY = 'bento.category.dim.preset.v1'
+
+/** เติม paperFields ที่ว่างเปล่าด้วย preset — คืน dirty=true ถ้ามีการเปลี่ยนแปลง */
+function applyDimPresetsToTree(tree: MainCategory[]): { tree: MainCategory[]; dirty: boolean } {
+  let dirty = false
+
+  const next = tree.map((main) => {
+    let mainFields = main.paperFields ?? []
+    if (mainFields.length === 0) {
+      const labels = presetLabelsForName(main.name)
+      if (labels) { mainFields = labelsToFields(labels); dirty = true }
+    }
+
+    const subs = main.subcategories.map((sub) => {
+      let subFields = sub.paperFields ?? []
+      if (subFields.length === 0) {
+        const labels = presetLabelsForName(sub.name)
+        if (labels) { subFields = labelsToFields(labels); dirty = true }
+      }
+
+      const subSubs = sub.subSubcategories.map((ss) => {
+        let ssFields = ss.paperFields ?? []
+        if (ssFields.length === 0) {
+          const labels = presetLabelsForName(ss.name)
+          if (labels) { ssFields = labelsToFields(labels); dirty = true }
+        }
+        return ssFields !== (ss.paperFields ?? []) ? { ...ss, paperFields: ssFields } : ss
+      })
+
+      const changed = subFields !== (sub.paperFields ?? []) || subSubs !== sub.subSubcategories
+      return changed ? { ...sub, paperFields: subFields, subSubcategories: subSubs } : sub
+    })
+
+    const changed = mainFields !== (main.paperFields ?? []) || subs !== main.subcategories
+    return changed ? { ...main, paperFields: mainFields, subcategories: subs } : main
+  })
+
+  return { tree: next, dirty }
+}
+
 function normalizeAllowedTagIds(raw: unknown): string[] | undefined {
   if (!Array.isArray(raw)) return undefined
   const ids = raw.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).map((x) => x.trim())
@@ -222,12 +303,13 @@ function normalizePaperFields(raw: unknown): CategoryPaperField[] {
 
 function defaultMainFromName(name: string): MainCategory {
   const id = newId('main')
+  const presetLabels = presetLabelsForName(name)
   return {
     id,
     name,
     status: 'active',
     subcategories: [],
-    paperFields: [],
+    paperFields: presetLabels ? labelsToFields(presetLabels) : [],
     dataNotes: undefined,
     showProductBrand: false,
   }
@@ -349,6 +431,14 @@ function parseLegacyStringList(raw: string): MainCategory[] | null {
   }
 }
 
+function runDimPresetMigration(tree: MainCategory[]): MainCategory[] {
+  if (localStorage.getItem(PRESET_MIGRATION_KEY)) return tree
+  const { tree: migrated, dirty } = applyDimPresetsToTree(tree)
+  localStorage.setItem(PRESET_MIGRATION_KEY, '1')
+  if (dirty) localStorage.setItem(TREE_KEY, JSON.stringify(migrated))
+  return migrated
+}
+
 export function loadCategoryTree(): MainCategory[] {
   try {
     const treeRaw = localStorage.getItem(TREE_KEY)
@@ -356,19 +446,22 @@ export function loadCategoryTree(): MainCategory[] {
       const parsed = JSON.parse(treeRaw) as unknown
       if (Array.isArray(parsed) && parsed.length > 0) {
         const norm = normalizeCategoryTree(parsed)
-        if (norm.length > 0) return mergeMissingMainCategoriesFromMaster(norm)
+        if (norm.length > 0) {
+          const merged = mergeMissingMainCategoriesFromMaster(norm)
+          return runDimPresetMigration(merged)
+        }
       }
     }
 
     const legacy = localStorage.getItem(LEGACY_LIST_KEY)
     if (legacy) {
       const migrated = parseLegacyStringList(legacy)
-      if (migrated?.length) return mergeMissingMainCategoriesFromMaster(migrated)
+      if (migrated?.length) return runDimPresetMigration(mergeMissingMainCategoriesFromMaster(migrated))
     }
 
-    return mergeMissingMainCategoriesFromMaster(defaultCategoryTree())
+    return runDimPresetMigration(mergeMissingMainCategoriesFromMaster(defaultCategoryTree()))
   } catch {
-    return mergeMissingMainCategoriesFromMaster(defaultCategoryTree())
+    return runDimPresetMigration(mergeMissingMainCategoriesFromMaster(defaultCategoryTree()))
   }
 }
 
@@ -410,9 +503,15 @@ export async function hydrateCategoryTreeFromDb(): Promise<MainCategory[]> {
     const normalizedDb = normalizeCategoryTree(row)
     if (normalizedDb.length === 0) return local
     const merged = mergeMissingMainCategoriesFromMaster(normalizedDb)
-    localStorage.setItem(TREE_KEY, JSON.stringify(merged))
+    const afterPreset = runDimPresetMigration(merged)
+    localStorage.setItem(TREE_KEY, JSON.stringify(afterPreset))
+    if (afterPreset !== merged) {
+      void invoke('inventory_categories_replace_all', { payload: afterPreset }).catch((e) => {
+        console.error('[inventory-categories] preset migration db save failed', e)
+      })
+    }
     window.dispatchEvent(new CustomEvent(INVENTORY_CATEGORIES_UPDATED_EVENT))
-    return merged
+    return afterPreset
   } catch (e) {
     console.error('[inventory-categories] hydrate from db failed', e)
     return local

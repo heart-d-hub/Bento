@@ -45,7 +45,7 @@ import {
   type PaperDimLayout,
 } from '@/features/inventory/data/paperDimensionLayout'
 import { VehicleFitPicker, type VehicleFitRow } from '@/features/inventory/components/VehicleFitPicker'
-import { ProductImageGrid } from '@/features/inventory/components/ProductImageGrid'
+import { ProductImageGallery } from '@/features/inventory/components/ProductImageGallery'
 import { isTauri } from '@/features/desktop/isTauri'
 import { clsx } from 'clsx'
 import { ChevronDown, Coins, ExternalLink, Plus, RotateCcw, Trash2, X } from 'lucide-react'
@@ -433,7 +433,6 @@ export function AddProductModal({
   const [subCatId, setSubCatId] = useState('')
   const [subSubCatId, setSubSubCatId] = useState('')
   const [dimA, setDimA] = useState('')
-  const [dimA2, setDimA2] = useState('')
   const [dimB, setDimB] = useState('')
   const [dimC, setDimC] = useState('')
   const [dimUnit, setDimUnit] = useState<DimUnit>('mm')
@@ -801,7 +800,6 @@ export function AddProductModal({
       setSubSubCatId('')
     }
     setDimA('')
-    setDimA2('')
     setDimB('')
     setDimC('')
     setDimUnit('mm')
@@ -900,13 +898,11 @@ export function AddProductModal({
       const pd = p.physicalDimensions
       if (pd) {
         setDimA(pd.innerDiameterMm !== undefined ? formatDimForInput(pd.innerDiameterMm) : '')
-        setDimA2(pd.innerDiameterSecondaryMm !== undefined ? formatDimForInput(pd.innerDiameterSecondaryMm) : '')
         setDimB(pd.outerDiameterMm !== undefined ? formatDimForInput(pd.outerDiameterMm) : '')
         setDimC(pd.heightMm !== undefined ? formatDimForInput(pd.heightMm) : '')
         setDimUnit('mm')
       } else {
         setDimA('')
-        setDimA2('')
         setDimB('')
         setDimC('')
         setDimUnit('mm')
@@ -1033,7 +1029,6 @@ export function AddProductModal({
     setInStoreCatalog(copySource.inStoreCatalog !== false)
     setSalesStatus(copySource.salesStatus ?? 'active')
     setDimA('')
-    setDimA2('')
     setDimB('')
     setDimC('')
     setDimUnit('mm')
@@ -1131,7 +1126,6 @@ export function AddProductModal({
   function handleDimUnitChange(next: DimUnit) {
     if (next === dimUnit) return
     setDimA((v) => convertDimStringUnit(v, dimUnit, next))
-    setDimA2((v) => convertDimStringUnit(v, dimUnit, next))
     setDimB((v) => convertDimStringUnit(v, dimUnit, next))
     setDimC((v) => convertDimStringUnit(v, dimUnit, next))
     setDimUnit(next)
@@ -1174,7 +1168,7 @@ export function AddProductModal({
         ? Boolean(dimB.trim() || dimC.trim())
         : dimLayout.slotCount === 3
           ? Boolean(dimA.trim() || dimB.trim() || dimC.trim())
-          : Boolean(dimA.trim() || dimA2.trim() || dimB.trim() || dimC.trim())
+          : Boolean(dimA.trim() || dimB.trim() || dimC.trim())
     const b = parseDimInput(dimB)
     const c = parseDimInput(dimC)
     if (formVis.showPhysicalDimensions && !deferOptionalCategoryUi && hasAnyDim) {
@@ -1346,7 +1340,6 @@ export function AddProductModal({
     let physicalDimensions: PhysicalDimensions | undefined
     if (formVis.showPhysicalDimensions && !deferOptionalCategoryUi) {
       const a = parseDimInput(dimA)
-      const a2 = parseDimInput(dimA2)
       if (dimLayout.slotCount === 2) {
         if (b !== undefined || c !== undefined) {
           physicalDimensions = {
@@ -1359,9 +1352,6 @@ export function AddProductModal({
           outerDiameterMm: b,
           heightMm: c,
           ...(a !== undefined ? { innerDiameterMm: a } : {}),
-          ...(dimLayout.slotCount !== 3 && a2 !== undefined
-            ? { innerDiameterSecondaryMm: a2 }
-            : {}),
         }
       }
     } else if (isEdit) {
@@ -1601,7 +1591,7 @@ export function AddProductModal({
               <div className={sectionClass}>
                 <div className="flex items-start gap-3">
                   <p className={clsx(sectionTitleClass, 'flex-1')}>ข้อมูลหลัก</p>
-                  {isTauri() && <ProductImageGrid sku={sku} className="mb-4" />}
+                  {isTauri() && <ProductImageGallery sku={sku} mainSize="sm" />}
                 </div>
                 <label className="block min-w-0">
                   <span className={labelClass}>รหัสสินค้า *</span>
@@ -2302,7 +2292,7 @@ export function AddProductModal({
                           </label>
                         </div>
                       ) : (
-                        <div className="grid grid-cols-4 gap-1">
+                        <div className="grid grid-cols-3 gap-1">
                           <label>
                             <span className="mb-0.5 block text-[10px] text-slate-500">{dimLayout.a}</span>
                             <input
@@ -2312,19 +2302,6 @@ export function AddProductModal({
                               inputMode="decimal"
                             />
                           </label>
-                          {dimLayout.showA2ByCategory || dimA2.trim().length > 0 ? (
-                            <label>
-                              <span className="mb-0.5 block text-[10px] text-slate-500">{dimLayout.a2}</span>
-                              <input
-                                className={inputClass}
-                                value={dimA2}
-                                onChange={(e) => setDimA2(e.target.value)}
-                                inputMode="decimal"
-                              />
-                            </label>
-                          ) : (
-                            <div aria-hidden />
-                          )}
                           <label>
                             <span className="mb-0.5 block text-[10px] text-slate-500">{dimLayout.b} *</span>
                             <input

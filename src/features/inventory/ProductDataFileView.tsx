@@ -1,5 +1,6 @@
 import { AddProductModal, type AddProductBrowseNav } from '@/features/inventory/components/AddProductModal'
 import { ProductImage } from '@/features/inventory/components/ProductImage'
+import { ProductImageGallery } from '@/features/inventory/components/ProductImageGallery'
 import { CrossBranchStockSortModal } from '@/features/inventory/components/CrossBranchStockSortModal'
 import { canViewCost } from '@/features/auth/authSession'
 import { useWorkspaceTabs } from '@/features/main/context/WorkspaceTabsContext'
@@ -37,6 +38,7 @@ import {
   saveProductMasterList,
   sellPriceAtUnitIndex,
   sellPriceTierContextFromProduct,
+  totalCrossBranchStock,
   type CrossBranchStockRow,
   type PhysicalDimensions,
   type ProductMasterDetail,
@@ -57,7 +59,7 @@ import {
   LayoutGrid,
   LayoutList,
   ListOrdered,
-  Package,
+  MapPin,
   Pencil,
   Plus,
   Printer,
@@ -360,8 +362,8 @@ function MasterCatalogSortTh({
   )
 }
 
-/** ค่าที่วัด A/A₂/B/C ตรงกับ inner / innerSecondary / outer / height ในแฟ้ม */
-type MeasureInput = { h: number; od: number; id?: number; id2?: number }
+/** ค่าที่วัด A/B/C ตรงกับ inner / outer / height ในแฟ้ม */
+type MeasureInput = { h: number; od: number; id?: number }
 
 function paperFieldsForNav(tree: MainCategory[], sel: CategoryNavSelection) {
   if (sel.type === 'main') return tree.find((m) => m.id === sel.mainId)?.paperFields
@@ -379,24 +381,22 @@ function paperFieldsForNav(tree: MainCategory[], sel: CategoryNavSelection) {
   return undefined
 }
 
-function physicalInnerPair(d: { innerDiameterMm?: number; innerDiameterSecondaryMm?: number }): [number, number] | null {
-  if (d.innerDiameterMm === undefined || d.innerDiameterSecondaryMm === undefined) return null
-  return [Math.min(d.innerDiameterMm, d.innerDiameterSecondaryMm), Math.max(d.innerDiameterMm, d.innerDiameterSecondaryMm)]
-}
-
 /** บรรทัดเดียวสำหรับแถวรายการตอนเปิดค้นหามิติ — มม. + เทียบหุน (เดียวกับตอนลงสินค้าเป็นหุน) */
 function formatPhysicalDimensionsSearchRow(d: PhysicalDimensions): string {
   const line = (mm: number) => `${mm} mm (~${mmToHun(mm).toFixed(1)} หุน)`
   const parts: string[] = []
-  const pair = physicalInnerPair(d)
-  if (pair) {
-    parts.push(`A ${line(pair[0])} / ${line(pair[1])}`)
-  } else if (d.innerDiameterMm !== undefined) {
-    parts.push(`A ${line(d.innerDiameterMm)}`)
-  }
+  if (d.innerDiameterMm !== undefined) parts.push(`A ${line(d.innerDiameterMm)}`)
   if (d.outerDiameterMm !== undefined) parts.push(`B ${line(d.outerDiameterMm)}`)
   if (d.heightMm !== undefined) parts.push(`C ${line(d.heightMm)}`)
   return parts.join(' · ')
+}
+
+function formatDimsCompact(d: PhysicalDimensions): string {
+  const parts: string[] = []
+  if (d.innerDiameterMm !== undefined) parts.push(`A:${d.innerDiameterMm}`)
+  if (d.outerDiameterMm !== undefined) parts.push(`B:${d.outerDiameterMm}`)
+  if (d.heightMm !== undefined) parts.push(`C:${d.heightMm}`)
+  return parts.length ? parts.join(' · ') + ' mm' : ''
 }
 
 function parseMeasureMm(s: string): number | undefined {
@@ -411,14 +411,6 @@ function dimensionStrictMatch(p: ProductMasterDetail, input: MeasureInput, tol: 
   if (!d) return false
   if (d.outerDiameterMm !== undefined && Math.abs(d.outerDiameterMm - input.od) > tol) return false
   if (d.heightMm !== undefined && Math.abs(d.heightMm - input.h) > tol) return false
-
-  const pair = physicalInnerPair(d)
-  if (pair) {
-    if (input.id === undefined || input.id2 === undefined) return false
-    const u: [number, number] = [Math.min(input.id, input.id2), Math.max(input.id, input.id2)]
-    return Math.abs(pair[0] - u[0]) <= tol && Math.abs(pair[1] - u[1]) <= tol
-  }
-
   if (d.innerDiameterMm !== undefined && input.id !== undefined) {
     if (Math.abs(d.innerDiameterMm - input.id) > tol) return false
   }
@@ -431,22 +423,6 @@ function dimensionScore(p: ProductMasterDetail, input: MeasureInput): number | n
   let s = 0
   if (d.outerDiameterMm !== undefined) s += Math.abs(d.outerDiameterMm - input.od)
   if (d.heightMm !== undefined) s += Math.abs(d.heightMm - input.h)
-
-  const pair = physicalInnerPair(d)
-  if (pair) {
-    if (input.id !== undefined && input.id2 !== undefined) {
-      const u: [number, number] = [Math.min(input.id, input.id2), Math.max(input.id, input.id2)]
-      s += Math.abs(pair[0] - u[0]) + Math.abs(pair[1] - u[1])
-    } else if (input.id !== undefined) {
-      s += Math.min(Math.abs(pair[0] - input.id), Math.abs(pair[1] - input.id)) + 80
-    } else if (input.id2 !== undefined) {
-      s += Math.min(Math.abs(pair[0] - input.id2), Math.abs(pair[1] - input.id2)) + 80
-    } else {
-      s += 120
-    }
-    return s
-  }
-
   if (input.id !== undefined && d.innerDiameterMm !== undefined) {
     s += Math.abs(d.innerDiameterMm - input.id)
   }
@@ -785,9 +761,29 @@ const ProductMasterListRow = memo(function ProductMasterListRow({
           <p className="mt-1 line-clamp-2 text-[11px] leading-snug text-violet-900/95 tabular-nums">
             <span className="font-medium text-violet-950">ในระบบ:</span> {formatPhysicalDimensionsSearchRow(product.physicalDimensions)}
           </p>
-        ) : null}
+        ) : (
+          (() => {
+            const dimStr = product.physicalDimensions ? formatDimsCompact(product.physicalDimensions) : ''
+            const loc = product.storageLocation?.trim() ?? ''
+            if (!dimStr && !loc) return null
+            return (
+              <p className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[11px] leading-snug text-slate-400 tabular-nums pos-compact:text-[10px]">
+                {dimStr ? <span>{dimStr}</span> : null}
+                {loc ? (
+                  <span className="flex items-center gap-0.5 not-italic text-slate-400">
+                    <MapPin className="size-2.5 shrink-0" aria-hidden />
+                    {loc}
+                  </span>
+                ) : null}
+              </p>
+            )
+          })()
+        )}
       </td>
       <td className="hidden py-2 font-mono text-xs text-slate-500 pos-compact:py-1.5 sm:table-cell">{product.sku}</td>
+      <td className="hidden py-2 pr-3 text-right text-xs tabular-nums text-slate-600 pos-compact:py-1.5 pos-compact:text-[11px] sm:table-cell">
+        {totalCrossBranchStock(product)}
+      </td>
       <td className="hidden border-l border-slate-100/90 py-2 pl-4 pr-3 text-right text-sm tabular-nums text-slate-700 pos-compact:py-1.5 pos-compact:pl-3 pos-compact:text-xs lg:table-cell">
         ฿{product.sellPrice.toLocaleString('th-TH')}
       </td>
@@ -835,12 +831,7 @@ function ProductMasterDetailContent({
       <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
         <SectionTitle>ข้อมูลพื้นฐาน</SectionTitle>
         <div className="mt-4 flex flex-col gap-4 sm:flex-row sm:items-start">
-          <div className="flex size-28 shrink-0 flex-col items-center justify-center gap-1 overflow-hidden rounded-2xl border border-slate-200 bg-slate-100">
-            <Package className="size-14 text-slate-400" strokeWidth={1.25} />
-            <span className="px-1 text-center text-[9px] leading-tight text-slate-400">
-              รูปสินค้า — โครงรองรับภายหลัง
-            </span>
-          </div>
+          <ProductImageGallery sku={selected.sku} mainSize="md" />
               <div className="min-w-0 flex-1 space-y-3">
             <div>
               <p className="text-base font-semibold leading-snug text-slate-900">{selected.name}</p>
@@ -890,31 +881,14 @@ function ProductMasterDetailContent({
                 <div className="mt-3 rounded-xl border border-violet-100 bg-violet-50/50 px-3 py-2">
                   <p className="mb-2 text-xs font-medium text-violet-900">
                     มิติอ้างอิง — เก็บเป็นมม. (ถ้าลงเป็นหุนตอนบันทึก ระบบแปลงเป็นมม. อัตโนมัติ) · A/B/C ใช้ได้ทั้งไส้กรอง ลูกหมาก และชิ้นอื่น
-                    {selected.physicalDimensions.innerDiameterSecondaryMm !== undefined ? (
-                      <span className="mt-1 block font-normal text-violet-800/90">
-                        กรณีสองรูไม่เท่ากัน — ลง Ø รูเล็ก / รูใหญ่ ในแฟ้ม แล้ววัดทั้งสองรูตอนค้นหา
-                      </span>
-                    ) : null}
                   </p>
-                  {selected.physicalDimensions.innerDiameterSecondaryMm !== undefined &&
-                  selected.physicalDimensions.innerDiameterMm !== undefined ? (
-                    <>
-                      <FieldLine label="A₁">
-                        <span className="tabular-nums">{formatMmWithHunApprox(selected.physicalDimensions.innerDiameterMm)}</span>
-                      </FieldLine>
-                      <FieldLine label="A₂">
-                        <span className="tabular-nums">{formatMmWithHunApprox(selected.physicalDimensions.innerDiameterSecondaryMm)}</span>
-                      </FieldLine>
-                    </>
-                  ) : (
-                    <FieldLine label="A">
-                      {selected.physicalDimensions.innerDiameterMm !== undefined ? (
-                        <span className="tabular-nums">{formatMmWithHunApprox(selected.physicalDimensions.innerDiameterMm)}</span>
-                      ) : (
-                        <span className="text-slate-500">—</span>
-                      )}
-                    </FieldLine>
-                  )}
+                  <FieldLine label="A">
+                    {selected.physicalDimensions.innerDiameterMm !== undefined ? (
+                      <span className="tabular-nums">{formatMmWithHunApprox(selected.physicalDimensions.innerDiameterMm)}</span>
+                    ) : (
+                      <span className="text-slate-500">—</span>
+                    )}
+                  </FieldLine>
                   <FieldLine label="B">
                     {selected.physicalDimensions.outerDiameterMm !== undefined ? (
                       <span className="tabular-nums">{formatMmWithHunApprox(selected.physicalDimensions.outerDiameterMm)}</span>
@@ -1295,7 +1269,6 @@ type ProductDataFileViewCache = {
   showMissingCategoryOnly: boolean
   selectedProductId: string | null
   measA: string
-  measA2: string
   measB: string
   measC: string
   measTol: number
@@ -1324,7 +1297,6 @@ function readCache(): ProductDataFileViewCache {
     showMissingCategoryOnly: false,
     selectedProductId: null,
     measA: '',
-    measA2: '',
     measB: '',
     measC: '',
     measTol: 3,
@@ -1357,7 +1329,6 @@ export function ProductDataFileView() {
   const [catalogSort, setCatalogSort] = useState<MasterCatalogSort>(_c.catalogSort)
   /** A=ใน/กว้าง → inner, B=นอก/ยาว → outer, C=หนา/สูง → height */
   const [measA, setMeasA] = useState(_c.measA)
-  const [measA2, setMeasA2] = useState(_c.measA2)
   const [measB, setMeasB] = useState(_c.measB)
   const [measC, setMeasC] = useState(_c.measC)
   const [measTol, setMeasTol] = useState(_c.measTol)
@@ -1415,7 +1386,6 @@ export function ProductDataFileView() {
       showMissingCategoryOnly,
       selectedProductId,
       measA,
-      measA2,
       measB,
       measC,
       measTol,
@@ -1426,7 +1396,7 @@ export function ProductDataFileView() {
     navSelection, expandedMain, expandedSub, q, hasSearched,
     filterBrand, filterCarBrand, filterCarModel, filterEngine, filterDrive, filterYear,
     catalogSort, catalogViewMode, filterInStoreOnly, showMissingCategoryOnly, selectedProductId,
-    measA, measA2, measB, measC, measTol, measActive, measPanelOpen,
+    measA, measB, measC, measTol, measActive, measPanelOpen,
   ])
   const ctxMenuRef = useRef<HTMLDivElement>(null)
   const [ctxMenuPos, setCtxMenuPos] = useState<{ left: number; top: number } | null>(null)
@@ -1526,9 +1496,6 @@ export function ProductDataFileView() {
   useEffect(() => {
     if (dimLayout.slotCount === 2) {
       setMeasA('')
-      setMeasA2('')
-    } else if (dimLayout.slotCount === 3) {
-      setMeasA2('')
     }
   }, [dimLayout.slotCount])
 
@@ -1574,15 +1541,13 @@ export function ProductDataFileView() {
 
   const measureInput = useMemo(() => {
     const id = parseMeasureMm(measA)
-    const id2 = parseMeasureMm(measA2)
     const od = parseMeasureMm(measB)
     const h = parseMeasureMm(measC)
     if (h === undefined || od === undefined) return null
     const input: MeasureInput = { h, od }
     if (id !== undefined) input.id = id
-    if (id2 !== undefined) input.id2 = id2
     return input
-  }, [measA, measA2, measB, measC])
+  }, [measA, measB, measC])
 
   const dimensionMatch = useMemo(() => {
     if (!measActive) {
@@ -2379,9 +2344,7 @@ export function ProductDataFileView() {
                     'grid w-full min-w-0 gap-2',
                     dimLayout.slotCount === 2 && 'grid-cols-2 sm:grid-cols-3',
                     dimLayout.slotCount === 3 && 'grid-cols-2 sm:grid-cols-4 lg:grid-cols-5',
-                    (dimLayout.slotCount === 0 ||
-                      dimLayout.slotCount === 1 ||
-                      dimLayout.slotCount === 4) &&
+                    (dimLayout.slotCount === 0 || dimLayout.slotCount === 1) &&
                       'grid-cols-2 sm:grid-cols-3 lg:grid-cols-5',
                   )}
                 >
@@ -2465,20 +2428,6 @@ export function ProductDataFileView() {
                           className="w-full min-w-0 rounded-lg border border-violet-200 bg-white px-2 py-1.5 text-xs tabular-nums outline-none focus:border-violet-400 focus:ring-1 focus:ring-violet-200"
                         />
                       </label>
-                      {dimLayout.showA2ByCategory || measA2.trim().length > 0 ? (
-                        <label className="flex min-w-0 flex-col gap-0.5">
-                          <span className="text-[11px] font-medium leading-snug text-violet-900/90">{dimLayout.a2}</span>
-                          <input
-                            type="text"
-                            inputMode="decimal"
-                            placeholder="ไม่บังคับ"
-                            value={measA2}
-                            onChange={(e) => setMeasA2(e.target.value)}
-                            aria-label={dimLayout.a2}
-                            className="w-full min-w-0 rounded-lg border border-violet-200 bg-white px-2 py-1.5 text-xs tabular-nums outline-none focus:border-violet-400 focus:ring-1 focus:ring-violet-200"
-                          />
-                        </label>
-                      ) : null}
                       <label className="flex min-w-0 flex-col gap-0.5">
                         <span className="text-[11px] font-medium leading-snug text-violet-900/90">{dimLayout.b}</span>
                         <input
@@ -2534,7 +2483,6 @@ export function ProductDataFileView() {
                     onClick={() => {
                       setMeasActive(false)
                       setMeasA('')
-                      setMeasA2('')
                       setMeasB('')
                       setMeasC('')
                     }}
@@ -2671,7 +2619,7 @@ export function ProductDataFileView() {
           </div>
         ) : catalogViewMode === 'list' ? (
               <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white shadow-sm pos-compact:rounded-xl">
-                <table className="w-full min-w-[560px] table-fixed border-collapse text-left text-sm pos-narrow:min-w-[520px] xl:min-w-[640px]">
+                <table className="w-full min-w-[600px] table-fixed border-collapse text-left text-sm pos-narrow:min-w-[540px] xl:min-w-[680px]">
                   <thead>
                     <tr className="border-b border-slate-100 bg-slate-50 text-xs font-medium text-slate-500 pos-compact:text-[10px]">
                       <th className="w-[5.5rem] py-2.5 pl-3 pr-1 pos-compact:w-[4.5rem] pos-compact:py-2 pos-compact:pl-2">
@@ -2691,6 +2639,9 @@ export function ProductDataFileView() {
                         onSort={handleCatalogHeaderSort}
                         className="hidden w-[7.5rem] py-2.5 pos-compact:py-2 sm:table-cell"
                       />
+                      <th className="hidden w-[4.5rem] py-2.5 pr-3 text-right whitespace-nowrap pos-compact:py-2 pos-compact:text-[10px] sm:table-cell">
+                        สต็อก
+                      </th>
                       <MasterCatalogSortTh
                         sortKey="sellPrice"
                         sort={catalogSort}
@@ -2716,7 +2667,7 @@ export function ProductDataFileView() {
                     ))}
                     {visibleCount < sortedList.length ? (
                       <tr>
-                        <td colSpan={5} className="py-3 text-center">
+                        <td colSpan={6} className="py-3 text-center">
                           <button
                             type="button"
                             onClick={() => setVisibleCount((n) => n + PAGE_SIZE)}

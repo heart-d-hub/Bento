@@ -1,3 +1,4 @@
+import { invoke } from '@tauri-apps/api/core'
 import {
   nextPosBillNumberAsync,
   nextTaxInvoiceNumberAsync,
@@ -51,7 +52,7 @@ import { loadTransportDirectory, TRANSPORT_DIRECTORY_CHANGED_EVENT } from '@/fea
 import { printPosReceipt } from '@/features/pos/utils/posPrintReceipt'
 import { localDateYYYYMMDD, parseLocalYYYYMMDD } from '@/features/pos/utils/posLocalDate'
 import { writeCfdState, readCfdState } from '@/features/cfd/cfdBridge'
-import { getProductImageUrl, getProductImageUrls } from '@/features/inventory/data/productImages'
+import { getProductImageUrl } from '@/features/inventory/data/productImages'
 import { openCfdWindow } from '@/features/cfd/openCfdWindow'
 import { loadBankAccounts, getDefaultBankAccount, BANK_CHANGED_EVENT } from '@/features/bank/bankStore'
 import { promptPayDataUrl } from '@/features/bank/promptPayQr'
@@ -147,14 +148,13 @@ type Product = {
   yearLabel?: string
   factoryOem?: string
   genuineNo?: string
-  dimensions?: { innerDiameterMm?: number; innerDiameterSecondaryMm?: number; outerDiameterMm?: number; heightMm?: number }
+  dimensions?: { innerDiameterMm?: number; outerDiameterMm?: number; heightMm?: number }
 }
 
 function formatDims(d: Product['dimensions']): string {
   if (!d) return ''
   const parts: string[] = []
   if (d.innerDiameterMm) parts.push(`A:${d.innerDiameterMm}`)
-  if (d.innerDiameterSecondaryMm) parts.push(`A₂:${d.innerDiameterSecondaryMm}`)
   if (d.outerDiameterMm) parts.push(`B:${d.outerDiameterMm}`)
   if (d.heightMm) parts.push(`C:${d.heightMm}`)
   return parts.length ? parts.join(' ') + ' mm' : ''
@@ -931,9 +931,9 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     setPosSpotlightIndex(0)
     setPosSpotlightExpanded(false)
     if (!posSpotlight) return
-    getProductImageUrls(posSpotlight.sku).then((urls) => {
-      setPosSpotlightUrls(urls)
-    }).catch(() => null)
+    invoke<string[]>('get_product_images_b64', { sku: posSpotlight.sku })
+      .then((urls) => setPosSpotlightUrls(urls))
+      .catch(() => null)
   }, [posSpotlight])
 
   const hasAwaitTransferSuspended = useMemo(

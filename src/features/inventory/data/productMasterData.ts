@@ -23,8 +23,7 @@ export type CrossBranchStockRow = {
 /**
  * มิติอ้างอิง (มม.) — ใช้ค้นหาเมื่อลูกค้านำของมาวัด ไม่เห็นเบอร์ OEM
  * แสดงใน UI เป็นมิติ A / B / C (ใช้ได้ทั้งไส้กรอง ลูกหมาก ชิ้นส่วนอื่น):
- * - **A (ใน / กว้าง)** → innerDiameterMm (หรือรูที่เล็กกว่าเมื่อมีสองรูไม่เท่ากัน)
- * - **A₂** → innerDiameterSecondaryMm (รูที่ใหญ่กว่า — เฉพาะกรณีสองรู)
+ * - **A (ใน / กว้าง)** → innerDiameterMm
  * - **B (นอก / ยาว)** → outerDiameterMm
  * - **C (หนา / สูง)** → heightMm
  *
@@ -35,10 +34,8 @@ export type PhysicalDimensions = {
   heightMm?: number
   /** มิติ B — นอก / ยาว / เกลียว (เช่น Ø นอก หรือความยาวรวม) */
   outerDiameterMm?: number
-  /** มิติ A — ใน / กว้าง (เช่น Ø รูด้านใน หรือความกว้างจุดวัด) — ถ้ามีสองรู แนะนำลงค่า Ø รูที่เล็กกว่า */
+  /** มิติ A — ใน / กว้าง (เช่น Ø รูด้านใน หรือความกว้างจุดวัด) */
   innerDiameterMm?: number
-  /** มิติ A รูที่สอง — เมื่อกรอง/ดักน้ำมีสองรูไม่เท่ากัน (เช่น ท่อเข้า-ออก) ลง Ø รูที่ใหญ่กว่า */
-  innerDiameterSecondaryMm?: number
 }
 
 /** 1 หุน = 3.175 mm — ใช้ร่วมกับฟอร์มลงสินค้าและค้นหามิติ (แปลงหุน→มม.ตอนบันทึก) */
@@ -856,12 +853,10 @@ export const PRODUCT_MASTER_DETAILS: ProductMasterDetail[] = [
     scheme: '10+1',
     avgCost: 395,
     sellPrice: 520,
-    /** ตัวอย่าง: สองรูไม่เท่ากัน — ลงเล็ก/ใหญ่ ระบบจับคู่แบบเรียงคู่ตอนค้นหา */
     physicalDimensions: {
       heightMm: 88,
       outerDiameterMm: 76,
       innerDiameterMm: 8.2,
-      innerDiameterSecondaryMm: 12.4,
     },
     crossBranch: [
       { id: 'z1', locationLabel: 'คลังกลาง', stock: 22, position: 'F2-08', status: 'normal' },

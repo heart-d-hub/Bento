@@ -35,8 +35,6 @@ pub fn run() {
       products_db::get_product_images_b64,
       products_db::open_product_images_dir,
       products_db::list_product_image_skus,
-      products_db::save_product_image_from_path,
-      products_db::delete_product_image,
       sales_db::database_ping,
       sales_db::sales_create,
       sales_db::sales_day_summary,

@@ -40,25 +40,7 @@ export async function getProductImageUrls(sku: string): Promise<string[]> {
   }
 }
 
-export function invalidateProductImageCache(sku?: string): void {
-  if (sku) {
-    const key = sku.trim().toLowerCase()
-    dataUrlCache.delete(key)
-    dataUrlsCache.delete(key)
-  } else {
-    dataUrlCache.clear()
-    dataUrlsCache.clear()
-  }
-}
-
-export async function saveProductImageFromPath(sku: string, slot: number, srcPath: string): Promise<void> {
-  if (!isTauri() || !sku.trim()) return
-  await invoke('save_product_image_from_path', { sku, slot, srcPath })
-  invalidateProductImageCache(sku)
-}
-
-export async function deleteProductImage(sku: string, slot: number): Promise<void> {
-  if (!isTauri() || !sku.trim()) return
-  await invoke('delete_product_image', { sku, slot })
-  invalidateProductImageCache(sku)
+export function invalidateProductImageCache(): void {
+  dataUrlCache.clear()
+  dataUrlsCache.clear()
 }

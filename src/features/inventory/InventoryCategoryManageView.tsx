@@ -36,9 +36,9 @@ import { useWorkspaceTabs } from '@/features/main/context/WorkspaceTabsContext'
 import { useEffect, useMemo, useState } from 'react'
 
 type PendingDelete =
-  | { kind: 'main'; mainId: string }
-  | { kind: 'sub'; mainId: string; subId: string }
-  | { kind: 'subsub'; mainId: string; subId: string; subSubId: string }
+  | { kind: 'main'; mainId: string; productCount: number }
+  | { kind: 'sub'; mainId: string; subId: string; productCount: number }
+  | { kind: 'subsub'; mainId: string; subId: string; subSubId: string; productCount: number }
 
 type EditCategoryTarget =
   | { kind: 'main'; mainId: string }
@@ -236,14 +236,18 @@ export function InventoryCategoryManageView() {
   const [query, setQuery] = useState('')
   const [mainComposerOpen, setMainComposerOpen] = useState(false)
   /** ร่างตอนเพิ่มหมวดหลัก — มิติ */
-  const [mainComposerPaperFields, setMainComposerPaperFields] = useState<CategoryPaperField[]>([])
+  const [mainComposerDimA, setMainComposerDimA] = useState('')
+  const [mainComposerDimB, setMainComposerDimB] = useState('')
+  const [mainComposerDimC, setMainComposerDimC] = useState('')
   /** ติ๊กเดียวกับรายการมิติ: แสดงบล็อกมิติในฟอร์มสินค้า + กำหนดป้ายชื่อได้ */
   const [mainComposerShowPhysicalDimensions, setMainComposerShowPhysicalDimensions] = useState(true)
   const [mainComposerShowBrand, setMainComposerShowBrand] = useState(false)
   /** ป๊อปอัปแก้ไขหมวด (ชื่อ + มิติ + แสดงแบรนด์) — หลัก / ย่อย1 / ย่อย2 */
   const [editTarget, setEditTarget] = useState<EditCategoryTarget | null>(null)
   const [editName, setEditName] = useState('')
-  const [editPaperFields, setEditPaperFields] = useState<CategoryPaperField[]>([])
+  const [editDimA, setEditDimA] = useState('')
+  const [editDimB, setEditDimB] = useState('')
+  const [editDimC, setEditDimC] = useState('')
   const [editShowBrand, setEditShowBrand] = useState(false)
   /** แสดงแท็กในฟอร์มแฟ้มข้อมูล — false = ไม่แสดงตอนเพิ่มสินค้า */
   const [editTagsInMasterForm, setEditTagsInMasterForm] = useState(true)
@@ -307,9 +311,7 @@ export function InventoryCategoryManageView() {
     }
     const mainId = newId('main')
     const cleanedPaper = mainComposerShowPhysicalDimensions
-      ? mainComposerPaperFields
-          .map((f) => ({ id: newId('pf'), label: f.label.trim() }))
-          .filter((f) => f.label.length > 0)
+      ? dimLabelsToFields(mainComposerDimA, mainComposerDimB, mainComposerDimC)
       : []
     const next: MainCategory = {
       id: mainId,
@@ -335,7 +337,9 @@ export function InventoryCategoryManageView() {
       if (!m) return
       setEditTarget(target)
       setEditName(m.name)
-      setEditPaperFields(m.paperFields?.map((x) => ({ ...x })) ?? [])
+      setEditDimA(m.paperFields?.[0]?.label ?? '')
+      setEditDimB(m.paperFields?.[1]?.label ?? '')
+      setEditDimC(m.paperFields?.[2]?.label ?? '')
       setEditShowBrand(m.showProductBrand === true)
       const allowed = m.allowedProductTagIds
       setEditRestrictTags(Boolean(allowed && allowed.length > 0))
@@ -351,7 +355,9 @@ export function InventoryCategoryManageView() {
       if (!main || !sub) return
       setEditTarget(target)
       setEditName(sub.name)
-      setEditPaperFields(sub.paperFields?.map((x) => ({ ...x })) ?? [])
+      setEditDimA(sub.paperFields?.[0]?.label ?? '')
+      setEditDimB(sub.paperFields?.[1]?.label ?? '')
+      setEditDimC(sub.paperFields?.[2]?.label ?? '')
       setEditShowBrand(sub.showProductBrand === true)
       const allowed = sub.allowedProductTagIds
       setEditRestrictTags(Boolean(allowed && allowed.length > 0))
@@ -367,7 +373,9 @@ export function InventoryCategoryManageView() {
     if (!main || !sub || !ss) return
     setEditTarget(target)
     setEditName(ss.name)
-    setEditPaperFields(ss.paperFields?.map((x) => ({ ...x })) ?? [])
+    setEditDimA(ss.paperFields?.[0]?.label ?? '')
+    setEditDimB(ss.paperFields?.[1]?.label ?? '')
+    setEditDimC(ss.paperFields?.[2]?.label ?? '')
     setEditShowBrand(ss.showProductBrand === true)
     const allowed = ss.allowedProductTagIds
     setEditRestrictTags(Boolean(allowed && allowed.length > 0))
@@ -388,12 +396,7 @@ export function InventoryCategoryManageView() {
       window.alert('กรุณากรอกชื่อหมวด')
       return
     }
-    const cleaned = editPaperFields
-      .map((f, i) => ({
-        id: f.id.trim() || `pf-${i}-${Date.now()}`,
-        label: f.label.trim(),
-      }))
-      .filter((f) => f.label.length > 0)
+    const cleaned = dimLabelsToFields(editDimA, editDimB, editDimC)
     const paperFieldsPayload = editProductFormFields.showPhysicalDimensions ? cleaned : []
 
     const allowedTagPayload =
@@ -506,21 +509,12 @@ export function InventoryCategoryManageView() {
     closeEditCategoryDialog()
   }
 
-  function updatePaperFieldLabel(
-    list: CategoryPaperField[],
-    fieldId: string,
-    label: string,
-    setList: (v: CategoryPaperField[]) => void,
-  ) {
-    setList(list.map((f) => (f.id === fieldId ? { ...f, label } : f)))
-  }
-
-  function addPaperFieldRow(setList: (v: CategoryPaperField[]) => void, current: CategoryPaperField[]) {
-    setList([...current, { id: newId('pf'), label: '' }])
-  }
-
-  function removePaperFieldRow(setList: (v: CategoryPaperField[]) => void, current: CategoryPaperField[], fieldId: string) {
-    setList(current.filter((f) => f.id !== fieldId))
+  function dimLabelsToFields(a: string, b: string, c: string): CategoryPaperField[] {
+    return [
+      { id: 'dim-a', label: a.trim() },
+      { id: 'dim-b', label: b.trim() },
+      { id: 'dim-c', label: c.trim() },
+    ].filter((f) => f.label.length > 0)
   }
 
   function addSubCategory(mainId: string) {
@@ -550,11 +544,18 @@ export function InventoryCategoryManageView() {
   }
 
   function requestDeleteMain(mainId: string) {
-    setPendingDelete({ kind: 'main', mainId })
+    const main = tree.find((m) => m.id === mainId)
+    const count = main ? products.filter((p) => !p.deletedAt && p.category === main.name).length : 0
+    setPendingDelete({ kind: 'main', mainId, productCount: count })
   }
 
   function requestDeleteSub(mainId: string, subId: string) {
-    setPendingDelete({ kind: 'sub', mainId, subId })
+    const main = tree.find((m) => m.id === mainId)
+    const sub = main?.subcategories.find((s) => s.id === subId)
+    const count = main && sub
+      ? products.filter((p) => !p.deletedAt && p.category === main.name && p.subCategory === sub.name).length
+      : 0
+    setPendingDelete({ kind: 'sub', mainId, subId, productCount: count })
   }
 
   function subSubDraftKey(mainId: string, subId: string) {
@@ -594,7 +595,13 @@ export function InventoryCategoryManageView() {
   }
 
   function requestDeleteSubSub(mainId: string, subId: string, subSubId: string) {
-    setPendingDelete({ kind: 'subsub', mainId, subId, subSubId })
+    const main = tree.find((m) => m.id === mainId)
+    const sub = main?.subcategories.find((s) => s.id === subId)
+    const ss = sub?.subSubcategories.find((x) => x.id === subSubId)
+    const count = main && sub && ss
+      ? products.filter((p) => !p.deletedAt && p.category === main.name && p.subCategory === sub.name && p.subSubCategory === ss.name).length
+      : 0
+    setPendingDelete({ kind: 'subsub', mainId, subId, subSubId, productCount: count })
   }
 
   function confirmDelete() {
@@ -920,7 +927,9 @@ export function InventoryCategoryManageView() {
                     onClick={() => {
                       setMainComposerOpen(false)
                       setMainDraft('')
-                      setMainComposerPaperFields([])
+                      setMainComposerDimA('')
+                      setMainComposerDimB('')
+                      setMainComposerDimC('')
                       setMainComposerShowPhysicalDimensions(true)
                       setMainComposerShowBrand(false)
                     }}
@@ -949,45 +958,24 @@ export function InventoryCategoryManageView() {
                   </span>
                 </label>
                 {mainComposerShowPhysicalDimensions ? (
-                  <>
-                    <p className="mb-1 text-[10px] font-medium text-slate-600">ป้ายช่องมิติ (ว่างได้)</p>
-                    {mainComposerPaperFields.length === 0 ? (
-                      <p className="mb-1 text-[10px] text-slate-400">ยังไม่ระบุ — ใช้ป้ายเริ่มต้นแคตตาล็อกเมื่อเพิ่มสินค้า</p>
-                    ) : null}
-                    <ul className="space-y-1">
-                      {mainComposerPaperFields.map((f) => (
-                        <li key={f.id} className="flex items-center gap-1.5">
-                          <input
-                            type="text"
-                            value={f.label}
-                            onChange={(e) =>
-                              updatePaperFieldLabel(mainComposerPaperFields, f.id, e.target.value, setMainComposerPaperFields)
-                            }
-                            placeholder="เช่น กว้าง"
-                            className={inputClass}
-                          />
-                          <button
-                            type="button"
-                            onClick={() => removePaperFieldRow(setMainComposerPaperFields, mainComposerPaperFields, f.id)}
-                            className="shrink-0 rounded border border-slate-200 bg-white p-1 text-slate-500 hover:bg-slate-50"
-                            title="ลบมิติ"
-                            aria-label="ลบมิติ"
-                          >
-                            <Trash2 className="size-3.5" />
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                    <button
-                      type="button"
-                      disabled={mainComposerPaperFields.length >= 8}
-                      onClick={() => addPaperFieldRow(setMainComposerPaperFields, mainComposerPaperFields)}
-                      className="mt-1.5 inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                    >
-                      <Plus className="size-3" />
-                      เพิ่มมิติ
-                    </button>
-                  </>
+                  <div className="mt-1 grid grid-cols-3 gap-1">
+                    {[
+                      { label: 'A', val: mainComposerDimA, set: setMainComposerDimA, ph: 'Ø ใน' },
+                      { label: 'B', val: mainComposerDimB, set: setMainComposerDimB, ph: 'Ø นอก' },
+                      { label: 'C', val: mainComposerDimC, set: setMainComposerDimC, ph: 'สูง' },
+                    ].map(({ label, val, set, ph }) => (
+                      <label key={label}>
+                        <span className="mb-0.5 block text-[10px] text-slate-500">ช่อง {label}</span>
+                        <input
+                          type="text"
+                          value={val}
+                          onChange={(e) => set(e.target.value)}
+                          placeholder={ph}
+                          className={inputClass}
+                        />
+                      </label>
+                    ))}
+                  </div>
                 ) : null}
                 <label className="mt-2 flex cursor-pointer items-start gap-2 text-[11px] text-slate-700">
                   <input
@@ -1124,19 +1112,20 @@ export function InventoryCategoryManageView() {
                         </>
                       ) : (
                         <>
-                          <span className="text-[11px] text-rose-700">
-                            {subCount > 0 ? `ลบหลักนี้จะลบย่อย ${subCount}` : 'ลบหมวดหลัก?'}
-                          </span>
-                          <button type="button" onClick={confirmDelete} className="rounded bg-rose-600 px-1.5 py-0.5 text-[11px] text-white">
-                            ยืนยัน
-                          </button>
-                          <button
-                            type="button"
-                            onClick={cancelPendingDelete}
-                            className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[11px] text-slate-600"
-                          >
-                            ยกเลิก
-                          </button>
+                          {pendingDelete?.productCount ? (
+                            <>
+                              <span className="text-[11px] text-rose-700">มี {pendingDelete.productCount} สินค้า — ย้ายออกก่อนลบ</span>
+                              <button type="button" onClick={cancelPendingDelete} className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[11px] text-slate-600">ปิด</button>
+                            </>
+                          ) : (
+                            <>
+                              <span className="text-[11px] text-rose-700">
+                                {subCount > 0 ? `ลบหลักนี้จะลบย่อย ${subCount}` : 'ลบหมวดหลัก?'}
+                              </span>
+                              <button type="button" onClick={confirmDelete} className="rounded bg-rose-600 px-1.5 py-0.5 text-[11px] text-white">ยืนยัน</button>
+                              <button type="button" onClick={cancelPendingDelete} className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[11px] text-slate-600">ยกเลิก</button>
+                            </>
+                          )}
                         </>
                       )}
                     </div>
@@ -1267,17 +1256,18 @@ export function InventoryCategoryManageView() {
                                       </>
                                     ) : (
                                       <>
-                                        <span className="text-[11px] text-rose-700">ลบย่อย 1 + ย่อย 2?</span>
-                                        <button type="button" onClick={confirmDelete} className="rounded bg-rose-600 px-1.5 py-0.5 text-[11px] text-white">
-                                          ยืนยัน
-                                        </button>
-                                        <button
-                                          type="button"
-                                          onClick={cancelPendingDelete}
-                                          className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[11px] text-slate-600"
-                                        >
-                                          ยกเลิก
-                                        </button>
+                                        {pendingDelete?.productCount ? (
+                                          <>
+                                            <span className="text-[11px] text-rose-700">มี {pendingDelete.productCount} สินค้า — ย้ายออกก่อนลบ</span>
+                                            <button type="button" onClick={cancelPendingDelete} className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[11px] text-slate-600">ปิด</button>
+                                          </>
+                                        ) : (
+                                          <>
+                                            <span className="text-[11px] text-rose-700">ลบย่อย 1 + ย่อย 2?</span>
+                                            <button type="button" onClick={confirmDelete} className="rounded bg-rose-600 px-1.5 py-0.5 text-[11px] text-white">ยืนยัน</button>
+                                            <button type="button" onClick={cancelPendingDelete} className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[11px] text-slate-600">ยกเลิก</button>
+                                          </>
+                                        )}
                                       </>
                                     )}
                                   </div>
@@ -1419,21 +1409,18 @@ export function InventoryCategoryManageView() {
                                                 </>
                                               ) : (
                                                 <>
-                                                  <span className="text-[10px] text-rose-700">ลบ?</span>
-                                                  <button
-                                                    type="button"
-                                                    onClick={confirmDelete}
-                                                    className="rounded bg-rose-600 px-1 py-0.5 text-[10px] text-white"
-                                                  >
-                                                    ยืนยัน
-                                                  </button>
-                                                  <button
-                                                    type="button"
-                                                    onClick={cancelPendingDelete}
-                                                    className="rounded border border-slate-200 px-1 py-0.5 text-[10px] text-slate-600"
-                                                  >
-                                                    ยกเลิก
-                                                  </button>
+                                                  {pendingDelete?.productCount ? (
+                                                    <>
+                                                      <span className="text-[10px] text-rose-700">มี {pendingDelete.productCount} สินค้า — ย้ายออกก่อนลบ</span>
+                                                      <button type="button" onClick={cancelPendingDelete} className="rounded border border-slate-200 px-1 py-0.5 text-[10px] text-slate-600">ปิด</button>
+                                                    </>
+                                                  ) : (
+                                                    <>
+                                                      <span className="text-[10px] text-rose-700">ลบ?</span>
+                                                      <button type="button" onClick={confirmDelete} className="rounded bg-rose-600 px-1 py-0.5 text-[10px] text-white">ยืนยัน</button>
+                                                      <button type="button" onClick={cancelPendingDelete} className="rounded border border-slate-200 px-1 py-0.5 text-[10px] text-slate-600">ยกเลิก</button>
+                                                    </>
+                                                  )}
                                                 </>
                                               )}
                                             </div>
@@ -1520,48 +1507,24 @@ export function InventoryCategoryManageView() {
               </span>
             </label>
             {editProductFormFields.showPhysicalDimensions ? (
-              <>
-                <p className="mb-0.5 text-[10px] font-medium text-slate-600">กำหนดชื่อมิติ</p>
-                <p className="mb-1.5 text-[10px] leading-snug text-slate-500">
-                  ไม่ใส่ = ป้ายเริ่มต้น 4 ช่อง (แคตตาล็อก) · 2 ชื่อ = ฟอร์มสินค้ามี 2 ช่องวัด (คู่ B/C) · 3 ชื่อ = A·B·C · 4 ชื่อ = A·B·C·A₂ ตามลำดับในรายการ
-                </p>
-                {editPaperFields.length === 0 ? (
-                  <p className="mb-1 text-[10px] text-slate-400">ยังไม่ระบุ — กดเพิ่มมิติได้ด้านล่าง</p>
-                ) : null}
-                <ul className="max-h-40 space-y-1 overflow-y-auto">
-                  {editPaperFields.map((f) => (
-                    <li key={f.id} className="flex items-center gap-1.5">
-                      <input
-                        type="text"
-                        value={f.label}
-                        onChange={(e) =>
-                          updatePaperFieldLabel(editPaperFields, f.id, e.target.value, setEditPaperFields)
-                        }
-                        placeholder="เช่น กว้าง"
-                        className={inputClass}
-                      />
-                      <button
-                        type="button"
-                        onClick={() => removePaperFieldRow(setEditPaperFields, editPaperFields, f.id)}
-                        className="shrink-0 rounded border border-slate-200 bg-white p-1 text-slate-500 hover:bg-slate-50"
-                        title="ลบมิติ"
-                        aria-label="ลบมิติ"
-                      >
-                        <Trash2 className="size-3.5" />
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-                <button
-                  type="button"
-                  disabled={editPaperFields.length >= 8}
-                  onClick={() => addPaperFieldRow(setEditPaperFields, editPaperFields)}
-                  className="mt-1.5 inline-flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"
-                >
-                  <Plus className="size-3" />
-                  เพิ่มมิติ
-                </button>
-              </>
+              <div className="mt-1 grid grid-cols-3 gap-1">
+                {[
+                  { label: 'A', val: editDimA, set: setEditDimA, ph: 'Ø ใน' },
+                  { label: 'B', val: editDimB, set: setEditDimB, ph: 'Ø นอก' },
+                  { label: 'C', val: editDimC, set: setEditDimC, ph: 'สูง' },
+                ].map(({ label, val, set, ph }) => (
+                  <label key={label}>
+                    <span className="mb-0.5 block text-[10px] text-slate-500">ช่อง {label}</span>
+                    <input
+                      type="text"
+                      value={val}
+                      onChange={(e) => set(e.target.value)}
+                      placeholder={ph}
+                      className={inputClass}
+                    />
+                  </label>
+                ))}
+              </div>
             ) : null}
             <label className="mt-2 flex cursor-pointer items-start gap-2 border-t border-slate-100 pt-2 text-[11px] text-slate-700">
               <input
