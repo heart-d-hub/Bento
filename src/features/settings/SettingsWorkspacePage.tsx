@@ -4,16 +4,17 @@ import { PermissionsPanel } from '@/features/settings/components/PermissionsPane
 import { DesktopAppPanel } from '@/features/settings/components/DesktopAppPanel'
 import { StoreProfilePanel } from '@/features/settings/components/StoreProfilePanel'
 import { UsersManagementPanel } from '@/features/settings/components/UsersManagementPanel'
+import { CustomerTiersPanel } from '@/features/settings/components/CustomerTiersPanel'
 import { DashboardLayoutSettingsForm } from '@/features/main/components/DashboardLayoutSettingsForm'
 import { clsx } from 'clsx'
-import { Building2, ChevronDown, Cloud, Database, KeyRound, Monitor, Settings, SlidersHorizontal, UserCog, Users } from 'lucide-react'
+import { Building2, ChevronDown, Cloud, Database, KeyRound, Monitor, Settings, SlidersHorizontal, UserCog, Users, Layers } from 'lucide-react'
 import { useEffect, useState } from 'react'
 
 type SettingsWorkspacePageProps = {
   className?: string
 }
 
-type SettingsSection = 'store' | 'desktop' | 'datafile' | 'hub' | 'staff' | 'permissions' | 'dashboard'
+type SettingsSection = 'store' | 'desktop' | 'datafile' | 'hub' | 'staff' | 'permissions' | 'dashboard' | 'customerTiers'
 
 const SECTION_HEADINGS: Record<
   SettingsSection,
@@ -47,6 +48,10 @@ const SECTION_HEADINGS: Record<
   dashboard: {
     title: 'Dashboard',
     description: 'การ์ดสรุปด้านซ้าย · เลขเครื่อง POS — แยกจากตั้งค่าร้านทั้งระบบ',
+  },
+  customerTiers: {
+    title: 'ระดับลูกค้า (Tier)',
+    description: 'กำหนดส่วนลด วงเงิน และเครดิตสำหรับลูกค้า B2B แต่ละระดับ (Silver / Gold / Platinum)',
   },
 }
 
@@ -169,6 +174,20 @@ export function SettingsWorkspacePage({ className }: SettingsWorkspacePageProps)
             Dashboard
           </button>
 
+          <button
+            type="button"
+            onClick={() => setSection('customerTiers')}
+            className={clsx(
+              'flex min-h-10 w-full min-w-0 items-center gap-2 rounded-xl px-3 py-2.5 text-left text-sm font-medium transition touch-manipulation md:min-h-11',
+              section === 'customerTiers'
+                ? 'bg-white text-slate-900 shadow-sm ring-1 ring-slate-200/80'
+                : 'text-slate-600 hover:bg-white/80',
+            )}
+          >
+            <Layers className="size-4 shrink-0 opacity-80" aria-hidden />
+            ระดับลูกค้า
+          </button>
+
           <div className="mt-1 border-t border-slate-200/80 pt-3 md:mt-2" />
 
           <div className="flex min-w-0 flex-col gap-1">
@@ -260,6 +279,7 @@ export function SettingsWorkspacePage({ className }: SettingsWorkspacePageProps)
             {section === 'staff' && <UsersManagementPanel />}
             {section === 'permissions' && <PermissionsPanel />}
             {section === 'dashboard' && <DashboardLayoutSettingsForm />}
+            {section === 'customerTiers' && <CustomerTiersPanel />}
           </div>
         </div>
       </div>

@@ -1,4 +1,5 @@
-import type { MemberItemTierOverride, MemberPriceTier } from '@/features/members/data/memberTypes'
+import type { CustomerType, MemberItemTierOverride, MemberPriceTier } from '@/features/members/data/memberTypes'
+import type { B2bTier } from '@/features/settings/data/customerTiersStore'
 
 export type MemberStatus = 'active' | 'inactive' | 'blacklist'
 
@@ -43,6 +44,10 @@ export type Member = {
   memberType: MemberType
   status: MemberStatus
   branchId: string
+  /** B2C = ลูกค้าทั่วไป (สะสมแต้ม), B2B = ร้านค้า/อู่ (มี tier ส่วนลด) */
+  customerType: CustomerType
+  /** เฉพาะ B2B — ระดับ tier */
+  b2bTier: B2bTier | null
   /** แต้มสะสม — คำนวณจากธุรกรรม ไม่แก้ในฟอร์มสมาชิก */
   pointsBalance: number
   /** ค้างชำระ — สะท้อนจากลูกหนี้/บิล ไม่แก้ในฟอร์มสมาชิก */
@@ -90,6 +95,8 @@ export const MOCK_MEMBERS: Member[] = [
     memberType: 'vip',
     status: 'active',
     branchId: 'somneuk',
+    customerType: 'b2c',
+    b2bTier: null,
     pointsBalance: 1280,
     arBalance: 0,
     notes: 'ชอบยางมิชลิน',
@@ -121,6 +128,8 @@ export const MOCK_MEMBERS: Member[] = [
     memberType: 'garage',
     status: 'active',
     branchId: 'ang',
+    customerType: 'b2b',
+    b2bTier: 'platinum',
     pointsBalance: 5420,
     arBalance: 12500,
     notes: 'วางบิล 30 วัน',
@@ -150,6 +159,8 @@ export const MOCK_MEMBERS: Member[] = [
     memberType: 'mechanic',
     status: 'active',
     branchId: 'somneuk',
+    customerType: 'b2b',
+    b2bTier: 'silver',
     pointsBalance: 210,
     arBalance: 0,
     notes: '',
@@ -179,6 +190,8 @@ export const MOCK_MEMBERS: Member[] = [
     memberType: 'general',
     status: 'inactive',
     branchId: 'somneuk',
+    customerType: 'b2c',
+    b2bTier: null,
     pointsBalance: 0,
     arBalance: 0,
     notes: 'ไม่รับโทรศัพท์เวลากลางคืน',
@@ -208,6 +221,8 @@ export const MOCK_MEMBERS: Member[] = [
     memberType: 'garage',
     status: 'blacklist',
     branchId: 'ang',
+    customerType: 'b2b',
+    b2bTier: 'gold',
     pointsBalance: 0,
     arBalance: 89000,
     notes: 'ค้างชำระ — ติดต่อบัญชี',

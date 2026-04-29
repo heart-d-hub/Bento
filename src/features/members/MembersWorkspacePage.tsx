@@ -9,6 +9,7 @@ import {
 } from '@/features/members/data/mockMembers'
 import { deleteMemberAsync, loadMembers, loadMembersAsync, saveMembers, upsertMemberAsync } from '@/features/members/data/membersStore'
 import { formatPhone, phoneMatchesQuery } from '@/features/members/data/phoneUtils'
+import { B2B_TIER_COLORS, B2B_TIER_ORDER, loadCustomerTiers, type B2bTier } from '@/features/settings/data/customerTiersStore'
 import {
   loadMemberSalesSummaryAsync,
   loadPosSalesHistoryByMemberAsync,
@@ -34,6 +35,18 @@ function nextMemberCode(existing: Member[]): string {
     .filter((n) => n > 0)
   const max = nums.length ? Math.max(...nums) : 10486
   return `M-${max + 1}`
+}
+
+const TIER_ICONS: Record<B2bTier, string> = { silver: '🥈', gold: '🥇', platinum: '💎' }
+
+function tierBadge(tier: B2bTier) {
+  const cfg = loadCustomerTiers().b2bTiers.find((t) => t.tier === tier)
+  const colors = B2B_TIER_COLORS[tier]
+  return (
+    <span className={clsx('inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold', colors.badge)}>
+      {TIER_ICONS[tier]}{cfg?.label ?? tier}
+    </span>
+  )
 }
 
 function statusBadge(status: MemberStatus) {
@@ -68,6 +81,7 @@ export function MembersWorkspacePage({ className }: MembersWorkspacePageProps) {
   const [q, setQ] = useState('')
   const [filterStatus, setFilterStatus] = useState<MemberStatus | 'all'>('all')
   const [filterType, setFilterType] = useState<MemberType | 'all'>('all')
+  const [filterTier, setFilterTier] = useState<B2bTier | 'all' | 'b2c'>('all')
   const [modalOpen, setModalOpen] = useState(false)
   const [modalMode, setModalMode] = useState<'create' | 'edit'>('create')
   const [editing, setEditing] = useState<Member | null>(null)
@@ -147,6 +161,8 @@ export function MembersWorkspacePage({ className }: MembersWorkspacePageProps) {
     return members.filter((m) => {
       if (filterStatus !== 'all' && m.status !== filterStatus) return false
       if (filterType !== 'all' && m.memberType !== filterType) return false
+      if (filterTier === 'b2c' && m.customerType !== 'b2c') return false
+      if (filterTier !== 'all' && filterTier !== 'b2c' && m.b2bTier !== filterTier) return false
       if (!term) return true
       return (
         m.fullName.toLowerCase().includes(term) ||
@@ -158,7 +174,7 @@ export function MembersWorkspacePage({ className }: MembersWorkspacePageProps) {
         m.address.toLowerCase().includes(term)
       )
     })
-  }, [members, q, filterStatus, filterType])
+  }, [members, q, filterStatus, filterType, filterTier])
 
   const suggestedCode = useMemo(() => nextMemberCode(members), [members])
 
@@ -286,6 +302,18 @@ export function MembersWorkspacePage({ className }: MembersWorkspacePageProps) {
                 <option key={k} value={k}>{MEMBER_TYPE_LABELS[k]}</option>
               ))}
             </select>
+            <select
+              value={filterTier}
+              onChange={(e) => setFilterTier(e.target.value as B2bTier | 'all' | 'b2c')}
+              className="min-h-8 rounded-lg border border-slate-200 bg-white px-2 text-xs text-slate-800 shadow-sm"
+            >
+              <option value="all">Tier ทั้งหมด</option>
+              <option value="b2c">B2C</option>
+              {B2B_TIER_ORDER.map((t) => {
+                const cfg = loadCustomerTiers().b2bTiers.find((c) => c.tier === t)
+                return <option key={t} value={t}>B2B · {cfg?.label ?? t}</option>
+              })}
+            </select>
           </div>
         </div>
 
@@ -297,6 +325,7 @@ export function MembersWorkspacePage({ className }: MembersWorkspacePageProps) {
                 <th className="min-w-[8rem] px-2 py-1.5">ชื่อ</th>
                 <th className="whitespace-nowrap px-2 py-1.5">เบอร์</th>
                 <th className="whitespace-nowrap px-2 py-1.5">ประเภท</th>
+                <th className="whitespace-nowrap px-2 py-1.5">Tier</th>
                 <th className="whitespace-nowrap px-2 py-1.5 text-right">แต้ม</th>
                 <th className="whitespace-nowrap px-2 py-1.5 text-right">ค้างชำระ</th>
                 <th className="whitespace-nowrap px-2 py-1.5 text-right">วงเงิน</th>
@@ -309,7 +338,7 @@ export function MembersWorkspacePage({ className }: MembersWorkspacePageProps) {
             <tbody>
               {filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="px-4 py-12 text-center text-slate-500">
+                  <td colSpan={12} className="px-4 py-12 text-center text-slate-500">
                     ไม่พบสมาชิกตามเงื่อนไข
                   </td>
                 </tr>
@@ -329,6 +358,11 @@ export function MembersWorkspacePage({ className }: MembersWorkspacePageProps) {
                     <td className="max-w-[10rem] truncate px-2 py-1.5 font-medium text-slate-900">{m.fullName}</td>
                     <td className="whitespace-nowrap px-2 py-1.5 text-slate-700">{formatPhone(m.phone)}</td>
                     <td className="whitespace-nowrap px-2 py-1.5 text-slate-600">{MEMBER_TYPE_LABELS[m.memberType]}</td>
+                    <td className="whitespace-nowrap px-2 py-1.5">
+                      {m.customerType === 'b2b' && m.b2bTier
+                        ? tierBadge(m.b2bTier)
+                        : <span className="text-[10px] text-slate-400">B2C</span>}
+                    </td>
                     <td className="whitespace-nowrap px-2 py-1.5 text-right tabular-nums text-slate-800">
                       {m.pointsBalance.toLocaleString('th-TH')}
                     </td>

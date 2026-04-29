@@ -41,6 +41,8 @@ function normalizeMember(raw: unknown): Member | null {
     notes: typeof r.notes === 'string' ? r.notes : '',
     memberType: (r.memberType as Member['memberType']) ?? 'general',
     status: (r.status as Member['status']) ?? 'active',
+    customerType: (r.customerType as Member['customerType']) ?? 'b2c',
+    b2bTier: (r.b2bTier as Member['b2bTier']) ?? null,
     branchId: legacyBranchToId(typeof r.branchId === 'string' ? r.branchId : r.defaultBranch),
     pointsBalance: Number(r.pointsBalance) || 0,
     arBalance: Number(r.arBalance) || 0,

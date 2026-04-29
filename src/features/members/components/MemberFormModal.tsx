@@ -10,6 +10,12 @@ import {
 import { BRANCHES } from '@/features/auth/branches'
 import type { StaffUser } from '@/features/settings/data/mockStaffUsers'
 import { loadStaffUsers, STAFF_USERS_CHANGED_EVENT } from '@/features/settings/data/staffUsersStore'
+import {
+  B2B_TIER_COLORS,
+  B2B_TIER_ORDER,
+  loadCustomerTiers,
+  type B2bTier,
+} from '@/features/settings/data/customerTiersStore'
 import { clsx } from 'clsx'
 import { Trash2, X } from 'lucide-react'
 import { useEffect, useId, useMemo, useState, type FormEvent } from 'react'
@@ -83,6 +89,8 @@ function emptyForm(suggestedCode: string, salesStaffIdDefault: string): MemberFo
     memberType: 'general',
     status: 'active',
     branchId: BRANCHES[0]?.id ?? '',
+    customerType: 'b2c',
+    b2bTier: null,
     pointsBalance: 0,
     arBalance: 0,
   }
@@ -216,148 +224,135 @@ export function MemberFormModal({
 
         <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
           <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-2">
+
+            {/* ── Customer type toggle — top of form ── */}
+            <div className="mb-3 rounded-xl border border-slate-200 bg-slate-50/80 p-2.5">
+              <div className="flex gap-2">
+                {(['b2c', 'b2b'] as const).map((ct) => (
+                  <button
+                    key={ct}
+                    type="button"
+                    onClick={() => set({ customerType: ct, b2bTier: ct === 'b2c' ? null : (form.b2bTier ?? 'silver') })}
+                    className={clsx(
+                      'flex-1 rounded-lg border py-2 text-xs font-bold transition',
+                      form.customerType === ct
+                        ? 'border-violet-500 bg-violet-600 text-white shadow-sm'
+                        : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50',
+                    )}
+                  >
+                    {ct === 'b2c' ? '👤 B2C — ลูกค้าทั่วไป' : '🏢 B2B — ลูกค้าธุรกิจ'}
+                  </button>
+                ))}
+              </div>
+
+              {/* B2B tier picker */}
+              {form.customerType === 'b2b' && (
+                <div className="mt-2 flex gap-1.5">
+                  {B2B_TIER_ORDER.map((tier) => {
+                    const cfg = loadCustomerTiers().b2bTiers.find((t) => t.tier === tier)
+                    const colors = B2B_TIER_COLORS[tier]
+                    const isActive = form.b2bTier === tier
+                    return (
+                      <button
+                        key={tier}
+                        type="button"
+                        onClick={() => set({
+                          b2bTier: tier,
+                          defaultPriceTier: cfg?.defaultPriceTier ?? form.defaultPriceTier,
+                          creditLimitBaht: cfg?.creditLimitBaht ?? form.creditLimitBaht,
+                          creditTermDays: cfg?.creditTermDays ?? form.creditTermDays,
+                          payAtMonthEnd: cfg?.payAtMonthEnd ?? form.payAtMonthEnd,
+                        })}
+                        className={clsx(
+                          'flex flex-1 flex-col items-center rounded-lg border py-1.5 text-xs font-bold transition',
+                          isActive ? colors.badge + ' shadow-sm' : 'border-slate-200 bg-white text-slate-400 hover:bg-slate-50',
+                        )}
+                      >
+                        <span>{tier === 'silver' ? '🥈' : tier === 'gold' ? '🥇' : '💎'} {cfg?.label ?? tier}</span>
+                        {cfg && <span className="mt-0.5 text-[9px] font-normal opacity-70">{cfg.defaultPriceTier} · ฿{cfg.creditLimitBaht.toLocaleString('th-TH')}</span>}
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+
             <div className="grid gap-x-4 gap-y-2 lg:grid-cols-2">
-              {/* คอลัมน์ซ้าย — ตัวตน / ที่อยู่ / ติดต่อ */}
+              {/* ── Left column — identity / contact ── */}
               <div className="space-y-2">
                 <p className="text-[10px] font-semibold uppercase tracking-wide text-violet-700">ข้อมูลทั่วไป</p>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className={labelClass} htmlFor="member-code">
-                      รหัส
-                    </label>
-                    <input
-                      id="member-code"
-                      type="text"
-                      value={form.memberCode}
+                    <label className={labelClass} htmlFor="member-code">รหัส</label>
+                    <input id="member-code" type="text" value={form.memberCode}
                       onChange={(e) => set({ memberCode: e.target.value })}
                       className={clsx(inputClass, mode === 'edit' && 'bg-slate-50 text-slate-600')}
-                      readOnly={mode === 'edit'}
-                    />
+                      readOnly={mode === 'edit'} />
                   </div>
                   <div>
-                    <label className={labelClass} htmlFor="member-status">
-                      สถานะ
-                    </label>
-                    <select
-                      id="member-status"
-                      value={form.status}
+                    <label className={labelClass} htmlFor="member-status">สถานะ</label>
+                    <select id="member-status" value={form.status}
                       onChange={(e) => set({ status: e.target.value as MemberStatus })}
-                      className={inputClass}
-                    >
+                      className={inputClass}>
                       {(Object.keys(MEMBER_STATUS_LABELS) as MemberStatus[]).map((k) => (
-                        <option key={k} value={k}>
-                          {MEMBER_STATUS_LABELS[k]}
-                        </option>
+                        <option key={k} value={k}>{MEMBER_STATUS_LABELS[k]}</option>
                       ))}
                     </select>
                   </div>
                 </div>
 
                 <div>
-                  <label className={labelClass} htmlFor="member-name">
-                    ชื่อ <span className="text-rose-600">*</span>
-                  </label>
-                  <input
-                    id="member-name"
-                    type="text"
-                    value={form.fullName}
+                  <label className={labelClass} htmlFor="member-name">ชื่อ <span className="text-rose-600">*</span></label>
+                  <input id="member-name" type="text" value={form.fullName}
                     onChange={(e) => set({ fullName: e.target.value })}
-                    className={inputClass}
-                    required
-                    autoComplete="name"
-                  />
+                    className={inputClass} required autoComplete="name" />
                 </div>
 
                 <div>
-                  <label className={labelClass} htmlFor="addr">
-                    ที่อยู่
-                  </label>
-                  <textarea
-                    id="addr"
-                    rows={2}
-                    value={form.address}
+                  <label className={labelClass} htmlFor="addr">ที่อยู่</label>
+                  <textarea id="addr" rows={2} value={form.address}
                     onChange={(e) => set({ address: e.target.value })}
                     placeholder="บรรทัดแรก / บรรทัดสอง (ถ้ามี)"
-                    className={clsx(inputClass, 'resize-none leading-snug')}
-                  />
+                    className={clsx(inputClass, 'resize-none leading-snug')} />
                 </div>
 
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className={labelClass} htmlFor="tax-id">
-                      เลขผู้เสียภาษี
-                    </label>
-                    <input
-                      id="tax-id"
-                      value={form.taxId}
-                      onChange={(e) => set({ taxId: e.target.value })}
-                      className={inputClass}
-                    />
+                    <label className={labelClass} htmlFor="tax-id">เลขผู้เสียภาษี</label>
+                    <input id="tax-id" value={form.taxId}
+                      onChange={(e) => set({ taxId: e.target.value })} className={inputClass} />
                   </div>
                   <div>
-                    <label className={labelClass} htmlFor="contact">
-                      ผู้ติดต่อ
-                    </label>
-                    <input
-                      id="contact"
-                      value={form.contactPerson}
+                    <label className={labelClass} htmlFor="contact">ผู้ติดต่อ</label>
+                    <input id="contact" value={form.contactPerson}
                       onChange={(e) => set({ contactPerson: e.target.value })}
-                      className={inputClass}
-                      placeholder="มาซื้อ / ประสานงาน"
-                    />
+                      className={inputClass} placeholder="มาซื้อ / ประสานงาน" />
                   </div>
                 </div>
 
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
                   <div className="min-w-0">
-                    <label className={labelClass} htmlFor="member-email">
-                      อีเมล
-                    </label>
-                    <input
-                      id="member-email"
-                      type="email"
-                      value={form.email}
+                    <label className={labelClass} htmlFor="member-email">อีเมล</label>
+                    <input id="member-email" type="email" value={form.email}
                       onChange={(e) => set({ email: e.target.value })}
-                      className={inputClass}
-                      autoComplete="email"
-                    />
+                      className={inputClass} autoComplete="email" />
                   </div>
                   <div className="min-w-0">
-                    <label className={labelClass} htmlFor="member-phone">
-                      โทร
-                    </label>
-                    <input
-                      id="member-phone"
-                      type="tel"
-                      value={form.phone}
+                    <label className={labelClass} htmlFor="member-phone">โทร</label>
+                    <input id="member-phone" type="tel" value={form.phone}
                       onChange={(e) => set({ phone: e.target.value })}
-                      className={clsx(
-                        inputClass,
-                        form.phone && !isValidPhoneLength(form.phone) && 'border-rose-400 ring-1 ring-rose-300',
-                      )}
-                      placeholder="มือถือ 10 หลัก / บ้าน 9 หลัก"
-                      autoComplete="tel"
-                    />
+                      className={clsx(inputClass, form.phone && !isValidPhoneLength(form.phone) && 'border-rose-400 ring-1 ring-rose-300')}
+                      placeholder="มือถือ 10 หลัก / บ้าน 9 หลัก" autoComplete="tel" />
                     {form.phone && !isValidPhoneLength(form.phone) && (
                       <p className="mt-0.5 text-[9px] text-rose-600">ต้องเป็น 9 หลัก (บ้าน) หรือ 10 หลัก (มือถือ)</p>
                     )}
                   </div>
                   <div className="min-w-0">
-                    <label className={labelClass} htmlFor="fax">
-                      แฟ็กซ์
-                    </label>
-                    <input
-                      id="fax"
-                      type="tel"
-                      value={form.fax}
+                    <label className={labelClass} htmlFor="fax">แฟ็กซ์</label>
+                    <input id="fax" type="tel" value={form.fax}
                       onChange={(e) => set({ fax: e.target.value })}
-                      className={clsx(
-                        inputClass,
-                        form.fax && !isValidPhoneLength(form.fax) && 'border-rose-400 ring-1 ring-rose-300',
-                      )}
-                      placeholder="9 หลัก"
-                      autoComplete="tel"
-                    />
+                      className={clsx(inputClass, form.fax && !isValidPhoneLength(form.fax) && 'border-rose-400 ring-1 ring-rose-300')}
+                      placeholder="9 หลัก" autoComplete="tel" />
                     {form.fax && !isValidPhoneLength(form.fax) && (
                       <p className="mt-0.5 text-[9px] text-rose-600">ต้องเป็น 9 หลัก (บ้าน) หรือ 10 หลัก (มือถือ)</p>
                     )}
@@ -366,273 +361,189 @@ export function MemberFormModal({
 
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className={labelClass} htmlFor="member-type">
-                      ประเภท
-                    </label>
-                    <select
-                      id="member-type"
-                      value={form.memberType}
+                    <label className={labelClass} htmlFor="member-type">ประเภท</label>
+                    <select id="member-type" value={form.memberType}
                       onChange={(e) => set({ memberType: e.target.value as MemberType })}
-                      className={inputClass}
-                    >
+                      className={inputClass}>
                       {(Object.keys(MEMBER_TYPE_LABELS) as MemberType[]).map((k) => (
-                        <option key={k} value={k}>
-                          {MEMBER_TYPE_LABELS[k]}
-                        </option>
+                        <option key={k} value={k}>{MEMBER_TYPE_LABELS[k]}</option>
                       ))}
                     </select>
                   </div>
                   <div>
-                    <label className={labelClass} htmlFor="member-branch">
-                      สาขา
-                    </label>
-                    <select
-                      id="member-branch"
-                      value={form.branchId}
+                    <label className={labelClass} htmlFor="member-branch">สาขา</label>
+                    <select id="member-branch" value={form.branchId}
                       onChange={(e) => set({ branchId: e.target.value })}
-                      className={inputClass}
-                    >
+                      className={inputClass}>
                       {BRANCHES.map((b) => (
-                        <option key={b.id} value={b.id}>
-                          {b.name}
-                        </option>
+                        <option key={b.id} value={b.id}>{b.name}</option>
                       ))}
                     </select>
                   </div>
                 </div>
+
+                {/* B2C: points prominent */}
+                {form.customerType === 'b2c' && (
+                  <div className="rounded-xl border border-violet-100 bg-violet-50/60 px-3 py-2">
+                    <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-violet-500">แต้มสะสม</p>
+                    <p className="text-lg font-black tabular-nums text-violet-700">
+                      {form.pointsBalance.toLocaleString('th-TH')}
+                      <span className="ml-1 text-xs font-medium text-violet-400">แต้ม</span>
+                    </p>
+                  </div>
+                )}
               </div>
 
-              {/* คอลัมน์ขวา — เครดิต / ราคา / ระบบ */}
+              {/* ── Right column — staff / credit / pricing ── */}
               <div className="space-y-2">
                 <p className="text-[10px] font-semibold uppercase tracking-wide text-violet-700">
-                  ผู้ดูแลข้อมูล · เครดิต · วงเงิน
+                  {form.customerType === 'b2b' ? 'ผู้ดูแล · เครดิต · วงเงิน' : 'ผู้ดูแลข้อมูล'}
                 </p>
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className={labelClass} htmlFor="sales">
-                      พนักงานผู้ดูแลข้อมูล
-                    </label>
-                    <p className="mb-1 text-[9px] leading-snug text-slate-500">
-                      รายชื่อจากการตั้งค่า → จัดการผู้ใช้ (บันทึกว่าใครกรอก/แก้ข้อมูลสมาชิก)
+
+                {/* Staff selector */}
+                <div>
+                  <label className={labelClass} htmlFor="sales">พนักงานผู้ดูแลข้อมูล</label>
+                  {salesSelectOptions.length === 0 ? (
+                    <p className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-[10px] text-amber-900">
+                      ยังไม่มีพนักงานในระบบ — ไปที่ <span className="font-semibold">การตั้งค่า → จัดการผู้ใช้</span>
                     </p>
-                    {salesSelectOptions.length === 0 ? (
-                      <p className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-[10px] text-amber-900">
-                        ยังไม่มีพนักงานในระบบ — ไปที่ <span className="font-semibold">การตั้งค่า → จัดการผู้ใช้</span> เพื่อเพิ่มรายชื่อ
-                      </p>
-                    ) : (
-                      <select
-                        id="sales"
-                        value={form.salesStaffId}
-                        onChange={(e) => set({ salesStaffId: e.target.value })}
-                        className={inputClass}
-                      >
-                        {salesSelectOptions.map((s) => (
-                          <option key={s.id} value={s.id}>
-                            {s.displayNamePos}
-                            {s.username ? ` · ${s.username}` : ''}
-                          </option>
-                        ))}
-                      </select>
-                    )}
-                  </div>
-                  <div>
-                    <label className={labelClass} htmlFor="credit-limit">
-                      วงเงิน (฿)
-                    </label>
-                    <input
-                      id="credit-limit"
-                      type="number"
-                      min={0}
-                      step={1}
-                      value={form.creditLimitBaht}
-                      onChange={(e) => set({ creditLimitBaht: Math.max(0, Number(e.target.value) || 0) })}
-                      className={inputClass}
-                    />
-                  </div>
+                  ) : (
+                    <select id="sales" value={form.salesStaffId}
+                      onChange={(e) => set({ salesStaffId: e.target.value })}
+                      className={inputClass}>
+                      {salesSelectOptions.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.displayNamePos}{s.username ? ` · ${s.username}` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  )}
                 </div>
-                <div className="flex flex-wrap items-end gap-x-2 gap-y-1">
-                  <div>
-                    <label className={labelClass} htmlFor="credit-days">
-                      เครดิต (วัน)
-                    </label>
-                    <input
-                      id="credit-days"
-                      type="number"
-                      min={0}
-                      max={99}
-                      value={Math.min(99, form.creditTermDays)}
-                      onChange={(e) => {
-                        const n = Math.floor(Number(e.target.value) || 0)
-                        set({ creditTermDays: Math.min(99, Math.max(0, n)) })
-                      }}
-                      className={tinyNumClass}
-                      title="0–99 วัน"
-                    />
-                  </div>
-                  <div>
-                    <label className={labelClass} htmlFor="credit-months">
-                      เครดิต (เดือน)
-                    </label>
-                    <input
-                      id="credit-months"
-                      type="number"
-                      min={0}
-                      max={99}
-                      value={Math.min(99, form.creditTermMonths)}
-                      onChange={(e) => {
-                        const n = Math.floor(Number(e.target.value) || 0)
-                        set({ creditTermMonths: Math.min(99, Math.max(0, n)) })
-                      }}
-                      className={tinyNumClass}
-                      title="0–99 เดือน"
-                    />
-                  </div>
-                  <label className="flex cursor-pointer items-center gap-1 pb-0.5 text-[10px] font-medium text-slate-800">
-                    <input
-                      type="checkbox"
-                      className="size-3.5 rounded border-slate-300"
-                      checked={form.payAtMonthEnd}
-                      onChange={(e) => set({ payAtMonthEnd: e.target.checked })}
-                    />
-                    สิ้นเดือน
-                  </label>
-                  <div className="flex items-end gap-1">
-                    <span className="pb-1.5 text-[10px] font-medium text-slate-500">ตัดวันที่</span>
+
+                {/* B2B only: credit + pricing */}
+                {form.customerType === 'b2b' && (
+                  <>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className={labelClass} htmlFor="credit-limit">วงเงิน (฿)</label>
+                        <input id="credit-limit" type="number" min={0} step={1} value={form.creditLimitBaht}
+                          onChange={(e) => set({ creditLimitBaht: Math.max(0, Number(e.target.value) || 0) })}
+                          className={inputClass} />
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        <span className={labelClass}>เครดิต</span>
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                          <div className="flex items-center gap-1">
+                            <input id="credit-days" type="number" min={0} max={99}
+                              value={Math.min(99, form.creditTermDays)}
+                              onChange={(e) => set({ creditTermDays: Math.min(99, Math.max(0, Math.floor(Number(e.target.value) || 0))) })}
+                              className={tinyNumClass} title="วัน" />
+                            <span className="text-[10px] text-slate-500">วัน</span>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <input id="credit-months" type="number" min={0} max={99}
+                              value={Math.min(99, form.creditTermMonths)}
+                              onChange={(e) => set({ creditTermMonths: Math.min(99, Math.max(0, Math.floor(Number(e.target.value) || 0))) })}
+                              className={tinyNumClass} title="เดือน" />
+                            <span className="text-[10px] text-slate-500">ด.</span>
+                          </div>
+                          <label className="flex cursor-pointer items-center gap-1 text-[10px] font-medium text-slate-700">
+                            <input type="checkbox" className="size-3.5 rounded border-slate-300"
+                              checked={form.payAtMonthEnd}
+                              onChange={(e) => set({ payAtMonthEnd: e.target.checked })} />
+                            สิ้นเดือน
+                          </label>
+                          <div className="flex items-center gap-1">
+                            <span className="text-[10px] text-slate-500">ตัดวันที่</span>
+                            <input id="cutoff-day" type="number" min={1} max={31}
+                              value={form.cutOffDayOfMonth ?? ''}
+                              onChange={(e) => {
+                                const v = e.target.value
+                                if (v === '') { set({ cutOffDayOfMonth: null }); return }
+                                set({ cutOffDayOfMonth: Math.min(31, Math.max(1, Number(v) || 1)) })
+                              }}
+                              placeholder="—" className={tinyNumClass} />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Price tier — read-only from tier, manual override allowed */}
                     <div>
-                      <label className="sr-only" htmlFor="cutoff-day">
-                        ตัดวันที่ (1–31)
-                      </label>
-                      <input
-                        id="cutoff-day"
-                        type="number"
-                        min={1}
-                        max={31}
-                        value={form.cutOffDayOfMonth ?? ''}
-                        onChange={(e) => {
-                          const v = e.target.value
-                          if (v === '') {
-                            set({ cutOffDayOfMonth: null })
-                            return
-                          }
-                          const n = Math.min(31, Math.max(1, Number(v) || 1))
-                          set({ cutOffDayOfMonth: n })
-                        }}
-                        placeholder="—"
-                        className={tinyNumClass}
-                        title="วันที่ 1–31"
-                      />
+                      <p className="text-[10px] font-semibold uppercase tracking-wide text-violet-700">ระดับราคา · ช่วงวันที่มีผล</p>
+                      <div className="mt-1 flex flex-nowrap items-center gap-1 overflow-x-auto pb-0.5 [scrollbar-width:thin]">
+                        <span className="shrink-0 text-[10px] text-slate-500">ระดับ</span>
+                        <div className="flex shrink-0 flex-nowrap gap-0.5">
+                          {(Object.keys(MEMBER_PRICE_TIER_LABELS) as MemberPriceTier[]).map((tier) => (
+                            <label key={tier} className={clsx(
+                              'cursor-pointer shrink-0 whitespace-nowrap rounded border px-1 py-px text-[9px] font-medium leading-tight',
+                              form.defaultPriceTier === tier
+                                ? 'border-slate-800 bg-slate-800 text-white'
+                                : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50',
+                            )}>
+                              <input type="radio" name={tierRadioName} className="sr-only"
+                                checked={form.defaultPriceTier === tier}
+                                onChange={() => setTierDefault(tier)} />
+                              {MEMBER_PRICE_TIER_LABELS[tier]}
+                            </label>
+                          ))}
+                        </div>
+                        <div className="ml-0.5 flex shrink-0 items-center gap-0.5 border-l border-slate-200 pl-1.5">
+                          <span className="text-[10px] text-slate-600">+%</span>
+                          <input type="number" min={0} max={99} step={1} value={form.markupPercent}
+                            onChange={(e) => {
+                              const n = Number(e.target.value)
+                              set({ markupPercent: Number.isNaN(n) ? 0 : Math.min(99, Math.max(0, Math.round(n))) })
+                            }}
+                            className={tinyNumClass} />
+                        </div>
+                      </div>
+                      <div className="mt-1.5 grid grid-cols-2 gap-2">
+                        <div>
+                          <label className={labelClass}>วันที่เริ่มมีผล</label>
+                          <input type="date" value={form.priceStartDate}
+                            onChange={(e) => set({ priceStartDate: e.target.value })}
+                            className={inputClass} />
+                        </div>
+                        <div>
+                          <label className={labelClass}>วันที่สิ้นสุด</label>
+                          <input type="date" value={form.priceEndDate}
+                            onChange={(e) => set({ priceEndDate: e.target.value })}
+                            className={inputClass} />
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                </div>
+                  </>
+                )}
 
-                <p className="pt-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-700">
-                  ระดับราคาเริ่มต้น · ช่วงวันที่มีผล
-                </p>
-                <div className="flex flex-nowrap items-center gap-1 overflow-x-auto pb-0.5 [scrollbar-width:thin]">
-                  <span className="shrink-0 text-[10px] font-medium text-slate-500">ระดับ</span>
-                  <div className="flex shrink-0 flex-nowrap gap-0.5">
-                    {(Object.keys(MEMBER_PRICE_TIER_LABELS) as MemberPriceTier[]).map((tier) => (
-                      <label
-                        key={tier}
-                        className={clsx(
-                          'cursor-pointer shrink-0 whitespace-nowrap rounded border px-1 py-px text-[9px] font-medium leading-tight',
-                          form.defaultPriceTier === tier
-                            ? 'border-slate-800 bg-slate-800 text-white'
-                            : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50',
-                        )}
-                      >
-                        <input
-                          type="radio"
-                          name={tierRadioName}
-                          className="sr-only"
-                          checked={form.defaultPriceTier === tier}
-                          onChange={() => setTierDefault(tier)}
-                        />
-                        {MEMBER_PRICE_TIER_LABELS[tier]}
-                      </label>
-                    ))}
-                  </div>
-                  <div className="ml-0.5 flex shrink-0 items-center gap-0.5 border-l border-slate-200 pl-1.5">
-                    <span className="text-[10px] font-medium text-slate-600">+%</span>
-                    <input
-                      type="number"
-                      min={0}
-                      max={99}
-                      step={1}
-                      value={form.markupPercent}
-                      onChange={(e) => {
-                        const n = Number(e.target.value)
-                        if (Number.isNaN(n)) {
-                          set({ markupPercent: 0 })
-                          return
-                        }
-                        set({ markupPercent: Math.min(99, Math.max(0, Math.round(n))) })
-                      }}
-                      className={tinyNumClass}
-                      title="บวกเพิ่มจากราคาตามระดับที่เลือก (0–99)"
-                    />
-                  </div>
-                </div>
+                {/* AR balance — both types */}
                 <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className={labelClass}>วันที่เริ่มมีผล</label>
-                    <input
-                      type="date"
-                      value={form.priceStartDate}
-                      onChange={(e) => set({ priceStartDate: e.target.value })}
-                      className={inputClass}
-                    />
-                  </div>
-                  <div>
-                    <label className={labelClass}>วันที่สิ้นสุด</label>
-                    <input
-                      type="date"
-                      value={form.priceEndDate}
-                      onChange={(e) => set({ priceEndDate: e.target.value })}
-                      className={inputClass}
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <span className={labelClass}>แต้มสะสม</span>
-                    <div
-                      className="rounded-md border border-dashed border-slate-200 bg-slate-50 px-2 py-1.5 text-xs font-medium tabular-nums text-slate-800"
-                      title="อ่านอย่างเดียว"
-                    >
-                      {form.pointsBalance.toLocaleString('th-TH')}
+                  {form.customerType === 'b2b' && (
+                    <div>
+                      <span className={labelClass}>แต้มสะสม</span>
+                      <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 px-2 py-1.5 text-xs font-medium tabular-nums text-slate-800">
+                        {form.pointsBalance.toLocaleString('th-TH')}
+                      </div>
                     </div>
-                  </div>
-                  <div>
+                  )}
+                  <div className={form.customerType === 'b2b' ? '' : 'col-span-2'}>
                     <span className={labelClass}>ค้างชำระ</span>
-                    <div
-                      className="rounded-md border border-dashed border-slate-200 bg-slate-50 px-2 py-1.5 text-xs font-medium tabular-nums text-slate-800"
-                      title="อ่านอย่างเดียว"
-                    >
-                      {form.arBalance > 0 ? (
-                        <span className="text-amber-900">฿{form.arBalance.toLocaleString('th-TH')}</span>
-                      ) : (
-                        <span className="text-slate-500">—</span>
-                      )}
+                    <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 px-2 py-1.5 text-xs font-medium tabular-nums text-slate-800">
+                      {form.arBalance > 0
+                        ? <span className="text-amber-900">฿{form.arBalance.toLocaleString('th-TH')}</span>
+                        : <span className="text-slate-500">—</span>}
                     </div>
                   </div>
                 </div>
                 <p className="text-[10px] leading-snug text-slate-500">
-                  ยอดแต้มและค้างชำระคำนวณจากบิล/ธุรกรรม — ไม่แก้ในฟอร์มนี้ (เมื่อเชื่อม POS/ลูกหนี้จะอัปเดตอัตโนมัติ)
+                  ยอดแต้มและค้างชำระคำนวณจากบิล/ธุรกรรม — ไม่แก้ในฟอร์มนี้
                 </p>
 
                 <div>
-                  <label className={labelClass} htmlFor="member-notes">
-                    หมายเหตุ
-                  </label>
-                  <textarea
-                    id="member-notes"
-                    rows={2}
-                    value={form.notes}
+                  <label className={labelClass} htmlFor="member-notes">หมายเหตุ</label>
+                  <textarea id="member-notes" rows={2} value={form.notes}
                     onChange={(e) => set({ notes: e.target.value })}
-                    className={clsx(inputClass, 'resize-y')}
-                  />
+                    className={clsx(inputClass, 'resize-y')} />
                 </div>
               </div>
             </div>

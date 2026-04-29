@@ -59,6 +59,8 @@ import { promptPayDataUrl } from '@/features/bank/promptPayQr'
 import { buildTaxInvoiceFormPrintHtml, printTaxInvoiceHtmlPreferSystemDialog, type TaxInvoiceLineItemRow } from '@/features/inventory/data/taxInvoiceFormCanvasShared'
 import { getActiveTaxInvoiceForm, loadTaxInvoiceFormDesignerState } from '@/features/inventory/data/taxInvoiceFormDesignerStore'
 import { MOCK_STORE_PROFILE } from '@/features/settings/data/mockStoreProfile'
+import { getB2bTierConfig, resolveB2bLineDiscount } from '@/features/settings/data/customerTiersStore'
+import { getProductMasterById } from '@/features/inventory/data/productMasterData'
 import { useThemePreference } from '@/features/settings/themePreference'
 import { ProductImage } from '@/features/inventory/components/ProductImage'
 import { clsx } from 'clsx'
@@ -131,6 +133,7 @@ type Customer = {
   creditLimit: number
   creditUsed: number
   points: number
+  b2bTier: string
 }
 
 type Product = {
@@ -171,6 +174,7 @@ const WALK_IN_CUSTOMER: Customer = {
   creditLimit: 0,
   creditUsed: 0,
   points: 0,
+  b2bTier: '',
 }
 
 /** พักบิลธรรมดา vs แจ้งยอดแล้วพักรอให้คนอื่นโอน */
@@ -495,6 +499,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
         creditLimit: m.creditLimitBaht ?? 0,
         creditUsed: m.arBalance ?? 0,
         points: m.pointsBalance ?? 0,
+        b2bTier: m.customerType === 'b2b' && m.b2bTier ? m.b2bTier : '',
       }))
     return [WALK_IN_CUSTOMER, ...members]
   }, [posMemberRows])
@@ -841,10 +846,26 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     return next
   }, [cart])
 
+  const b2bLineDiscounts = useMemo(() => {
+    if (!customer.b2bTier) return new Map<number, { discountAmt: number; ruleLabel: string }>()
+    const map = new Map<number, { discountAmt: number; ruleLabel: string }>()
+    pricedCart.forEach((line, idx) => {
+      const product = getProductMasterById(line.id ?? '')
+      if (!product) return
+      const result = resolveB2bLineDiscount(customer.b2bTier as import('@/features/settings/data/customerTiersStore').B2bTier, product.category, product.brand)
+      if (!result) return
+      const base = round2(line.price * line.qty - line.discount)
+      const discountAmt = round2(base * result.discountPercent / 100)
+      if (discountAmt > 0) map.set(idx, { discountAmt, ruleLabel: result.ruleLabel })
+    })
+    return map
+  }, [pricedCart, customer.b2bTier])
+
   const totals = useMemo(() => {
     const subtotal = pricedCart.reduce((sum, line) => sum + line.price * line.qty - line.discount, 0)
     const discountAmt = Number.parseFloat(billDiscount || '0') || 0
-    const subtotalAfterDiscount = Math.max(0, subtotal - discountAmt)
+    const tierDiscountAmt = [...b2bLineDiscounts.values()].reduce((s, v) => s + v.discountAmt, 0)
+    const subtotalAfterDiscount = Math.max(0, subtotal - discountAmt - tierDiscountAmt)
 
     const vatType = mode === 'tax' ? docInfo.vatType : 'none'
     const applyVat = (base: number) => {
@@ -871,8 +892,8 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
         : 0
     const grandTotal = rawGrandTotal + roundingAdjustment
 
-    return { subtotal, discountAmt, beforeVat, vatAmount, rawGrandTotal, roundingAdjustment, grandTotal }
-  }, [applyRounding, billDiscount, pricedCart, docInfo.vatType, mode])
+    return { subtotal, discountAmt, tierDiscountAmt, beforeVat, vatAmount, rawGrandTotal, roundingAdjustment, grandTotal }
+  }, [applyRounding, billDiscount, pricedCart, docInfo.vatType, mode, b2bLineDiscounts])
 
   useEffect(() => {
     if (showQRModal) return
@@ -2434,6 +2455,26 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                     </div>
                   )}
                 </div>
+
+                {totals.tierDiscountAmt > 0 && (
+                  <div className="flex flex-col gap-1 rounded-lg border border-amber-200 bg-amber-50 px-2 py-1.5 dark:border-amber-700/40 dark:bg-amber-900/20">
+                    {[...b2bLineDiscounts.values()].reduce<{ label: string; amt: number }[]>((acc, v) => {
+                      const ex = acc.find((a) => a.label === v.ruleLabel)
+                      if (ex) ex.amt += v.discountAmt
+                      else acc.push({ label: v.ruleLabel, amt: v.discountAmt })
+                      return acc
+                    }, []).map((g) => (
+                      <div key={g.label} className="flex items-center justify-between text-[10px] font-semibold text-amber-700 dark:text-amber-400">
+                        <span>🏷 {g.label}</span>
+                        <span className="font-mono">−{g.amt.toLocaleString('th-TH', { minimumFractionDigits: 2 })}</span>
+                      </div>
+                    ))}
+                    <div className="flex items-center justify-between border-t border-amber-200 pt-1 text-[11px] font-bold text-amber-800 dark:border-amber-700 dark:text-amber-300">
+                      <span>รวม discount rules</span>
+                      <span className="font-mono">−{totals.tierDiscountAmt.toLocaleString('th-TH', { minimumFractionDigits: 2 })}</span>
+                    </div>
+                  </div>
+                )}
 
                 <div className="flex justify-between text-[11px] font-black uppercase tracking-wider text-slate-500 dark:text-slate-400">
                   <span>รวมเป็นเงิน</span>
