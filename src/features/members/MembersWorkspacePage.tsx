@@ -8,6 +8,7 @@ import {
   type MemberType,
 } from '@/features/members/data/mockMembers'
 import { deleteMemberAsync, loadMembers, loadMembersAsync, saveMembers, upsertMemberAsync } from '@/features/members/data/membersStore'
+import { MOCK_MEMBERS } from '@/features/members/data/mockMembers'
 import { formatPhone, phoneMatchesQuery } from '@/features/members/data/phoneUtils'
 import { B2B_TIER_COLORS, B2B_TIER_ORDER, loadCustomerTiers, type B2bTier } from '@/features/settings/data/customerTiersStore'
 import {
@@ -18,8 +19,9 @@ import {
   type PosSalesHistoryRow,
 } from '@/features/pos/data/posSalesDb'
 import { clsx } from 'clsx'
-import { ChevronDown, ChevronRight, Link, Plus, Search, Users, X } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { ChevronDown, ChevronRight, ChevronUp, Link, Plus, Search, TrendingUp, Users, X } from 'lucide-react'
+import { createPortal } from 'react-dom'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 type MembersWorkspacePageProps = {
   className?: string
@@ -37,7 +39,21 @@ function nextMemberCode(existing: Member[]): string {
   return `M-${max + 1}`
 }
 
-const TIER_ICONS: Record<B2bTier, string> = { silver: '🥈', gold: '🥇', platinum: '💎' }
+const TIER_ICONS: Record<B2bTier, string> = { bronze: '🥉', silver: '🥈', gold: '🥇', platinum: '💎' }
+
+// Spending thresholds (total spent) required to qualify for the next tier
+const TIER_THRESHOLDS: Partial<Record<B2bTier, number>> = {
+  bronze: 30_000,
+  silver: 150_000,
+  gold: 500_000,
+}
+const TIER_NEXT: Partial<Record<B2bTier, B2bTier>> = {
+  bronze: 'silver',
+  silver: 'gold',
+  gold: 'platinum',
+}
+
+type SortKey = 'memberCode' | 'fullName' | 'pointsBalance' | 'arBalance' | 'creditLimitBaht'
 
 function tierBadge(tier: B2bTier) {
   const cfg = loadCustomerTiers().b2bTiers.find((t) => t.tier === tier)
@@ -82,6 +98,10 @@ export function MembersWorkspacePage({ className }: MembersWorkspacePageProps) {
   const [filterStatus, setFilterStatus] = useState<MemberStatus | 'all'>('all')
   const [filterType, setFilterType] = useState<MemberType | 'all'>('all')
   const [filterTier, setFilterTier] = useState<B2bTier | 'all' | 'b2c'>('all')
+  const [sortKey, setSortKey] = useState<SortKey | null>(null)
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
+  const [tierPopoverId, setTierPopoverId] = useState<string | null>(null)
+  const popoverRef = useRef<HTMLDivElement>(null)
   const [modalOpen, setModalOpen] = useState(false)
   const [modalMode, setModalMode] = useState<'create' | 'edit'>('create')
   const [editing, setEditing] = useState<Member | null>(null)
@@ -95,12 +115,41 @@ export function MembersWorkspacePage({ className }: MembersWorkspacePageProps) {
   const [expandedBills, setExpandedBills] = useState<Set<string>>(new Set())
   const [linkBillNo, setLinkBillNo] = useState('')
   const [linkBusy, setLinkBusy] = useState(false)
+  const [deleteConfirmMemberId, setDeleteConfirmMemberId] = useState<string | null>(null)
+  const [deleteConfirmInput, setDeleteConfirmInput] = useState('')
+
+  // Close tier popover on outside click
+  useEffect(() => {
+    if (!tierPopoverId) return
+    function handler(e: MouseEvent) {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        setTierPopoverId(null)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [tierPopoverId])
 
   useEffect(() => {
     let alive = true
-    void loadMembersAsync().then((rows) => {
-      if (alive) setMembers(rows)
-    })
+    const FLAG = 'bento.members.seeded.2026-04-29f'
+    if (localStorage.getItem(FLAG) !== '1') {
+      void loadMembersAsync().then(async (existing) => {
+        for (const m of existing) {
+          await deleteMemberAsync(m.id).catch(() => {})
+        }
+        for (const m of MOCK_MEMBERS) {
+          await upsertMemberAsync(m).catch(() => {})
+        }
+        saveMembers([...MOCK_MEMBERS])
+        localStorage.setItem(FLAG, '1')
+        if (alive) setMembers([...MOCK_MEMBERS])
+      })
+    } else {
+      void loadMembersAsync().then((rows) => {
+        if (alive) setMembers(rows)
+      })
+    }
     return () => { alive = false }
   }, [])
 
@@ -156,6 +205,49 @@ export function MembersWorkspacePage({ className }: MembersWorkspacePageProps) {
     })
   }
 
+  function handleSort(key: SortKey) {
+    if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    else { setSortKey(key); setSortDir('asc') }
+  }
+
+  function sortIcon(key: SortKey) {
+    if (sortKey !== key) return null
+    return sortDir === 'asc'
+      ? <ChevronUp className="ml-0.5 inline size-3 text-violet-500" />
+      : <ChevronDown className="ml-0.5 inline size-3 text-violet-500" />
+  }
+
+  function quickChangeTier(member: Member, newTier: B2bTier) {
+    const tierCfg = loadCustomerTiers().b2bTiers.find((t) => t.tier === newTier)
+    const updated: Member = {
+      ...member,
+      b2bTier: newTier,
+      creditLimitBaht: tierCfg?.creditLimitBaht ?? member.creditLimitBaht,
+      creditTermDays: tierCfg?.creditTermDays ?? member.creditTermDays,
+      payAtMonthEnd: tierCfg?.payAtMonthEnd ?? member.payAtMonthEnd,
+    }
+    const next = members.map((m) => (m.id === member.id ? updated : m))
+    setMembers(next)
+    saveMembers(next)
+    if (selectedMember?.id === member.id) setSelectedMember(updated)
+    setTierPopoverId(null)
+    void upsertMemberAsync(updated).catch(console.error)
+  }
+
+  const stats = useMemo(() => {
+    const totalAr = members.reduce((s, m) => s + m.arBalance, 0)
+    const overLimit = members.filter((m) => m.creditLimitBaht > 0 && m.arBalance > m.creditLimitBaht).length
+    const b2cCount = members.filter((m) => m.customerType === 'b2c').length
+    const garageCount = members.filter((m) => m.customerType === 'garage').length
+    const storeCount = members.filter((m) => m.customerType === 'store').length
+    const vipCount = members.filter((m) => m.customerType === 'vip').length
+    const tierCounts = B2B_TIER_ORDER.reduce(
+      (acc, t) => { acc[t] = members.filter((m) => m.b2bTier === t).length; return acc },
+      {} as Record<B2bTier, number>,
+    )
+    return { totalAr, overLimit, b2cCount, garageCount, storeCount, vipCount, tierCounts }
+  }, [members])
+
   const filtered = useMemo(() => {
     const term = q.trim().toLowerCase()
     return members.filter((m) => {
@@ -175,6 +267,18 @@ export function MembersWorkspacePage({ className }: MembersWorkspacePageProps) {
       )
     })
   }, [members, q, filterStatus, filterType, filterTier])
+
+  const sortedFiltered = useMemo(() => {
+    if (!sortKey) return filtered
+    return [...filtered].sort((a, b) => {
+      const av = a[sortKey]
+      const bv = b[sortKey]
+      if (typeof av === 'string' && typeof bv === 'string') {
+        return sortDir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av)
+      }
+      return sortDir === 'asc' ? (av as number) - (bv as number) : (bv as number) - (av as number)
+    })
+  }, [filtered, sortKey, sortDir])
 
   const suggestedCode = useMemo(() => nextMemberCode(members), [members])
 
@@ -224,13 +328,29 @@ export function MembersWorkspacePage({ className }: MembersWorkspacePageProps) {
     }
   }
 
-  const handleDelete = (row: Member) => {
-    if (!window.confirm(`ลบสมาชิก ${row.memberCode} - ${row.fullName} ?`)) return
+  const handleDeactivate = (row: Member) => {
+    const updated: Member = { ...row, status: 'inactive' }
+    const next = members.map((m) => (m.id === row.id ? updated : m))
+    setMembers(next)
+    saveMembers(next)
+    if (selectedMember?.id === row.id) setSelectedMember(updated)
+    void upsertMemberAsync(updated).catch(console.error)
+  }
+
+  const openDeleteConfirm = (row: Member) => {
+    setDeleteConfirmMemberId(row.id)
+    setDeleteConfirmInput('')
+  }
+
+  const confirmPermanentDelete = (row: Member) => {
+    if (deleteConfirmInput.trim() !== row.fullName.trim()) return
     const prev = members
     const next = prev.filter((m) => m.id !== row.id)
     setMembers(next)
     saveMembers(next)
     if (selectedMember?.id === row.id) setSelectedMember(null)
+    setDeleteConfirmMemberId(null)
+    setDeleteConfirmInput('')
     void deleteMemberAsync(row.id).catch((error) => {
       console.error('[members] delete persist failed', error)
       setMembers(prev)
@@ -268,6 +388,36 @@ export function MembersWorkspacePage({ className }: MembersWorkspacePageProps) {
               เพิ่มสมาชิก
             </button>
           </div>
+        </div>
+
+        {/* ── Stats bar ── */}
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-slate-100 bg-slate-50/60 px-4 py-1.5">
+          <span className="text-[10px] text-slate-500">
+            ทั้งหมด <span className="font-bold text-slate-700">{members.length}</span> คน
+          </span>
+          <span className="text-[10px] text-slate-400">👤 <span className="font-semibold text-slate-600">{stats.b2cCount}</span></span>
+          <span className="text-[10px] text-slate-400">🔧 <span className="font-semibold text-slate-600">{stats.garageCount}</span></span>
+          <span className="text-[10px] text-slate-400">🏪 <span className="font-semibold text-slate-600">{stats.storeCount}</span></span>
+          {stats.vipCount > 0 && <span className="text-[10px] text-slate-400">⭐ <span className="font-semibold text-slate-600">{stats.vipCount}</span></span>}
+          <span className="text-[10px] text-slate-300">|</span>
+          {B2B_TIER_ORDER.map((t) => (
+            <span key={t} className="flex items-center gap-1 text-[10px]">
+              <span className={clsx('size-2 rounded-full', B2B_TIER_COLORS[t].dot)} />
+              <span className="text-slate-500">
+                {t.charAt(0).toUpperCase() + t.slice(1)}: <span className="font-semibold text-slate-700">{stats.tierCounts[t]}</span>
+              </span>
+            </span>
+          ))}
+          <span className="ml-auto text-[10px] text-slate-500">
+            AR รวม: <span className="font-semibold tabular-nums text-amber-700">
+              ฿{stats.totalAr.toLocaleString('th-TH', { maximumFractionDigits: 0 })}
+            </span>
+          </span>
+          {stats.overLimit > 0 && (
+            <span className="rounded-full bg-rose-100 px-1.5 py-0.5 text-[10px] font-semibold text-rose-700">
+              เกินวงเงิน {stats.overLimit} ราย
+            </span>
+          )}
         </div>
 
         <div className="flex flex-col gap-2 border-b border-slate-100 px-3 py-2 sm:flex-row sm:items-center sm:px-4">
@@ -308,10 +458,10 @@ export function MembersWorkspacePage({ className }: MembersWorkspacePageProps) {
               className="min-h-8 rounded-lg border border-slate-200 bg-white px-2 text-xs text-slate-800 shadow-sm"
             >
               <option value="all">Tier ทั้งหมด</option>
-              <option value="b2c">B2C</option>
+              <option value="b2c">👤 ลูกค้าทั่วไป</option>
               {B2B_TIER_ORDER.map((t) => {
                 const cfg = loadCustomerTiers().b2bTiers.find((c) => c.tier === t)
-                return <option key={t} value={t}>B2B · {cfg?.label ?? t}</option>
+                return <option key={t} value={t}>{cfg?.label ?? t}</option>
               })}
             </select>
           </div>
@@ -321,14 +471,29 @@ export function MembersWorkspacePage({ className }: MembersWorkspacePageProps) {
           <table className="w-full min-w-[58rem] border-collapse text-left text-xs">
             <thead className="sticky top-0 z-[1] border-b border-slate-200 bg-slate-50/95 backdrop-blur">
               <tr className="text-[10px] font-medium uppercase tracking-wide text-slate-600">
-                <th className="whitespace-nowrap px-2 py-1.5">รหัส</th>
-                <th className="min-w-[8rem] px-2 py-1.5">ชื่อ</th>
+                <th
+                  className="cursor-pointer select-none whitespace-nowrap px-2 py-1.5 hover:text-violet-700"
+                  onClick={() => handleSort('memberCode')}
+                >รหัส{sortIcon('memberCode')}</th>
+                <th
+                  className="min-w-[8rem] cursor-pointer select-none px-2 py-1.5 hover:text-violet-700"
+                  onClick={() => handleSort('fullName')}
+                >ชื่อ{sortIcon('fullName')}</th>
                 <th className="whitespace-nowrap px-2 py-1.5">เบอร์</th>
                 <th className="whitespace-nowrap px-2 py-1.5">ประเภท</th>
                 <th className="whitespace-nowrap px-2 py-1.5">Tier</th>
-                <th className="whitespace-nowrap px-2 py-1.5 text-right">แต้ม</th>
-                <th className="whitespace-nowrap px-2 py-1.5 text-right">ค้างชำระ</th>
-                <th className="whitespace-nowrap px-2 py-1.5 text-right">วงเงิน</th>
+                <th
+                  className="cursor-pointer select-none whitespace-nowrap px-2 py-1.5 text-right hover:text-violet-700"
+                  onClick={() => handleSort('pointsBalance')}
+                >แต้ม{sortIcon('pointsBalance')}</th>
+                <th
+                  className="cursor-pointer select-none whitespace-nowrap px-2 py-1.5 text-right hover:text-violet-700"
+                  onClick={() => handleSort('arBalance')}
+                >ค้างชำระ{sortIcon('arBalance')}</th>
+                <th
+                  className="cursor-pointer select-none whitespace-nowrap px-2 py-1.5 text-right hover:text-violet-700"
+                  onClick={() => handleSort('creditLimitBaht')}
+                >วงเงิน{sortIcon('creditLimitBaht')}</th>
                 <th className="whitespace-nowrap px-2 py-1.5 text-center">เครดิต</th>
                 <th className="whitespace-nowrap px-2 py-1.5">ระดับราคา</th>
                 <th className="whitespace-nowrap px-2 py-1.5">สถานะ</th>
@@ -336,78 +501,143 @@ export function MembersWorkspacePage({ className }: MembersWorkspacePageProps) {
               </tr>
             </thead>
             <tbody>
-              {filtered.length === 0 ? (
+              {sortedFiltered.length === 0 ? (
                 <tr>
                   <td colSpan={12} className="px-4 py-12 text-center text-slate-500">
                     ไม่พบสมาชิกตามเงื่อนไข
                   </td>
                 </tr>
               ) : (
-                filtered.map((m) => (
-                  <tr
-                    key={m.id}
-                    onClick={() => setSelectedMember((prev) => (prev?.id === m.id ? null : m))}
-                    className={clsx(
-                      'cursor-pointer border-b border-slate-100 transition',
-                      selectedMember?.id === m.id
-                        ? 'bg-violet-50 ring-1 ring-inset ring-violet-200'
-                        : 'hover:bg-violet-50/30',
-                    )}
-                  >
-                    <td className="whitespace-nowrap px-2 py-1.5 font-mono text-[10px] text-slate-700">{m.memberCode}</td>
-                    <td className="max-w-[10rem] truncate px-2 py-1.5 font-medium text-slate-900">{m.fullName}</td>
-                    <td className="whitespace-nowrap px-2 py-1.5 text-slate-700">{formatPhone(m.phone)}</td>
-                    <td className="whitespace-nowrap px-2 py-1.5 text-slate-600">{MEMBER_TYPE_LABELS[m.memberType]}</td>
-                    <td className="whitespace-nowrap px-2 py-1.5">
-                      {m.customerType === 'b2b' && m.b2bTier
-                        ? tierBadge(m.b2bTier)
-                        : <span className="text-[10px] text-slate-400">B2C</span>}
-                    </td>
-                    <td className="whitespace-nowrap px-2 py-1.5 text-right tabular-nums text-slate-800">
-                      {m.pointsBalance.toLocaleString('th-TH')}
-                    </td>
-                    <td className="whitespace-nowrap px-2 py-1.5 text-right tabular-nums text-slate-800">
-                      {m.arBalance > 0 ? <span className="text-amber-800">฿{m.arBalance.toLocaleString('th-TH')}</span> : '—'}
-                    </td>
-                    <td className="whitespace-nowrap px-2 py-1.5 text-right tabular-nums text-slate-700">
-                      {m.creditLimitBaht > 0 ? <span>฿{m.creditLimitBaht.toLocaleString('th-TH')}</span> : '—'}
-                    </td>
-                    <td className="whitespace-nowrap px-2 py-1.5 text-center text-slate-700">
-                      {m.payAtMonthEnd ? (
-                        <span>สิ้นเดือน</span>
-                      ) : m.creditTermDays > 0 && m.creditTermMonths > 0 ? (
-                        <span>{m.creditTermDays} วัน · {m.creditTermMonths} ด.</span>
-                      ) : m.creditTermDays > 0 ? (
-                        <span>{m.creditTermDays} วัน</span>
-                      ) : m.creditTermMonths > 0 ? (
-                        <span>{m.creditTermMonths} เดือน</span>
-                      ) : '—'}
-                    </td>
-                    <td className="whitespace-nowrap px-2 py-1.5 text-slate-600">
-                      {MEMBER_PRICE_TIER_LABELS[m.defaultPriceTier]}
-                      {m.markupPercent !== 0 ? <span className="text-slate-400"> +{m.markupPercent}%</span> : null}
-                    </td>
-                    <td className="px-2 py-1.5">{statusBadge(m.status)}</td>
-                    <td className="whitespace-nowrap px-2 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
-                      <div className="inline-flex items-center gap-1">
-                        <button
-                          type="button"
-                          onClick={() => openEdit(m)}
-                          className="rounded border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-medium text-violet-700 hover:bg-violet-50"
-                        >
-                          แก้ไข
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleDelete(m)}
-                          className="rounded border border-rose-200 bg-white px-2 py-0.5 text-[10px] font-medium text-rose-700 hover:bg-rose-50"
-                        >
-                          ลบ
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))
+                sortedFiltered.map((m) => {
+                  const overLimit = m.creditLimitBaht > 0 && m.arBalance > m.creditLimitBaht
+                  const hasAr = m.arBalance > 0
+                  return (
+                    <tr
+                      key={m.id}
+                      onClick={() => setSelectedMember((prev) => (prev?.id === m.id ? null : m))}
+                      className={clsx(
+                        'cursor-pointer border-b border-slate-100 transition',
+                        selectedMember?.id === m.id
+                          ? 'bg-violet-50 ring-1 ring-inset ring-violet-200'
+                          : overLimit
+                          ? 'bg-rose-50/40 hover:bg-rose-50/70'
+                          : 'hover:bg-violet-50/30',
+                      )}
+                    >
+                      {/* AR highlight via left border on first cell */}
+                      <td className={clsx(
+                        'whitespace-nowrap px-2 py-1.5 font-mono text-[10px] text-slate-700',
+                        overLimit && 'border-l-2 border-l-rose-400',
+                        !overLimit && hasAr && 'border-l-2 border-l-amber-400',
+                      )}>
+                        {m.memberCode}
+                      </td>
+                      <td className="max-w-[10rem] truncate px-2 py-1.5 font-medium text-slate-900">{m.fullName}</td>
+                      <td className="whitespace-nowrap px-2 py-1.5 text-slate-700">{formatPhone(m.phone)}</td>
+                      <td className="whitespace-nowrap px-2 py-1.5 text-slate-600">{MEMBER_TYPE_LABELS[m.memberType]}</td>
+
+                      {/* ── Quick tier popover ── */}
+                      <td className="whitespace-nowrap px-2 py-1.5" onClick={(e) => e.stopPropagation()}>
+                        {(m.customerType === 'garage' || m.customerType === 'store') && m.b2bTier ? (
+                          <div className="relative inline-block">
+                            <button
+                              type="button"
+                              onClick={() => setTierPopoverId((prev) => (prev === m.id ? null : m.id))}
+                              className="rounded transition hover:opacity-80"
+                            >
+                              {tierBadge(m.b2bTier)}
+                            </button>
+                            {tierPopoverId === m.id && (
+                              <div
+                                ref={popoverRef}
+                                className="absolute left-0 top-full z-20 mt-1 min-w-[130px] rounded-xl border border-slate-200 bg-white p-1.5 shadow-lg"
+                              >
+                                <p className="mb-1 px-1 text-[9px] font-semibold uppercase tracking-wide text-slate-400">เปลี่ยน Tier</p>
+                                {B2B_TIER_ORDER.map((t) => (
+                                  <button
+                                    key={t}
+                                    type="button"
+                                    onClick={() => quickChangeTier(m, t)}
+                                    className={clsx(
+                                      'flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-[11px] transition hover:bg-slate-100',
+                                      m.b2bTier === t && 'bg-slate-100 font-semibold',
+                                    )}
+                                  >
+                                    <span>{TIER_ICONS[t]}</span>
+                                    <span className="text-slate-700">{t.charAt(0).toUpperCase() + t.slice(1)}</span>
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ) : m.customerType === 'vip' ? (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-yellow-100 px-2 py-0.5 text-[10px] font-bold text-yellow-800 ring-1 ring-yellow-300">⭐ VIP</span>
+                        ) : (
+                          <span className="text-[10px] text-slate-400">—</span>
+                        )}
+                      </td>
+
+                      <td className="whitespace-nowrap px-2 py-1.5 text-right tabular-nums text-slate-800">
+                        {m.customerType === 'b2c' ? m.pointsBalance.toLocaleString('th-TH') : <span className="text-slate-300">—</span>}
+                      </td>
+                      <td className="whitespace-nowrap px-2 py-1.5 text-right tabular-nums">
+                        {m.arBalance > 0 ? (
+                          <span className={overLimit ? 'font-bold text-rose-700' : 'text-amber-800'}>
+                            ฿{m.arBalance.toLocaleString('th-TH')}
+                          </span>
+                        ) : '—'}
+                      </td>
+                      <td className="whitespace-nowrap px-2 py-1.5 text-right tabular-nums text-slate-700">
+                        {m.creditLimitBaht > 0 ? <span>฿{m.creditLimitBaht.toLocaleString('th-TH')}</span> : '—'}
+                      </td>
+                      <td className="whitespace-nowrap px-2 py-1.5 text-center text-slate-700">
+                        {m.payAtMonthEnd ? (
+                          <span>สิ้นเดือน</span>
+                        ) : m.creditTermDays > 0 && m.creditTermMonths > 0 ? (
+                          <span>{m.creditTermDays} วัน · {m.creditTermMonths} ด.</span>
+                        ) : m.creditTermDays > 0 ? (
+                          <span>{m.creditTermDays} วัน</span>
+                        ) : m.creditTermMonths > 0 ? (
+                          <span>{m.creditTermMonths} เดือน</span>
+                        ) : '—'}
+                      </td>
+                      <td className="whitespace-nowrap px-2 py-1.5 text-slate-600">
+                        {m.customerType === 'b2c' ? 'ปลีก' : m.customerType === 'garage' ? 'อู่' : m.customerType === 'store' ? 'ร้านค้า' : m.customerType === 'vip' ? 'VIP' : 'ปลีก'}
+                      </td>
+                      <td className="px-2 py-1.5">{statusBadge(m.status)}</td>
+                      <td className="whitespace-nowrap px-2 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
+                        <div className="inline-flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => openEdit(m)}
+                            className="rounded border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-medium text-violet-700 hover:bg-violet-50"
+                          >
+                            แก้ไข
+                          </button>
+                          {m.status === 'active' ? (
+                            <button
+                              type="button"
+                              onClick={() => handleDeactivate(m)}
+                              title="ปิดการใช้งานสมาชิก (ข้อมูลยังคงอยู่)"
+                              className="rounded border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-medium text-slate-500 hover:bg-slate-50"
+                            >
+                              ปิด
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => openDeleteConfirm(m)}
+                              title="ลบถาวร (ต้องยืนยันชื่อ)"
+                              className="rounded border border-rose-200 bg-white px-2 py-0.5 text-[10px] font-medium text-rose-700 hover:bg-rose-50"
+                            >
+                              ลบถาวร
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })
               )}
             </tbody>
           </table>
@@ -454,6 +684,45 @@ export function MembersWorkspacePage({ className }: MembersWorkspacePageProps) {
               </div>
             </div>
           )}
+
+          {/* ── Tier progression bar (B2B only) ── */}
+          {(selectedMember.customerType === 'garage' || selectedMember.customerType === 'store') && selectedMember.b2bTier && memberSummary && (() => {
+            const tier = selectedMember.b2bTier as B2bTier
+            const nextTier = TIER_NEXT[tier]
+            const threshold = TIER_THRESHOLDS[tier]
+            if (!nextTier || threshold === undefined) return null
+            const pct = Math.min(100, Math.round((memberSummary.totalSpent / threshold) * 100))
+            const isReady = memberSummary.totalSpent >= threshold
+            return (
+              <div className="border-b border-slate-200 bg-white px-3 py-2.5">
+                <div className="mb-1 flex items-center justify-between gap-2">
+                  <span className="flex items-center gap-1 text-[10px] text-slate-500">
+                    <TrendingUp className="size-3" />
+                    {isReady ? 'พร้อมอัพเกรด →' : 'เป้าหมาย →'} {tierBadge(nextTier)}
+                  </span>
+                  <span className="font-mono text-[10px] text-slate-400">{pct}%</span>
+                </div>
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
+                  <div
+                    className={clsx('h-full rounded-full transition-all', isReady ? 'bg-emerald-500' : 'bg-violet-400')}
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+                <p className="mt-1 text-[10px] text-slate-400">
+                  ฿{memberSummary.totalSpent.toLocaleString('th-TH', { maximumFractionDigits: 0 })} / ฿{threshold.toLocaleString('th-TH')}
+                </p>
+                {isReady && (
+                  <button
+                    type="button"
+                    onClick={() => quickChangeTier(selectedMember, nextTier)}
+                    className="mt-2 w-full rounded-lg border border-emerald-300 bg-emerald-50 py-1.5 text-[11px] font-semibold text-emerald-700 transition hover:bg-emerald-100"
+                  >
+                    อัพเกรด → {TIER_ICONS[nextTier]} {nextTier.charAt(0).toUpperCase() + nextTier.slice(1)}
+                  </button>
+                )}
+              </div>
+            )
+          })()}
 
           {/* History list */}
           <div className="min-h-0 flex-1 overflow-auto">
@@ -542,7 +811,6 @@ export function MembersWorkspacePage({ className }: MembersWorkspacePageProps) {
                     try {
                       await salesLinkMemberByBillAsync(linkBillNo.trim(), selectedMember.memberCode)
                       setLinkBillNo('')
-                      // Reload history + summary
                       const [summary, rows] = await Promise.all([
                         loadMemberSalesSummaryAsync(selectedMember.memberCode),
                         loadPosSalesHistoryByMemberAsync(selectedMember.memberCode, PAGE_SIZE + 1, 0),
@@ -576,6 +844,60 @@ export function MembersWorkspacePage({ className }: MembersWorkspacePageProps) {
         onClose={() => setModalOpen(false)}
         onSubmit={handleSubmit}
       />
+
+      {/* Permanent delete confirmation modal */}
+      {deleteConfirmMemberId &&
+        typeof document !== 'undefined' &&
+        (() => {
+          const row = members.find((m) => m.id === deleteConfirmMemberId)
+          if (!row) return null
+          const nameMatches = deleteConfirmInput.trim() === row.fullName.trim()
+          return createPortal(
+            <div
+              className="fixed inset-0 z-[500] flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-sm"
+              onMouseDown={(e) => { if (e.target === e.currentTarget) { setDeleteConfirmMemberId(null); setDeleteConfirmInput('') } }}
+            >
+              <div className="w-full max-w-sm overflow-hidden rounded-2xl border border-rose-200 bg-white shadow-2xl">
+                <div className="border-t-4 border-rose-500 bg-rose-50 px-5 py-4">
+                  <p className="text-sm font-bold text-rose-800">ลบสมาชิกถาวร — ไม่สามารถกู้คืนได้</p>
+                  <p className="mt-1 text-xs text-rose-600">
+                    {row.memberCode} · {row.fullName}
+                  </p>
+                </div>
+                <div className="px-5 py-4">
+                  <p className="mb-3 text-xs text-slate-600">
+                    พิมพ์ชื่อสมาชิก <span className="font-mono font-bold">"{row.fullName}"</span> เพื่อยืนยัน
+                  </p>
+                  <input
+                    className="w-full rounded-lg border border-rose-300 bg-white px-3 py-2 text-sm text-slate-800 outline-none focus:border-rose-500 focus:ring-1 focus:ring-rose-200"
+                    placeholder={row.fullName}
+                    value={deleteConfirmInput}
+                    onChange={(e) => setDeleteConfirmInput(e.target.value)}
+                    autoFocus
+                  />
+                  <div className="mt-3 flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => { setDeleteConfirmMemberId(null); setDeleteConfirmInput('') }}
+                      className="flex-1 rounded-lg border border-slate-200 bg-white py-2 text-xs font-medium text-slate-600 hover:bg-slate-50"
+                    >
+                      ยกเลิก
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => confirmPermanentDelete(row)}
+                      disabled={!nameMatches}
+                      className="flex-1 rounded-lg bg-rose-600 py-2 text-xs font-bold text-white hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      ลบถาวร
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        })()}
     </div>
   )
 }

@@ -307,8 +307,8 @@ function formatMoneyInput(n: number): string {
   return r.toFixed(2).replace(/\.?0+$/, '')
 }
 
-/** ชื่อเรียกระดับราคาตามลำดับแถว 1–5 */
-const SELL_PRICE_TIER_LABELS = ['ปลีก', 'ช่าง', 'ส่ง', 'vip', 'พิเศษ'] as const
+/** ชื่อเรียกระดับราคาตามลำดับแถว 1–4 */
+const SELL_PRICE_TIER_LABELS = ['ปลีก', 'อู่', 'ร้านค้า', 'VIP'] as const
 
 function parseBuyScheme(s: string): { buyQty: number; freeQty: number; effectiveQty: number; normalized: string } | null {
   const m = s.trim().match(/^(\d+)\s*\+\s*(\d+)$/)
@@ -446,7 +446,7 @@ export function AddProductModal({
   const [costManualOverride, setCostManualOverride] = useState(false)
   const [costSource, setCostSource] = useState<'manual' | 'avg' | 'last'>('manual')
   const [sellRows, setSellRows] = useState(() =>
-    Array.from({ length: 5 }, () => ({ markup: '', prices: [''] as string[] })),
+    Array.from({ length: 4 }, () => ({ markup: '', prices: [''] as string[] })),
   )
   /** คอลัมน์ % ระดับราคา: กำไรจากทุน หรือ ลดจากราคาตั้ง */
   const [sellTierPercentBasis, setSellTierPercentBasis] = useState<SellTierPercentBasis>('cost_markup')
@@ -811,7 +811,7 @@ export function AddProductModal({
     setPd4('')
     setCostStr('')
     setCostManualOverride(false)
-    setSellRows(Array.from({ length: 5 }, () => ({ markup: '', prices: [''] })))
+    setSellRows(Array.from({ length: 4 }, () => ({ markup: '', prices: [''] })))
     setSellTierPercentBasis('cost_markup')
     setPriceRoundingInfoOpen(false)
     setRounding5StartBahtStr(ROUNDING_START_5_BAHT_DEFAULT)
@@ -925,7 +925,7 @@ export function AddProductModal({
       const tiers = p.sellPriceTiers ?? []
       setSellTierPercentBasis(p.sellTierPercentBasis === 'list_discount' ? 'list_discount' : 'cost_markup')
       setSellRows(
-        Array.from({ length: 5 }, (_, i) => {
+        Array.from({ length: 4 }, (_, i) => {
           const t = tiers[i]
           if (!t) return { markup: '', prices: Array(nCols).fill('') }
           const listMode = p.sellTierPercentBasis === 'list_discount'
@@ -1043,7 +1043,7 @@ export function AddProductModal({
     setCostStr('')
     setCostManualOverride(false)
     const colN = Math.max(1, nu.length)
-    setSellRows(Array.from({ length: 5 }, () => ({ markup: '', prices: Array(colN).fill('') })))
+    setSellRows(Array.from({ length: 4 }, () => ({ markup: '', prices: Array(colN).fill('') })))
     const main = categoryTree.find((m) => norm(m.name) === norm(copySource.category))
     const mid = main?.id ?? categoryTree[0].id
     setMainCatId(mid)
@@ -1294,8 +1294,8 @@ export function AddProductModal({
       }
     }
 
-    // ระดับราคาอื่น (ช่าง/ส่ง/VIP/พิเศษ): ปัดเศษทศนิยมให้เป็นจำนวนเต็ม เฉพาะกรณีคำนวณจาก ±% (ไม่ได้ใส่ราคาตรง)
-    for (let tierIndex = 1; tierIndex < Math.min(5, sellRows.length, sellTiersParsed.length); tierIndex++) {
+    // ระดับราคาอื่น (อู่/ร้านค้า/VIP): ปัดเศษทศนิยมให้เป็นจำนวนเต็ม เฉพาะกรณีคำนวณจาก ±% (ไม่ได้ใส่ราคาตรง)
+    for (let tierIndex = 1; tierIndex < Math.min(4, sellRows.length, sellTiersParsed.length); tierIndex++) {
       const r = sellRows[tierIndex]
       const signed = parseSignedTierPercent(r.markup)
       const hasManualPrice = r.prices[0]?.trim().length !== 0
@@ -2438,7 +2438,7 @@ export function AddProductModal({
                 </div>
 
                 <div className="rounded-md border border-emerald-200 bg-emerald-50/40 p-1.5">
-                  <p className="mb-1 text-[11px] font-semibold text-slate-900">ราคาขาย 5 ระดับ</p>
+                  <p className="mb-1 text-[11px] font-semibold text-slate-900">ราคาขาย 4 ระดับ</p>
                   <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2 rounded-md border border-emerald-100 bg-white/90 px-2 py-1">
                     <span className="text-[10px] font-medium text-slate-600">คิดคอลัมน์ % จาก</span>
                     <div className="flex items-center gap-1.5">

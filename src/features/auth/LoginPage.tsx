@@ -1,10 +1,12 @@
 import {
   getStoredBranch,
+  getStoredCompany,
   isLoggedIn,
   setLoggedIn,
   setStaffRole,
   setStaffUsername,
   setStoredBranch,
+  setStoredCompany,
 } from '@/features/auth/authSession'
 import { hydrateStaffUsersFromDb, loadStaffUsers } from '@/features/settings/data/staffUsersStore'
 import { clsx } from 'clsx'
@@ -24,10 +26,12 @@ export function LoginPage() {
 
   useEffect(() => {
     if (!isLoggedIn()) return
-    if (getStoredBranch()) {
+    if (getStoredCompany() && getStoredBranch()) {
       navigate('/', { replace: true })
-    } else {
+    } else if (getStoredCompany()) {
       navigate('/branch', { replace: true })
+    } else {
+      navigate('/company', { replace: true })
     }
   }, [navigate])
 
@@ -54,8 +58,9 @@ export function LoginPage() {
     setStaffUsername(u)
     setStaffRole(staff.isAdmin || staff.role === 'MANAGER' ? 'admin' : 'staff')
     setLoggedIn(true)
+    setStoredCompany(null)
     setStoredBranch(null)
-    navigate('/branch')
+    navigate('/company')
   }
 
 

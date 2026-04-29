@@ -25,8 +25,7 @@ const SEGMENT_COLORS: Record<string, string> = {
   tier1: '#6366f1',
   tier2: '#8b5cf6',
   tier3: '#06b6d4',
-  tier4: '#10b981',
-  tier5: '#f59e0b',
+  tier4: '#f59e0b',
 }
 
 const RFM_SEGMENT_COLORS: Record<string, string> = {

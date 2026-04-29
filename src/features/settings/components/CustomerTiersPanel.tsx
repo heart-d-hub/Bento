@@ -1,7 +1,6 @@
 import {
   B2B_TIER_COLORS,
   B2B_TIER_ORDER,
-  PRICE_TIER_LABELS,
   loadCustomerTiers,
   saveCustomerTiers,
   type B2bTier,
@@ -11,12 +10,11 @@ import {
 } from '@/features/settings/data/customerTiersStore'
 import { loadCategoryTree } from '@/features/inventory/data/inventoryCategories'
 import { getProductMasterList } from '@/features/inventory/data/productMasterData'
-import type { MemberPriceTier } from '@/features/members/data/memberTypes'
 import { clsx } from 'clsx'
 import { Plus, Trash2 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 
-const TIER_ICONS: Record<B2bTier, string> = { silver: '🥈', gold: '🥇', platinum: '💎' }
+const TIER_ICONS: Record<B2bTier, string> = { bronze: '🥉', silver: '🥈', gold: '🥇', platinum: '💎' }
 
 const inputCls = 'w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-800 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-100'
 
@@ -62,7 +60,7 @@ export function CustomerTiersPanel() {
     <div className="flex flex-col gap-5">
       <div className="flex items-center gap-2">
         <span className="text-sm font-bold text-slate-800">B2B — ลูกค้าธุรกิจ</span>
-        <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-600 ring-1 ring-indigo-200">3 ระดับ</span>
+        <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-600 ring-1 ring-indigo-200">4 ระดับ</span>
       </div>
       <p className="text-xs text-slate-500 -mt-3">
         เลือก Price Tier เริ่มต้นต่อ B2B tier แล้วเพิ่ม Discount Rules สำหรับหมวด/แบรนด์ที่ต้องการหักเพิ่ม
@@ -88,21 +86,31 @@ export function CustomerTiersPanel() {
 
             <div className="p-4 flex flex-col gap-4">
 
-              {/* ── Price tier + credit ── */}
+              {/* ── Discount % + credit ── */}
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                 <div>
                   <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">
-                    Price Tier เริ่มต้น
+                    ส่วนลดอู่/ช่าง (%)
                   </label>
-                  <select
-                    value={cfg.defaultPriceTier}
-                    onChange={(e) => updateTier(tier, { defaultPriceTier: e.target.value as MemberPriceTier })}
-                    className={inputCls}
-                  >
-                    {(Object.entries(PRICE_TIER_LABELS) as [MemberPriceTier, string][]).map(([k, v]) => (
-                      <option key={k} value={k}>{v}</option>
-                    ))}
-                  </select>
+                  <div className="flex items-center gap-1">
+                    <input type="number" min={0} max={50} step={0.5} value={cfg.garageDiscountPercent}
+                      onChange={(e) => updateTier(tier, { garageDiscountPercent: Math.min(50, Math.max(0, Number(e.target.value))) })}
+                      className={inputCls} />
+                    <span className="shrink-0 text-[10px] text-slate-400">%</span>
+                  </div>
+                  <p className="mt-0.5 text-[9px] text-slate-400">จากราคาอู่</p>
+                </div>
+                <div>
+                  <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                    ส่วนลดร้านค้า (%)
+                  </label>
+                  <div className="flex items-center gap-1">
+                    <input type="number" min={0} max={50} step={0.5} value={cfg.storeDiscountPercent}
+                      onChange={(e) => updateTier(tier, { storeDiscountPercent: Math.min(50, Math.max(0, Number(e.target.value))) })}
+                      className={inputCls} />
+                    <span className="shrink-0 text-[10px] text-slate-400">%</span>
+                  </div>
+                  <p className="mt-0.5 text-[9px] text-slate-400">จากราคาร้านค้า</p>
                 </div>
                 <div>
                   <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">วงเงิน (฿)</label>
@@ -116,24 +124,13 @@ export function CustomerTiersPanel() {
                     onChange={(e) => updateTier(tier, { creditTermDays: Math.max(0, Number(e.target.value)) })}
                     className={inputCls} />
                 </div>
-                <div className="flex flex-col">
-                  <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">ชำระสิ้นเดือน</label>
-                  <button type="button"
-                    onClick={() => updateTier(tier, { payAtMonthEnd: !cfg.payAtMonthEnd })}
-                    className={clsx(
-                      'mt-0.5 flex h-[30px] w-full items-center justify-center rounded-lg border text-xs font-semibold transition',
-                      cfg.payAtMonthEnd ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : 'border-slate-200 bg-slate-50 text-slate-400 hover:bg-slate-100',
-                    )}>
-                    {cfg.payAtMonthEnd ? 'เปิด' : 'ปิด'}
-                  </button>
-                </div>
               </div>
 
               {/* ── Discount Rules ── */}
               <div>
                 <div className="mb-2 flex items-center justify-between">
                   <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">
-                    Discount Rules — หักเพิ่มจาก {PRICE_TIER_LABELS[cfg.defaultPriceTier].split('—')[0]?.trim()} ต่อ line item
+                    Discount Rules — หักเพิ่มจากราคาฐาน ต่อ line item
                   </span>
                   <button type="button" onClick={() => addRule(tier)}
                     className="inline-flex items-center gap-1 rounded-lg border border-indigo-200 bg-indigo-50 px-2 py-1 text-[10px] font-semibold text-indigo-600 hover:bg-indigo-100">
@@ -143,7 +140,7 @@ export function CustomerTiersPanel() {
 
                 {cfg.discountRules.length === 0 ? (
                   <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 py-3 text-center text-[11px] text-slate-400">
-                    ยังไม่มี rule — ลูกค้าจะใช้ {PRICE_TIER_LABELS[cfg.defaultPriceTier]} โดยไม่หักเพิ่ม
+                    ยังไม่มี rule — ลูกค้าจะใช้ราคาฐานตามประเภท โดยไม่หักเพิ่ม
                   </div>
                 ) : (
                   <div className="flex flex-col gap-2">
@@ -197,7 +194,7 @@ export function CustomerTiersPanel() {
                     ))}
 
                     <div className="rounded-lg bg-slate-50 px-3 py-1.5 text-[10px] text-slate-400">
-                      rule แรกที่ match จะถูกใช้ — สินค้าที่ไม่ match = ใช้ {PRICE_TIER_LABELS[cfg.defaultPriceTier].split('—')[0]?.trim()} ปกติ
+                      rule แรกที่ match จะถูกใช้ — สินค้าที่ไม่ match = ใช้ราคาฐาน − tier % ปกติ
                     </div>
                   </div>
                 )}
@@ -207,10 +204,36 @@ export function CustomerTiersPanel() {
         )
       })}
 
-      {/* B2C note */}
-      <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50/60 px-4 py-3">
-        <p className="text-xs font-semibold text-slate-500">B2C — ลูกค้าทั่วไป</p>
-        <p className="mt-0.5 text-[11px] text-slate-400">ไม่มี tier — สมัครสมาชิกแล้วสะสมแต้มได้เลย ใช้ราคาปลีก (tier1)</p>
+      {/* Customer type notes */}
+      <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50/60 px-4 py-3 flex flex-col gap-1.5">
+        <div className="flex items-start gap-2">
+          <span className="mt-px text-sm">👤</span>
+          <div>
+            <p className="text-xs font-semibold text-slate-600">B2C — ลูกค้าทั่วไป</p>
+            <p className="text-[11px] text-slate-400">ใช้ราคาปลีก — สะสมแต้ม — ไม่มี tier</p>
+          </div>
+        </div>
+        <div className="flex items-start gap-2">
+          <span className="mt-px text-sm">🔧</span>
+          <div>
+            <p className="text-xs font-semibold text-slate-600">อู่ / ช่าง</p>
+            <p className="text-[11px] text-slate-400">ใช้ราคาอู่ − ส่วนลด tier — มีเครดิต</p>
+          </div>
+        </div>
+        <div className="flex items-start gap-2">
+          <span className="mt-px text-sm">🏪</span>
+          <div>
+            <p className="text-xs font-semibold text-slate-600">ร้านอะไหล่</p>
+            <p className="text-[11px] text-slate-400">ใช้ราคาร้านค้า − ส่วนลด tier — มีเครดิต</p>
+          </div>
+        </div>
+        <div className="flex items-start gap-2">
+          <span className="mt-px text-sm">⭐</span>
+          <div>
+            <p className="text-xs font-semibold text-slate-600">VIP</p>
+            <p className="text-[11px] text-slate-400">ใช้ราคา VIP — ไม่มี tier discount</p>
+          </div>
+        </div>
       </div>
 
       {/* Save */}

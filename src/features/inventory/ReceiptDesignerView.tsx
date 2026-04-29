@@ -18,7 +18,7 @@ import {
   saveReceiptDesignerLayout,
 } from '@/features/inventory/data/receiptDesignerStore'
 import { getStaffUsername, getStoredBranch } from '@/features/auth/authSession'
-import { loadStoreProfile, STORE_PROFILE_CHANGED_EVENT } from '@/features/settings/data/storeProfileStore'
+import { getStoreContextForPrint, STORE_PROFILE_CHANGED_EVENT } from '@/features/settings/data/storeProfileStore'
 import { ChevronDown, ChevronUp, ImagePlus, Printer, QrCode, RotateCcw, Save, Trash2, Type } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -83,7 +83,7 @@ function moveExtra(list: ReceiptExtraBlock[], id: string, dir: -1 | 1): ReceiptE
 
 export function ReceiptDesignerView({ className }: ReceiptDesignerViewProps) {
   const [layout, setLayout] = useState<ReceiptDesignerLayout>(() => loadReceiptDesignerLayout())
-  const [profile, setProfile] = useState(() => loadStoreProfile())
+  const [profile, setProfile] = useState(() => getStoreContextForPrint())
   const [printLayout, setPrintLayout] = useState<ReceiptDesignerLayout | null>(null)
   const savedBaselineRef = useRef<ReceiptDesignerLayout | null>(null)
   const imagePickTargetRef = useRef<{ placement: ExtraPlacement; id: string } | null>(null)
@@ -94,7 +94,7 @@ export function ReceiptDesignerView({ className }: ReceiptDesignerViewProps) {
   }, [])
 
   useEffect(() => {
-    const sync = () => setProfile(loadStoreProfile())
+    const sync = () => setProfile(getStoreContextForPrint())
     window.addEventListener(STORE_PROFILE_CHANGED_EVENT, sync)
     return () => window.removeEventListener(STORE_PROFILE_CHANGED_EVENT, sync)
   }, [])

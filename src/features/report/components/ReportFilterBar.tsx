@@ -19,11 +19,10 @@ const PAYMENT_OPTIONS = [
 ]
 
 const TIER_OPTIONS = [
-  { value: 'tier1', label: 'ราคา 1' },
-  { value: 'tier2', label: 'ราคา 2' },
-  { value: 'tier3', label: 'ราคา 3' },
-  { value: 'tier4', label: 'ราคา 4' },
-  { value: 'tier5', label: 'ราคา 5' },
+  { value: 'tier1', label: 'ปลีก' },
+  { value: 'tier2', label: 'อู่' },
+  { value: 'tier3', label: 'ร้านค้า' },
+  { value: 'tier4', label: 'VIP' },
 ]
 
 function FilterChip({ label, onRemove }: { label: string; onRemove: () => void }) {

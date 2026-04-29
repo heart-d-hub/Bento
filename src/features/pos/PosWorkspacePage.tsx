@@ -134,6 +134,16 @@ type Customer = {
   creditUsed: number
   points: number
   b2bTier: string
+  /** b2c | garage | store | vip */
+  customerType: string
+}
+
+/** tier1=ปลีก(0) tier2=อู่(1) tier3=ร้านค้า(2) tier4=VIP(3) */
+function customerTypeToPriceLevelIndex(ct: string): number {
+  if (ct === 'garage') return 1
+  if (ct === 'store') return 2
+  if (ct === 'vip') return 3
+  return 0
 }
 
 type Product = {
@@ -175,6 +185,7 @@ const WALK_IN_CUSTOMER: Customer = {
   creditUsed: 0,
   points: 0,
   b2bTier: '',
+  customerType: 'b2c',
 }
 
 /** พักบิลธรรมดา vs แจ้งยอดแล้วพักรอให้คนอื่นโอน */
@@ -446,6 +457,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
 
   const [memberTick, setMemberTick] = useState(0)
   const [posMemberRows, setPosMemberRows] = useState<Member[]>(() => loadMembers())
+  const [tierUpgradeNotice, setTierUpgradeNotice] = useState<{ name: string; nextTier: string; icon: string } | null>(null)
 
   useEffect(() => {
     const on = () => setMemberTick((n) => n + 1)
@@ -499,7 +511,8 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
         creditLimit: m.creditLimitBaht ?? 0,
         creditUsed: m.arBalance ?? 0,
         points: m.pointsBalance ?? 0,
-        b2bTier: m.customerType === 'b2b' && m.b2bTier ? m.b2bTier : '',
+        b2bTier: (m.customerType === 'garage' || m.customerType === 'store') && m.b2bTier ? m.b2bTier : '',
+        customerType: m.customerType ?? 'b2c',
       }))
     return [WALK_IN_CUSTOMER, ...members]
   }, [posMemberRows])
@@ -1026,7 +1039,12 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
       const idx = prev.findIndex((l) => l.code === p.code && !l.stlBoltRole)
       if (idx === -1) {
         const cfg = getPosSellConfig(p.id)
-        const picked = pickDefaultPosUnitAndPrice(cfg)
+        const preferredLevelIdx = customerTypeToPriceLevelIndex(customer.customerType)
+        const preferredLevel = cfg.priceLevels.find((l) => l.index === preferredLevelIdx && cfg.getUnitPrice(0, l.index) > 0)
+          ?? cfg.priceLevels.find((l) => cfg.getUnitPrice(0, l.index) > 0)
+        const picked = preferredLevel
+          ? { unit: cfg.units[0] ?? { index: 0, label: 'ชิ้น', baseUnits: 1 }, level: preferredLevel }
+          : pickDefaultPosUnitAndPrice(cfg)
         const selectedListPrice =
           picked != null ? cfg.getListUnitPrice(picked.unit.index, picked.level.index) : p.price
         const nextId = (prev.at(-1)?.id ?? 0) + 1
@@ -1529,6 +1547,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
         total: totals.grandTotal,
         paymentId: checkoutPaymentType,
         lineCount: pricedCart.length,
+        branchId: getStoredBranch()?.id,
         shippingMethod: checkoutShippingMethod !== 'รับเอง' ? checkoutShippingMethod : undefined,
         lines: pricedCart.map((line) => ({
           productId: line.productId ?? '',
@@ -1538,6 +1557,21 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
           unitPrice: line.price,
         })),
       })
+
+      // Tier upgrade notification for B2B customers
+      if (customer.b2bTier) {
+        const B2B_TIER_THRESHOLDS: Partial<Record<string, number>> = { bronze: 30_000, silver: 150_000, gold: 500_000 }
+        const B2B_TIER_NEXT: Partial<Record<string, string>> = { bronze: 'silver', silver: 'gold', gold: 'platinum' }
+        const B2B_TIER_ICONS: Record<string, string> = { bronze: '🥉', silver: '🥈', gold: '🥇', platinum: '💎' }
+        const threshold = B2B_TIER_THRESHOLDS[customer.b2bTier]
+        const nextTier = B2B_TIER_NEXT[customer.b2bTier]
+        if (threshold && nextTier) {
+          const runningTotal = customer.creditUsed + totals.grandTotal
+          if (runningTotal >= threshold) {
+            setTierUpgradeNotice({ name: customer.name, nextTier, icon: B2B_TIER_ICONS[nextTier] ?? '' })
+          }
+        }
+      }
       writeCfdState({
         mode: 'confirmed',
         lines: pricedCart.map((l) => ({
@@ -4072,6 +4106,48 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                   </button>
                 </div>
               </div>
+            </div>
+          </div>,
+          document.body,
+        )}
+
+      {/* Tier upgrade notification toast */}
+      {tierUpgradeNotice &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div className="fixed bottom-6 right-6 z-[500] w-80 overflow-hidden rounded-2xl border border-emerald-200 bg-white shadow-2xl">
+            <div className="flex items-start gap-3 bg-gradient-to-r from-emerald-50 to-teal-50 p-4">
+              <span className="text-3xl leading-none">{tierUpgradeNotice.icon}</span>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-bold text-emerald-800">พร้อมอัพเกรด!</p>
+                <p className="mt-0.5 text-xs text-emerald-700">
+                  <span className="font-semibold">{tierUpgradeNotice.name}</span> ยอดสะสมครบแล้ว
+                  — อัพเป็น <span className="font-bold">{tierUpgradeNotice.nextTier.toUpperCase()}</span> ได้เลย
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTierUpgradeNotice(null)}
+                className="shrink-0 rounded-full p-0.5 text-emerald-500 hover:bg-emerald-100"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+            <div className="flex border-t border-emerald-100">
+              <button
+                type="button"
+                onClick={() => setTierUpgradeNotice(null)}
+                className="flex-1 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50"
+              >
+                ปิด
+              </button>
+              <button
+                type="button"
+                onClick={() => setTierUpgradeNotice(null)}
+                className="flex-1 border-l border-emerald-100 py-2 text-xs font-bold text-emerald-700 hover:bg-emerald-50"
+              >
+                อัพเกรดในหน้าสมาชิก
+              </button>
             </div>
           </div>,
           document.body,

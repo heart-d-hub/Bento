@@ -3,7 +3,7 @@ import { normalizePhone } from '@/features/members/data/phoneUtils'
 import { isTauri } from '@/features/desktop/isTauri'
 import { invoke } from '@tauri-apps/api/core'
 
-const LS_KEY = 'bento.members.store.v1'
+const LS_KEY = 'bento.members.store.v2'
 export const MEMBERS_CHANGED_EVENT = 'bento:members:changed'
 
 function legacyBranchToId(raw: unknown): string {
@@ -41,7 +41,9 @@ function normalizeMember(raw: unknown): Member | null {
     notes: typeof r.notes === 'string' ? r.notes : '',
     memberType: (r.memberType as Member['memberType']) ?? 'general',
     status: (r.status as Member['status']) ?? 'active',
-    customerType: (r.customerType as Member['customerType']) ?? 'b2c',
+    customerType: (['b2c', 'garage', 'store', 'vip'].includes(r.customerType as string)
+      ? r.customerType as Member['customerType']
+      : r.customerType === 'b2b' ? 'garage' : 'b2c'),
     b2bTier: (r.b2bTier as Member['b2bTier']) ?? null,
     branchId: legacyBranchToId(typeof r.branchId === 'string' ? r.branchId : r.defaultBranch),
     pointsBalance: Number(r.pointsBalance) || 0,
@@ -92,9 +94,10 @@ export async function loadMembersAsync(): Promise<Member[]> {
   if (!isTauri()) return loadMembers()
   try {
     const rows = await invoke<Member[]>('members_load')
-    if (!Array.isArray(rows) || rows.length === 0) return [...MOCK_MEMBERS]
+    if (!Array.isArray(rows)) return [...MOCK_MEMBERS]
+    if (rows.length === 0) return []
     const normalized = dedupeMembers(rows.map(normalizeMember).filter((m): m is Member => Boolean(m)))
-    return normalized.length ? normalized : [...MOCK_MEMBERS]
+    return normalized.length ? normalized : []
   } catch (error) {
     console.error('[members] loadMembersAsync failed, fallback to localStorage', error)
     return loadMembers()

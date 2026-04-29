@@ -53,7 +53,7 @@ import {
   type TaxInvoiceFormDesignerState,
   type TaxInvoiceFormRecord,
 } from '@/features/inventory/data/taxInvoiceFormDesignerStore'
-import { loadStoreProfile, STORE_PROFILE_CHANGED_EVENT } from '@/features/settings/data/storeProfileStore'
+import { getStoreContextForPrint, STORE_PROFILE_CHANGED_EVENT } from '@/features/settings/data/storeProfileStore'
 import { clsx } from 'clsx'
 import { ChevronDown, ChevronUp, CopyPlus, Plus, Printer, RotateCcw, Save, Store, Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
@@ -216,7 +216,7 @@ export function TaxInvoiceFormDesignerView({ className }: TaxInvoiceFormDesigner
   const [lineRowColCount, setLineRowColCount] = useState(9)
   const [paperMouseMm, setPaperMouseMm] = useState<{ xMm: number; yMm: number } | null>(null)
   const [draftCopyTargetId, setDraftCopyTargetId] = useState('')
-  const [storeProfile, setStoreProfile] = useState(() => loadStoreProfile())
+  const [storeProfile, setStoreProfile] = useState(() => getStoreContextForPrint())
   const canvasRef = useRef<HTMLDivElement | null>(null)
   const dragRef = useRef<DragRef | null>(null)
   const savedBaselineRef = useRef<TaxInvoiceFormDesignerState | null>(null)
@@ -249,7 +249,7 @@ export function TaxInvoiceFormDesignerView({ className }: TaxInvoiceFormDesigner
   }, [otherFormsForDraftCopy])
 
   useEffect(() => {
-    const sync = () => setStoreProfile(loadStoreProfile())
+    const sync = () => setStoreProfile(getStoreContextForPrint())
     window.addEventListener(STORE_PROFILE_CHANGED_EVENT, sync)
     return () => window.removeEventListener(STORE_PROFILE_CHANGED_EVENT, sync)
   }, [])

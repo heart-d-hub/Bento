@@ -1,4 +1,4 @@
-import { MOCK_STORE_PROFILE } from '@/features/settings/data/mockStoreProfile'
+import { getStoreContextForPrint } from '@/features/settings/data/storeProfileStore'
 import { getDeviceLabel } from '@/features/device/deviceSession'
 import { isTauri } from '@/features/desktop/isTauri'
 import { invoke } from '@tauri-apps/api/core'
@@ -29,7 +29,7 @@ function mountReceiptSurface(opts: {
   document.getElementById(SURFACE_ID)?.remove()
   document.getElementById(STYLE_ID)?.remove()
 
-  const shop = MOCK_STORE_PROFILE.storeName
+  const ctx = getStoreContextForPrint()
   const device = getDeviceLabel()
   const rows = opts.lines
     .map(
@@ -69,7 +69,10 @@ function mountReceiptSurface(opts: {
   const surface = document.createElement('div')
   surface.id = SURFACE_ID
   surface.innerHTML = `
-    <h1>${escapeHtml(shop)}</h1>
+    <h1>${escapeHtml(ctx.storeName)}</h1>
+    ${ctx.address ? `<p class="r-meta" style="margin-bottom:4pt;">${escapeHtml(ctx.address)}</p>` : ''}
+    ${ctx.phone ? `<p class="r-meta" style="margin-bottom:4pt;">โทร ${escapeHtml(ctx.phone)}</p>` : ''}
+    ${ctx.taxId ? `<p class="r-meta" style="margin-bottom:6pt;">เลขภาษี ${escapeHtml(ctx.taxId)}</p>` : ''}
     <p class="r-meta">เลขที่ ${escapeHtml(opts.billNo)}<br/>เครื่อง: ${escapeHtml(device)}<br/>${escapeHtml(new Date().toLocaleString('th-TH'))}</p>
     <table>${rows}</table>
     <p class="r-total">ยอดรวม ${formatMoney(opts.grandTotal)} บาท</p>

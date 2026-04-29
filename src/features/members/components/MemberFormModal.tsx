@@ -1,4 +1,4 @@
-import { MEMBER_PRICE_TIER_LABELS, type MemberItemTierOverride, type MemberPriceTier } from '@/features/members/data/memberTypes'
+import { CUSTOMER_TYPE_LABELS, MEMBER_PRICE_TIER_LABELS, type CustomerType, type MemberItemTierOverride, type MemberPriceTier } from '@/features/members/data/memberTypes'
 import { isValidPhoneLength, normalizePhone } from '@/features/members/data/phoneUtils'
 import {
   MEMBER_STATUS_LABELS,
@@ -225,51 +225,80 @@ export function MemberFormModal({
         <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
           <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-2">
 
-            {/* ── Customer type toggle — top of form ── */}
+            {/* ── Customer type picker — top of form ── */}
             <div className="mb-3 rounded-xl border border-slate-200 bg-slate-50/80 p-2.5">
-              <div className="flex gap-2">
-                {(['b2c', 'b2b'] as const).map((ct) => (
+              {/* 4-way type selector */}
+              <div className="grid grid-cols-4 gap-1.5">
+                {([
+                  { ct: 'b2c' as CustomerType, icon: '👤', label: 'ลูกค้าทั่วไป' },
+                  { ct: 'garage' as CustomerType, icon: '🔧', label: 'อู่ / ช่าง' },
+                  { ct: 'store' as CustomerType, icon: '🏪', label: 'ร้านอะไหล่' },
+                  { ct: 'vip' as CustomerType, icon: '⭐', label: 'VIP' },
+                ]).map(({ ct, icon, label }) => (
                   <button
                     key={ct}
                     type="button"
-                    onClick={() => set({ customerType: ct, b2bTier: ct === 'b2c' ? null : (form.b2bTier ?? 'silver') })}
+                    onClick={() => {
+                      if (ct === 'b2c' || ct === 'vip') {
+                        set({ customerType: ct, b2bTier: null })
+                        return
+                      }
+                      const tier = form.b2bTier ?? 'bronze'
+                      const tierCfg = loadCustomerTiers().b2bTiers.find((t) => t.tier === tier)
+                      set({
+                        customerType: ct,
+                        b2bTier: tier,
+                        creditLimitBaht: tierCfg?.creditLimitBaht ?? form.creditLimitBaht,
+                        creditTermDays: tierCfg?.creditTermDays ?? form.creditTermDays,
+                        payAtMonthEnd: tierCfg?.payAtMonthEnd ?? form.payAtMonthEnd,
+                      })
+                    }}
                     className={clsx(
-                      'flex-1 rounded-lg border py-2 text-xs font-bold transition',
+                      'flex flex-col items-center rounded-lg border py-2 text-xs font-bold transition gap-0.5',
                       form.customerType === ct
                         ? 'border-violet-500 bg-violet-600 text-white shadow-sm'
                         : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50',
                     )}
                   >
-                    {ct === 'b2c' ? '👤 B2C — ลูกค้าทั่วไป' : '🏢 B2B — ลูกค้าธุรกิจ'}
+                    <span className="text-base">{icon}</span>
+                    <span className="text-[10px]">{label}</span>
                   </button>
                 ))}
               </div>
 
-              {/* B2B tier picker */}
-              {form.customerType === 'b2b' && (
+              {/* Tier picker — garage and store only */}
+              {(form.customerType === 'garage' || form.customerType === 'store') && (
                 <div className="mt-2 flex gap-1.5">
                   {B2B_TIER_ORDER.map((tier) => {
                     const cfg = loadCustomerTiers().b2bTiers.find((t) => t.tier === tier)
                     const colors = B2B_TIER_COLORS[tier]
                     const isActive = form.b2bTier === tier
+                    const discountPct = form.customerType === 'garage'
+                      ? cfg?.garageDiscountPercent
+                      : cfg?.storeDiscountPercent
                     return (
                       <button
                         key={tier}
                         type="button"
-                        onClick={() => set({
-                          b2bTier: tier,
-                          defaultPriceTier: cfg?.defaultPriceTier ?? form.defaultPriceTier,
-                          creditLimitBaht: cfg?.creditLimitBaht ?? form.creditLimitBaht,
-                          creditTermDays: cfg?.creditTermDays ?? form.creditTermDays,
-                          payAtMonthEnd: cfg?.payAtMonthEnd ?? form.payAtMonthEnd,
-                        })}
+                        onClick={() => {
+                          set({
+                            b2bTier: tier,
+                            creditLimitBaht: cfg?.creditLimitBaht ?? form.creditLimitBaht,
+                            creditTermDays: cfg?.creditTermDays ?? form.creditTermDays,
+                            payAtMonthEnd: cfg?.payAtMonthEnd ?? form.payAtMonthEnd,
+                          })
+                        }}
                         className={clsx(
                           'flex flex-1 flex-col items-center rounded-lg border py-1.5 text-xs font-bold transition',
                           isActive ? colors.badge + ' shadow-sm' : 'border-slate-200 bg-white text-slate-400 hover:bg-slate-50',
                         )}
                       >
-                        <span>{tier === 'silver' ? '🥈' : tier === 'gold' ? '🥇' : '💎'} {cfg?.label ?? tier}</span>
-                        {cfg && <span className="mt-0.5 text-[9px] font-normal opacity-70">{cfg.defaultPriceTier} · ฿{cfg.creditLimitBaht.toLocaleString('th-TH')}</span>}
+                        <span>{tier === 'bronze' ? '🥉' : tier === 'silver' ? '🥈' : tier === 'gold' ? '🥇' : '💎'} {cfg?.label ?? tier}</span>
+                        {discountPct !== undefined && (
+                          <span className="mt-0.5 text-[9px] font-normal opacity-70">
+                            {discountPct > 0 ? `−${discountPct}%` : 'ราคาฐาน'}
+                          </span>
+                        )}
                       </button>
                     )
                   })}
@@ -382,7 +411,7 @@ export function MemberFormModal({
                   </div>
                 </div>
 
-                {/* B2C: points prominent */}
+                {/* B2C / VIP: points prominent */}
                 {form.customerType === 'b2c' && (
                   <div className="rounded-xl border border-violet-100 bg-violet-50/60 px-3 py-2">
                     <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-violet-500">แต้มสะสม</p>
@@ -397,7 +426,7 @@ export function MemberFormModal({
               {/* ── Right column — staff / credit / pricing ── */}
               <div className="space-y-2">
                 <p className="text-[10px] font-semibold uppercase tracking-wide text-violet-700">
-                  {form.customerType === 'b2b' ? 'ผู้ดูแล · เครดิต · วงเงิน' : 'ผู้ดูแลข้อมูล'}
+                  {(form.customerType === 'garage' || form.customerType === 'store') ? 'ผู้ดูแล · เครดิต · วงเงิน' : 'ผู้ดูแลข้อมูล'}
                 </p>
 
                 {/* Staff selector */}
@@ -420,8 +449,8 @@ export function MemberFormModal({
                   )}
                 </div>
 
-                {/* B2B only: credit + pricing */}
-                {form.customerType === 'b2b' && (
+                {/* garage / store only: credit + pricing */}
+                {(form.customerType === 'garage' || form.customerType === 'store') && (
                   <>
                     <div className="grid grid-cols-2 gap-2">
                       <div>
@@ -468,57 +497,21 @@ export function MemberFormModal({
                       </div>
                     </div>
 
-                    {/* Price tier — read-only from tier, manual override allowed */}
-                    <div>
-                      <p className="text-[10px] font-semibold uppercase tracking-wide text-violet-700">ระดับราคา · ช่วงวันที่มีผล</p>
-                      <div className="mt-1 flex flex-nowrap items-center gap-1 overflow-x-auto pb-0.5 [scrollbar-width:thin]">
-                        <span className="shrink-0 text-[10px] text-slate-500">ระดับ</span>
-                        <div className="flex shrink-0 flex-nowrap gap-0.5">
-                          {(Object.keys(MEMBER_PRICE_TIER_LABELS) as MemberPriceTier[]).map((tier) => (
-                            <label key={tier} className={clsx(
-                              'cursor-pointer shrink-0 whitespace-nowrap rounded border px-1 py-px text-[9px] font-medium leading-tight',
-                              form.defaultPriceTier === tier
-                                ? 'border-slate-800 bg-slate-800 text-white'
-                                : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50',
-                            )}>
-                              <input type="radio" name={tierRadioName} className="sr-only"
-                                checked={form.defaultPriceTier === tier}
-                                onChange={() => setTierDefault(tier)} />
-                              {MEMBER_PRICE_TIER_LABELS[tier]}
-                            </label>
-                          ))}
-                        </div>
-                        <div className="ml-0.5 flex shrink-0 items-center gap-0.5 border-l border-slate-200 pl-1.5">
-                          <span className="text-[10px] text-slate-600">+%</span>
-                          <input type="number" min={0} max={99} step={1} value={form.markupPercent}
-                            onChange={(e) => {
-                              const n = Number(e.target.value)
-                              set({ markupPercent: Number.isNaN(n) ? 0 : Math.min(99, Math.max(0, Math.round(n))) })
-                            }}
-                            className={tinyNumClass} />
-                        </div>
-                      </div>
-                      <div className="mt-1.5 grid grid-cols-2 gap-2">
-                        <div>
-                          <label className={labelClass}>วันที่เริ่มมีผล</label>
-                          <input type="date" value={form.priceStartDate}
-                            onChange={(e) => set({ priceStartDate: e.target.value })}
-                            className={inputClass} />
-                        </div>
-                        <div>
-                          <label className={labelClass}>วันที่สิ้นสุด</label>
-                          <input type="date" value={form.priceEndDate}
-                            onChange={(e) => set({ priceEndDate: e.target.value })}
-                            className={inputClass} />
-                        </div>
-                      </div>
+                    {/* Price basis info */}
+                    <div className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-[11px] text-slate-500">
+                      ราคาฐาน: <span className="font-semibold text-slate-700">{form.customerType === 'garage' ? 'ราคาอู่' : 'ราคาร้านค้า'}</span>
+                      {form.b2bTier && (() => {
+                        const cfg = loadCustomerTiers().b2bTiers.find((t) => t.tier === form.b2bTier)
+                        const pct = form.customerType === 'garage' ? cfg?.garageDiscountPercent : cfg?.storeDiscountPercent
+                        return pct ? <span className="ml-1 text-emerald-600">− {pct}%</span> : null
+                      })()}
                     </div>
                   </>
                 )}
 
                 {/* AR balance — both types */}
                 <div className="grid grid-cols-2 gap-2">
-                  {form.customerType === 'b2b' && (
+                  {form.customerType === 'b2c' && (
                     <div>
                       <span className={labelClass}>แต้มสะสม</span>
                       <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 px-2 py-1.5 text-xs font-medium tabular-nums text-slate-800">
@@ -526,7 +519,7 @@ export function MemberFormModal({
                       </div>
                     </div>
                   )}
-                  <div className={form.customerType === 'b2b' ? '' : 'col-span-2'}>
+                  <div className={form.customerType === 'b2c' ? '' : 'col-span-2'}>
                     <span className={labelClass}>ค้างชำระ</span>
                     <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 px-2 py-1.5 text-xs font-medium tabular-nums text-slate-800">
                       {form.arBalance > 0
@@ -536,8 +529,21 @@ export function MemberFormModal({
                   </div>
                 </div>
                 <p className="text-[10px] leading-snug text-slate-500">
-                  ยอดแต้มและค้างชำระคำนวณจากบิล/ธุรกรรม — ไม่แก้ในฟอร์มนี้
+                  {form.customerType === 'b2c' ? 'ยอดแต้มและค้างชำระ' : 'ยอดค้างชำระ'}คำนวณจากบิล/ธุรกรรม — ไม่แก้ในฟอร์มนี้
                 </p>
+                {/* ↺ Sync credit from tier */}
+                {(form.customerType === 'garage' || form.customerType === 'store') && form.b2bTier && (
+                  <button type="button"
+                    onClick={() => {
+                      const tierCfg = loadCustomerTiers().b2bTiers.find((t) => t.tier === form.b2bTier)
+                      if (!tierCfg) return
+                      set({ creditLimitBaht: tierCfg.creditLimitBaht, creditTermDays: tierCfg.creditTermDays, payAtMonthEnd: tierCfg.payAtMonthEnd })
+                    }}
+                    className="text-[9px] font-semibold text-indigo-500 hover:text-indigo-700 self-start"
+                  >
+                    ↺ ดึงจาก tier
+                  </button>
+                )}
 
                 <div>
                   <label className={labelClass} htmlFor="member-notes">หมายเหตุ</label>

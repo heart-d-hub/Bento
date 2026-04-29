@@ -1,0 +1,4 @@
+-- AlterTable
+ALTER TABLE "Member"
+  ADD COLUMN IF NOT EXISTS "customerType" TEXT NOT NULL DEFAULT 'b2c',
+  ADD COLUMN IF NOT EXISTS "b2bTier"      TEXT;

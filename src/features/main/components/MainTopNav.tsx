@@ -1,9 +1,10 @@
-import { ArrowLeft, ChevronDown, Home, X } from 'lucide-react'
+import { ArrowLeft, ChevronDown, Home, LogOut, X } from 'lucide-react'
 import { clsx } from 'clsx'
 import { useWorkspaceTabs } from '@/features/main/context/WorkspaceTabsContext'
 import { getDeviceLabel, setDeviceLabel } from '@/features/device/deviceSession'
-import { getStaffRole, getStoredBranch, setStoredBranch } from '@/features/auth/authSession'
-import { BRANCHES } from '@/features/auth/branches'
+import { clearCompanyAndBranch, getStaffRole, getStoredBranch, getStoredCompany, setStoredBranch } from '@/features/auth/authSession'
+import { loadBranchesByCompany } from '@/features/auth/branchesStore'
+import { loadCompanyConfig } from '@/features/auth/companiesStore'
 import { useEffect, useRef, useState } from 'react'
 
 type MainTopNavProps = {
@@ -51,6 +52,9 @@ export function MainTopNav({
   const canEditDeviceLabel = getStaffRole() === 'admin'
   const [branchOpen, setBranchOpen] = useState(false)
   const currentBranch = getStoredBranch()
+  const currentCompany = getStoredCompany()
+  const companyCfg = currentCompany ? loadCompanyConfig(currentCompany.id) : null
+  const companyBranches = currentCompany ? loadBranchesByCompany(currentCompany.id).filter((b) => b.isActive) : []
   const branchRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -127,24 +131,24 @@ export function MainTopNav({
                 type="button"
                 onClick={() => setBranchOpen((o) => !o)}
                 className="flex items-center gap-1 rounded border border-slate-200 bg-white px-2 py-0.5 font-semibold text-slate-700 shadow-sm hover:bg-slate-50"
-                title="เปลี่ยนสาขา"
+                title="เปลี่ยนสาขา / กิจการ"
               >
-                <span className="text-slate-400">สาขา:</span>
+                <span className="text-slate-400">{companyCfg?.shortName ?? currentCompany?.shortName ?? '—'} ·</span>
                 {currentBranch?.name ?? '—'}
                 <ChevronDown className={clsx('size-3 transition-transform', branchOpen && 'rotate-180')} />
               </button>
               {branchOpen && (
-                <div className="absolute left-0 top-full z-50 mt-1 min-w-[160px] overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg">
+                <div className="absolute left-0 top-full z-50 mt-1 min-w-[180px] overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg">
                   <p className="border-b border-slate-100 px-3 py-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-400">
-                    เลือกสาขา
+                    {companyCfg?.name ?? currentCompany?.name ?? 'สาขา'}
                   </p>
-                  {BRANCHES.map((b) => (
+                  {companyBranches.map((b) => (
                     <button
                       key={b.id}
                       type="button"
                       onClick={() => {
                         if (b.id === currentBranch?.id) { setBranchOpen(false); return }
-                        setStoredBranch({ id: b.id, name: b.name })
+                        setStoredBranch(b as unknown as import('@/features/auth/branches').BranchInfo)
                         window.location.reload()
                       }}
                       className={clsx(
@@ -158,6 +162,18 @@ export function MainTopNav({
                       {b.name}
                     </button>
                   ))}
+                  <div className="my-1 border-t border-slate-100" />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      clearCompanyAndBranch()
+                      window.location.href = '/company'
+                    }}
+                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-medium text-slate-500 hover:bg-slate-50 hover:text-slate-800"
+                  >
+                    <LogOut className="size-3.5" />
+                    เปลี่ยนกิจการ
+                  </button>
                 </div>
               )}
             </div>

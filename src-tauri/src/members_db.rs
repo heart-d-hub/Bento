@@ -45,12 +45,14 @@ async fn upsert_member(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, m: &Membe
       id, "memberCode", "fullName", address, "taxId", "contactPerson", email, phone, fax, "salesStaffId",
       "creditLimitBaht", "creditTermDays", "creditTermMonths", "payAtMonthEnd", "cutOffDayOfMonth",
       "defaultPriceTier", "markupPercent", "priceStartDate", "priceEndDate", "itemTierOverrides", notes,
-      "memberType", status, "branchId", "pointsBalance", "arBalance", "createdAt", "updatedAt"
+      "memberType", status, "branchId", "pointsBalance", "arBalance", "createdAt", "updatedAt",
+      "customerType", "b2bTier"
     ) VALUES (
       $1, $2, $3, NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''), NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''),
       $11, $12, $13, $14, $15,
       $16::"PriceTier", $17, NULLIF($18, ''), NULLIF($19, ''), $20::jsonb, NULLIF($21, ''),
-      $22, $23::"MemberStatus", NULLIF($24, ''), $25, $26, COALESCE(NULLIF($27, '')::date::timestamp, (now() AT TIME ZONE 'Asia/Bangkok')), (now() AT TIME ZONE 'Asia/Bangkok')
+      $22, $23::"MemberStatus", NULLIF($24, ''), $25, $26, COALESCE(NULLIF($27, '')::date::timestamp, (now() AT TIME ZONE 'Asia/Bangkok')), (now() AT TIME ZONE 'Asia/Bangkok'),
+      $28, NULLIF($29, '')
     )
     ON CONFLICT (id) DO UPDATE SET
       "memberCode" = EXCLUDED."memberCode",
@@ -78,6 +80,8 @@ async fn upsert_member(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, m: &Membe
       "branchId" = EXCLUDED."branchId",
       "pointsBalance" = EXCLUDED."pointsBalance",
       "arBalance" = EXCLUDED."arBalance",
+      "customerType" = EXCLUDED."customerType",
+      "b2bTier" = EXCLUDED."b2bTier",
       "updatedAt" = (now() AT TIME ZONE 'Asia/Bangkok')
     "#,
   )
@@ -108,6 +112,8 @@ async fn upsert_member(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, m: &Membe
   .bind(m.points_balance)
   .bind(m.ar_balance)
   .bind(m.created_at.clone())
+  .bind(m.customer_type.clone())
+  .bind(m.b2b_tier.clone())
   .execute(&mut **tx)
   .await
   .map_err(|e| format!("upsert member {} failed: {e}", m.member_code))?;
@@ -144,6 +150,8 @@ pub struct MemberPayload {
   pub points_balance: f64,
   pub ar_balance: f64,
   pub created_at: String,
+  pub customer_type: String,
+  pub b2b_tier: Option<String>,
 }
 
 async fn get_pool() -> Result<PgPool, String> {
@@ -193,7 +201,9 @@ pub async fn members_load() -> Result<Vec<MemberPayload>, String> {
       COALESCE("branchId", '') as branch_id,
       "pointsBalance" as points_balance,
       "arBalance" as ar_balance,
-      to_char("createdAt", 'YYYY-MM-DD') as created_at
+      to_char("createdAt", 'YYYY-MM-DD') as created_at,
+      COALESCE("customerType", 'b2c') as customer_type,
+      "b2bTier" as b2b_tier
     FROM "Member"
     ORDER BY "createdAt" DESC
     "#

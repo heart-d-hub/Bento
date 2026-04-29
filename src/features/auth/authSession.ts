@@ -1,7 +1,9 @@
 import type { BranchId, BranchInfo } from '@/features/auth/branches'
+import type { CompanyId, CompanyInfo } from '@/features/auth/companies'
 
 const AUTH_KEY = 'bento_auth_session'
 const BRANCH_KEY = 'bento_selected_branch'
+const COMPANY_KEY = 'bento_selected_company'
 const STAFF_ROLE_KEY = 'bento_staff_role'
 const STAFF_USERNAME_KEY = 'bento_staff_username'
 
@@ -16,10 +18,36 @@ function safeParseBranch(raw: string | null): BranchInfo | null {
       typeof o === 'object' &&
       'id' in o &&
       'name' in o &&
+      'companyId' in o &&
       typeof (o as BranchInfo).id === 'string' &&
-      typeof (o as BranchInfo).name === 'string'
+      typeof (o as BranchInfo).name === 'string' &&
+      typeof (o as BranchInfo).companyId === 'string'
     ) {
-      return { id: (o as BranchInfo).id as BranchId, name: (o as BranchInfo).name }
+      return {
+        id: (o as BranchInfo).id as BranchId,
+        companyId: (o as BranchInfo).companyId as CompanyId,
+        name: (o as BranchInfo).name,
+      }
+    }
+  } catch {
+    return null
+  }
+  return null
+}
+
+function safeParseCompany(raw: string | null): CompanyInfo | null {
+  if (!raw) return null
+  try {
+    const o = JSON.parse(raw) as unknown
+    if (
+      o &&
+      typeof o === 'object' &&
+      'id' in o &&
+      'name' in o &&
+      typeof (o as CompanyInfo).id === 'string' &&
+      typeof (o as CompanyInfo).name === 'string'
+    ) {
+      return o as CompanyInfo
     }
   } catch {
     return null
@@ -67,8 +95,36 @@ export function setStoredBranch(branch: BranchInfo | null): void {
   }
 }
 
+export function getStoredCompany(): CompanyInfo | null {
+  try {
+    return safeParseCompany(localStorage.getItem(COMPANY_KEY))
+  } catch {
+    return null
+  }
+}
+
+export function setStoredCompany(company: CompanyInfo | null): void {
+  try {
+    if (company) {
+      localStorage.setItem(COMPANY_KEY, JSON.stringify(company))
+    } else {
+      localStorage.removeItem(COMPANY_KEY)
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+/** ใช้เมื่อต้องการกลับหน้าเลือกกิจการ — ไม่ logout */
+export function clearCompanyAndBranch(): void {
+  setStoredCompany(null)
+  setStoredBranch(null)
+}
+
+/** ออกจากระบบ — ล้างทุกอย่าง */
 export function clearSessionAndBranch(): void {
   setLoggedIn(false)
+  setStoredCompany(null)
   setStoredBranch(null)
 }
 

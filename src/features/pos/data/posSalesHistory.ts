@@ -21,6 +21,8 @@ export type PosSaleRecord = {
   voidedAt?: string | null
   /** วิธีจัดส่ง เช่น รับเอง, ส่งเอง, Kerry Express */
   shippingMethod?: string
+  /** สาขาที่ออกบิล */
+  branchId?: string
 }
 
 /** แจ้ง UI อื่น (เช่น แดชบอร์ด) ให้รีเฟรชหลังบันทึกการขาย */
