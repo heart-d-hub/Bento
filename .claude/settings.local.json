@@ -65,7 +65,8 @@
       "Bash(cp \"/c/Users/อังอะไหล่/Downloads/กรองซากุระ.xlsx\" /tmp/sakura.xlsx)",
       "Read(//tmp/**)",
       "Bash(cygpath -w /tmp/node_modules)",
-      "Bash(git check-ignore *)"
+      "Bash(git check-ignore *)",
+      "Bash(echo \"Exit: $?\")"
     ]
   },
   "model": "claude-opus-4-7"

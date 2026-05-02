@@ -54,7 +54,6 @@ import {
   ChevronRight,
   ChevronUp,
   ClipboardCopy,
-  Download,
   ExternalLink,
   FlipHorizontal2,
   LayoutGrid,
@@ -70,7 +69,7 @@ import {
   Store,
   Trash2,
 } from 'lucide-react'
-import { runSakuraImport100 } from '@/features/inventory/data/sakuraImportRunner'
+import { runBremboImport } from '@/features/inventory/data/bremboImportRunner'
 import { SearchableFilterSelect } from '@/features/inventory/components/SearchableFilterSelect'
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
@@ -1605,7 +1604,9 @@ export function ProductDataFileView() {
   }
 
   const filterOptions = useMemo(() => {
-    const base = filterInStoreOnly ? activeProducts.filter((p) => p.inStoreCatalog !== false) : activeProducts
+    // Scope filter options to the currently-selected category (so clicking
+    // «เบรก» only shows brands/models that actually have brake pads, not all)
+    const base = filterInStoreOnly ? fromNav.filter((p) => p.inStoreCatalog !== false) : fromNav
     const brands = [...new Set(base.map((p) => p.brand))].sort((a, b) => a.localeCompare(b, 'th'))
     const { carBrands, models, engines, driveTypes, years } = collectInventoryCarFilterOptions(base, {
       carBrand: filterCarBrand,
@@ -1615,7 +1616,7 @@ export function ProductDataFileView() {
       filterAll: FILTER_ALL,
     })
     return { brands, carBrands, models, engines, driveTypes, years }
-  }, [activeProducts, filterInStoreOnly, filterCarBrand, filterCarModel, filterEngine, filterDrive])
+  }, [fromNav, filterInStoreOnly, filterCarBrand, filterCarModel, filterEngine, filterDrive])
 
   const hasOrphans = useMemo(() => {
     const names = new Set(categoryTree.map((m) => norm(m.name)))
@@ -2202,14 +2203,14 @@ export function ProductDataFileView() {
             <>
               <button
                 type="button"
-                title="ลบสินค้า Sakura เดิมแล้วนำเข้าทั้งหมด 1,305 ตัวจาก Excel กรองซากุระ (เป็นสินค้าอ้างอิง — ไม่แสดงใน POS)"
+                title="นำเข้าผ้าเบรก Brembo (322 ตัว) — ลบเฉพาะ brand=Brembo เดิม ไม่กระทบยี่ห้ออื่น"
                 onClick={async () => {
                   const ok = window.confirm(
-                    'นำเข้าสินค้า Sakura ทั้งหมด 1,305 ตัว (เป็นสินค้าอ้างอิง)?\n\nระบบจะลบสินค้ายี่ห้อ Sakura ทั้งหมดที่มีอยู่ก่อน แล้วเพิ่มชุดใหม่จากแฟ้ม Excel กรองซากุระ\n• inStoreCatalog = false → ไม่แสดงใน POS / ค้นหาหน้าร้าน\n• หมวด «ไส้กรอง» และ subcategory ทั้ง 14 ประเภทจะถูกสร้างให้อัตโนมัติ\n• ไฟล์ข้อมูล ~4MB — โหลดครั้งแรกอาจใช้เวลา 1-2 วินาที',
+                    'นำเข้าผ้าเบรก Brembo 322 SKU?\n\n• ลบเฉพาะสินค้า brand=Brembo เดิม (ถ้ามี)\n• สินค้ายี่ห้ออื่น (Sakura ฯลฯ) ไม่ถูกแตะต้อง\n• เพิ่มหมวดหลัก «เบรก» และ subcategory «ผ้าเบรก» ให้ถ้ายังไม่มี',
                   )
                   if (!ok) return
                   try {
-                    const r = await runSakuraImport100()
+                    const r = await runBremboImport()
                     const subMsg = r.newSubCategories.length
                       ? `\nเพิ่ม subcategory ใหม่: ${r.newSubCategories.join(', ')}`
                       : ''
@@ -2217,14 +2218,13 @@ export function ProductDataFileView() {
                       `นำเข้าเสร็จ\n• ลบของเดิม ${r.removed} ตัว\n• เพิ่มใหม่ ${r.added} ตัว\n• สินค้าทั้งหมดในระบบ ${r.total} ตัว${subMsg}`,
                     )
                   } catch (err) {
-                    console.error('[sakura-import] failed', err)
+                    console.error('[brembo-import] failed', err)
                     window.alert('นำเข้าไม่สำเร็จ — ดู console')
                   }
                 }}
-                className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg border border-violet-300 bg-violet-50 px-3 py-2 text-sm font-medium text-violet-900 shadow-sm transition hover:bg-violet-100"
+                className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-900 shadow-sm transition hover:bg-amber-100"
               >
-                <Download className="size-3.5" strokeWidth={2} />
-                นำเข้า Sakura ทั้งหมด
+                นำเข้า Brembo
               </button>
               <button
                 type="button"
@@ -2307,13 +2307,13 @@ export function ProductDataFileView() {
             />
           </label>
           <label className="block min-w-0">
-            <span className="mb-0.5 block text-[11px] text-slate-500">ขับเคลื่อน</span>
+            <span className="mb-0.5 block text-[11px] text-slate-500">ขับเคลื่อน / ล้อ</span>
             <SearchableFilterSelect
               value={filterDrive}
               options={filterOptions.driveTypes}
               allValue={FILTER_ALL}
               onChange={(v) => { setFilterDrive(v); setFilterYear(FILTER_ALL) }}
-              ariaLabel="ขับเคลื่อน"
+              ariaLabel="ขับเคลื่อน / ล้อ"
             />
           </label>
           <label className="block min-w-0">

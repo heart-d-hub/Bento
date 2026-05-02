@@ -447,7 +447,7 @@ export function InventoryTable() {
           </select>
         </label>
         <label className="min-w-[7rem] flex-1">
-          <span className="mb-0.5 block text-xs text-slate-500">ขับเคลื่อน</span>
+          <span className="mb-0.5 block text-xs text-slate-500">ขับเคลื่อน / ล้อ</span>
           <select
             className="w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-sm"
             value={filterDrive}

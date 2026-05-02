@@ -98,6 +98,8 @@ export type VehicleFitmentRef = {
   hp?: number
   /** รหัสตัวถัง / chassis code — ทั้ง chassis variant (FM2P, FN527M, NQR) และ generation code (JZS155, AE100) */
   chassisCode?: string
+  /** รุ่นย่อย / trim / grade เช่น "e:HEV", "Cedia", "Vigo", "Crysta", "Pro" — แยกจาก modelName */
+  trim?: string
   /** ขนาดเครื่อง / displacement เช่น "1.5", "2.5", "3.0" — string เพราะรองรับ multi-value */
   engineSize?: string
   /** เฉพาะผ้าเบรก/ดิสก์ — ไม่ระบุ = ชิ้นทั่วไปที่ไม่แยกหน้า-หลัง */

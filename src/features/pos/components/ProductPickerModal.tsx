@@ -128,6 +128,9 @@ export function ProductPickerModal({
   const [drive, setDrive] = useState(FILTER_ALL)
   const [year, setYear] = useState(FILTER_ALL)
   const [partBrand, setPartBrand] = useState(FILTER_ALL)
+  const [hp, setHp] = useState(FILTER_ALL)
+  const [euro, setEuro] = useState(FILTER_ALL)
+  const [trim, setTrim] = useState(FILTER_ALL)
   /** Phase 5: chassis-code search — typed by mechanic (e.g., "FM2P", "JZS155") */
   const [chassisCodeQuery, setChassisCodeQuery] = useState('')
   const [selectedProduct, setSelectedProduct] = useState<PickerProduct | null>(null)
@@ -162,6 +165,9 @@ export function ProductPickerModal({
     setDrive(FILTER_ALL)
     setYear(FILTER_ALL)
     setPartBrand(FILTER_ALL)
+    setHp(FILTER_ALL)
+    setEuro(FILTER_ALL)
+    setTrim(FILTER_ALL)
     setChassisCodeQuery('')
   }
 
@@ -268,13 +274,16 @@ export function ProductPickerModal({
     const list: ProductMasterDetail[] = []
     const seen = new Set<string>()
     for (const p of products) {
+      // Scope filter options to the currently-selected category — so
+      // brand/make/model dropdowns only show what's available in that category
+      if (category && p.category !== category) continue
       if (seen.has(p.code)) continue
       seen.add(p.code)
       const master = getProductMasterBySku(p.code)
       if (master) list.push(master)
     }
     return list
-  }, [products])
+  }, [products, category])
 
   const carFilterOptions = useMemo(() => {
     const base = collectInventoryCarFilterOptions(masterProducts, {
@@ -290,6 +299,7 @@ export function ProductPickerModal({
     const models = new Set(base.models)
     const years = new Set(base.years)
     for (const p of products) {
+      if (category && p.category !== category) continue
       const hasMaster = getProductMasterBySku(p.code) != null
       if (hasMaster) continue
       if (p.carBrand && p.carBrand !== '—') brands.add(p.carBrand)
@@ -311,13 +321,40 @@ export function ProductPickerModal({
       models: [...models].sort((a, b) => a.localeCompare(b, 'th')),
       years: [...years].sort((a, b) => a.localeCompare(b, 'th')),
     }
-  }, [masterProducts, products, make, model, engine, drive])
+  }, [masterProducts, products, category, make, model, engine, drive])
 
   const makeOptions = useMemo(() => carFilterOptions.carBrands, [carFilterOptions])
   const modelOptions = useMemo(() => carFilterOptions.models, [carFilterOptions])
   const engineOptions = useMemo(() => carFilterOptions.engines, [carFilterOptions])
   const driveOptions = useMemo(() => carFilterOptions.driveTypes, [carFilterOptions])
   const yearOptions = useMemo(() => carFilterOptions.years, [carFilterOptions])
+  const hpOptions = useMemo(() => {
+    const set = new Set<string>()
+    for (const p of masterProducts) {
+      for (const f of p.vehicleFitments ?? []) {
+        if (f?.hp != null && f.hp > 0) set.add(String(f.hp))
+      }
+    }
+    return [...set].sort((a, b) => Number(a) - Number(b))
+  }, [masterProducts])
+  const euroOptions = useMemo(() => {
+    const set = new Set<string>()
+    for (const p of masterProducts) {
+      for (const f of p.vehicleFitments ?? []) {
+        if (f?.euroStandard?.trim()) set.add(f.euroStandard.trim())
+      }
+    }
+    return [...set].sort()
+  }, [masterProducts])
+  const trimOptions = useMemo(() => {
+    const set = new Set<string>()
+    for (const p of masterProducts) {
+      for (const f of p.vehicleFitments ?? []) {
+        if (f?.trim?.trim()) set.add(f.trim.trim())
+      }
+    }
+    return [...set].sort((a, b) => a.localeCompare(b, 'th'))
+  }, [masterProducts])
   const partBrandOptions = useMemo(() => {
     const seen = new Set<string>()
     for (const p of products) if (p.brand) seen.add(p.brand)
@@ -331,6 +368,9 @@ export function ProductPickerModal({
     + (drive !== FILTER_ALL ? 1 : 0)
     + (year !== FILTER_ALL ? 1 : 0)
     + (partBrand !== FILTER_ALL ? 1 : 0)
+    + (hp !== FILTER_ALL ? 1 : 0)
+    + (euro !== FILTER_ALL ? 1 : 0)
+    + (trim !== FILTER_ALL ? 1 : 0)
     + (chassisCodeQuery.trim().length > 0 ? 1 : 0)
 
   /** Phase 3C — infer รถที่ลูกค้ามักซื้ออะไหล่ จาก customerSkuMap */
@@ -423,7 +463,10 @@ export function ProductPickerModal({
     const hasText = tokens.length > 0
     const chassisQ = chassisCodeQuery.trim().toUpperCase()
     const hasChassisFilter = chassisQ.length > 0
-    const hasAnyVehicleFilter = hasMake || hasModel || hasEngine || hasDrive || hasYear
+    const hasHp = hp !== FILTER_ALL
+    const hasEuro = euro !== FILTER_ALL
+    const hasTrim = trim !== FILTER_ALL
+    const hasAnyVehicleFilter = hasMake || hasModel || hasEngine || hasDrive || hasYear || hasHp || hasEuro || hasTrim
     if (!category && !hasAnyVehicleFilter && !hasPartBrand && !hasText && !hasChassisFilter) {
       // ใน tab !== 'all' ให้รวมทั้งหมดก่อน filter ตาม tab — กันเสียโอกาสเพราะ slice 150
       return tab === 'all' ? products.slice(0, 150) : applyTabFilter(products)
@@ -455,6 +498,17 @@ export function ProductPickerModal({
           if (engine !== FILTER_ALL) return false
           if (drive !== FILTER_ALL) return false
         }
+      }
+      if (hasHp || hasEuro || hasTrim) {
+        const master = getProductMasterBySku(p.code)
+        const fits = master?.vehicleFitments ?? []
+        const matches = fits.some((f) => {
+          if (hasHp && String(f.hp ?? '') !== hp) return false
+          if (hasEuro && (f.euroStandard ?? '') !== euro) return false
+          if (hasTrim && (f.trim ?? '') !== trim) return false
+          return true
+        })
+        if (!matches) return false
       }
       if (hasChassisFilter) {
         const master = getProductMasterBySku(p.code)
@@ -500,7 +554,7 @@ export function ProductPickerModal({
       .sort((a, b) => b[1] - a[1])
       .map(([p]) => p)
     return tab === 'all' ? ranked.slice(0, 200) : applyTabFilter(ranked)
-  }, [products, productHaystackMap, deferredSearchQuery, category, make, model, engine, drive, year, partBrand, chassisCodeQuery, tab, todaySkuMap, customerSkuMap])
+  }, [products, productHaystackMap, deferredSearchQuery, category, make, model, engine, drive, year, partBrand, hp, euro, trim, chassisCodeQuery, tab, todaySkuMap, customerSkuMap])
 
   // Auto-select first product เมื่อ list เปลี่ยน
   useEffect(() => {
@@ -814,8 +868,8 @@ export function ProductPickerModal({
                 options={driveOptions}
                 allValue={FILTER_ALL}
                 onChange={(v) => { setDrive(v); setYear(FILTER_ALL) }}
-                ariaLabel="ขับเคลื่อน"
-                placeholder="ขับเคลื่อน"
+                ariaLabel="ขับเคลื่อน / ล้อ"
+                placeholder="ขับเคลื่อน / ล้อ"
               />
               <SearchableFilterSelect
                 value={year}
@@ -825,14 +879,36 @@ export function ProductPickerModal({
                 ariaLabel="รุ่นปี"
                 placeholder="รุ่นปี"
               />
-              <SearchableFilterSelect
-                value={partBrand}
-                options={partBrandOptions}
-                allValue={FILTER_ALL}
-                onChange={setPartBrand}
-                ariaLabel="แบรนด์อะไหล่"
-                placeholder="แบรนด์อะไหล่"
-              />
+              {hpOptions.length > 0 && (
+                <SearchableFilterSelect
+                  value={hp}
+                  options={hpOptions}
+                  allValue={FILTER_ALL}
+                  onChange={setHp}
+                  ariaLabel="HP"
+                  placeholder="HP"
+                />
+              )}
+              {euroOptions.length > 0 && (
+                <SearchableFilterSelect
+                  value={euro}
+                  options={euroOptions}
+                  allValue={FILTER_ALL}
+                  onChange={setEuro}
+                  ariaLabel="Euro"
+                  placeholder="Euro"
+                />
+              )}
+              {trimOptions.length > 0 && (
+                <SearchableFilterSelect
+                  value={trim}
+                  options={trimOptions}
+                  allValue={FILTER_ALL}
+                  onChange={setTrim}
+                  ariaLabel="รุ่นย่อย / Trim"
+                  placeholder="รุ่นย่อย / Trim"
+                />
+              )}
               <div className="relative">
                 <input
                   type="text"
@@ -861,13 +937,22 @@ export function ProductPickerModal({
                     Presets
                   </span>
                   {activeVehicleFilterCount > 0 && (
-                    <button
-                      type="button"
-                      onClick={handleSavePreset}
-                      className="rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-black text-blue-700 hover:bg-blue-100 dark:border-cyan-700/40 dark:bg-cyan-950/40 dark:text-cyan-300 dark:hover:bg-cyan-900/40"
-                    >
-                      + บันทึก preset ปัจจุบัน
-                    </button>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={resetFilters}
+                        className="rounded-full border border-rose-200 bg-rose-50 px-2 py-0.5 text-[10px] font-black text-rose-700 hover:bg-rose-100 dark:border-rose-700/40 dark:bg-rose-950/40 dark:text-rose-300 dark:hover:bg-rose-900/40"
+                      >
+                        ล้างตัวกรอง ({activeVehicleFilterCount})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleSavePreset}
+                        className="rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-black text-blue-700 hover:bg-blue-100 dark:border-cyan-700/40 dark:bg-cyan-950/40 dark:text-cyan-300 dark:hover:bg-cyan-900/40"
+                      >
+                        + บันทึก preset ปัจจุบัน
+                      </button>
+                    </div>
                   )}
                 </div>
                 {presets.length === 0 ? (

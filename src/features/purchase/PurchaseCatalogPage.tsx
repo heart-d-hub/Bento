@@ -2867,7 +2867,7 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
                 : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 focus:border-sky-300',
             )}
           >
-            <option value="ทั้งหมด">ขับเคลื่อน</option>
+            <option value="ทั้งหมด">ขับเคลื่อน / ล้อ</option>
             {carFilterOptions.driveTypes.map((d) => (
               <option key={d} value={d}>{d}</option>
             ))}

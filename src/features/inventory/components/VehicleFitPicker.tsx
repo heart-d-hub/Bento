@@ -25,6 +25,8 @@ export type VehicleFitRow = {
   vehicleType?: string
   engineSeries?: string
   chassisCode?: string
+  /** รุ่นย่อย / trim — เช่น "e:HEV", "Cedia", "Vigo" */
+  trim?: string
   wheels?: string
   hp?: number
   euroStandard?: string
@@ -194,9 +196,14 @@ export function VehicleFitPicker({
   const [modelHighlightedIndex, setModelHighlightedIndex] = useState(-1)
 
   const [manualEngineText, setManualEngineText] = useState('')
+  const [manualEngineCode, setManualEngineCode] = useState('')
   const [manualDriveType, setManualDriveType] = useState('')
   const [manualYearFrom, setManualYearFrom] = useState('')
   const [manualYearTo, setManualYearTo] = useState('')
+  const [manualChassisCode, setManualChassisCode] = useState('')
+  const [manualTrim, setManualTrim] = useState('')
+  const [manualHp, setManualHp] = useState('')
+  const [manualEuro, setManualEuro] = useState('')
   const [editingRowId, setEditingRowId] = useState<string | null>(null)
 
   const [showVin, setShowVin] = useState(false)
@@ -301,10 +308,7 @@ export function VehicleFitPicker({
   const isDuplicate = useMemo(() => {
     if (!canAddResolved) return false
     const bp = brakePos || ''
-    const engineCodeMatch = manualEngineTextTrim.match(/\[([^\]]*)\]\s*$/)
-    const engineText = engineCodeMatch
-      ? manualEngineTextTrim.slice(0, manualEngineTextTrim.lastIndexOf('[')).trim()
-      : manualEngineTextTrim
+    const engineText = manualEngineTextTrim
     const driveType = normalizeManualText(manualDriveType)
     const yearRangeLabel = buildYearRangeLabel(parsedYearFrom, parsedYearTo)
     const yearRangeKey = yearRangeLabel || 'no-year'
@@ -361,9 +365,14 @@ export function VehicleFitPicker({
   function resetFormState() {
     setBrakePos('')
     setManualEngineText('')
+    setManualEngineCode('')
     setManualDriveType('')
     setManualYearFrom('')
     setManualYearTo('')
+    setManualChassisCode('')
+    setManualTrim('')
+    setManualHp('')
+    setManualEuro('')
     setEditingRowId(null)
   }
 
@@ -437,10 +446,15 @@ export function VehicleFitPicker({
     const last = rows[rows.length - 1]
     if (!last) return
     const engineRaw = last.engineText ?? extractEngineTextFromLabel(last.engineLabel ?? '')
-    setManualEngineText(last.engineCode ? `${engineRaw} [${last.engineCode}]` : engineRaw)
-    setManualDriveType(last.driveType ?? '')
+    setManualEngineText(engineRaw)
+    setManualEngineCode(last.engineCode ?? '')
+    setManualDriveType(last.driveType ?? last.wheels ?? '')
     setManualYearFrom(last.yearFrom != null ? String(last.yearFrom) : '')
     setManualYearTo(last.yearTo != null ? String(last.yearTo) : '')
+    setManualChassisCode(last.chassisCode ?? '')
+    setManualTrim(last.trim ?? '')
+    setManualHp(last.hp != null ? String(last.hp) : '')
+    setManualEuro(last.euroStandard ?? '')
   }
 
   function beginEdit(row: VehicleFitRow) {
@@ -457,14 +471,20 @@ export function VehicleFitPicker({
     setBrakePos((row.brakePosition ?? '') as '' | 'front' | 'rear')
     const engineRaw = row.engineText ?? extractEngineTextFromLabel(row.engineLabel ?? '')
     const cleanEngine = extractEngineTextFromLabel(engineRaw)
-    setManualEngineText(row.engineCode ? `${cleanEngine} [${row.engineCode}]` : cleanEngine)
+    setManualEngineText(cleanEngine)
+    setManualEngineCode(row.engineCode ?? '')
     setManualDriveType(
       row.driveType ??
+        row.wheels ??
         extractDriveTypeFromLabel(row.engineLabel ?? '') ??
         extractDriveTypeFromLabel(row.engineText ?? ''),
     )
     setManualYearFrom(yearResolved.yearFrom != null ? String(yearResolved.yearFrom) : '')
     setManualYearTo(yearResolved.yearTo != null ? String(yearResolved.yearTo) : '')
+    setManualChassisCode(row.chassisCode ?? '')
+    setManualTrim(row.trim ?? '')
+    setManualHp(row.hp != null ? String(row.hp) : '')
+    setManualEuro(row.euroStandard ?? '')
     window.setTimeout(() => formTopRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 30)
   }
 
@@ -502,11 +522,8 @@ export function VehicleFitPicker({
   function handleAddOrUpdate() {
     if (!canAddResolved || isDuplicate) return
     const editingRow = editingRowId ? rows.find((r) => r.id === editingRowId) : undefined
-    const engineCodeMatch = manualEngineTextTrim.match(/\[([^\]]*)\]\s*$/)
-    const engineCode = engineCodeMatch ? engineCodeMatch[1].trim() : ''
-    const engineText = engineCodeMatch
-      ? manualEngineTextTrim.slice(0, manualEngineTextTrim.lastIndexOf('[')).trim()
-      : manualEngineTextTrim
+    const engineText = manualEngineTextTrim
+    const engineCode = manualEngineCode.trim()
     const driveType = normalizeManualText(manualDriveType)
     const yearRangeLabel = buildYearRangeLabel(parsedYearFrom, parsedYearTo)
     const resolvedEngineLabel = (() => {
@@ -529,6 +546,10 @@ export function VehicleFitPicker({
       manualEngineTextTrim.length === 0 &&
       manualYearFrom.trim().length === 0 &&
       manualYearTo.trim().length === 0
+    const manualChassisTrim = manualChassisCode.trim()
+    const manualTrimVal = manualTrim.trim()
+    const manualHpNum = manualHp.trim().length > 0 ? Number(manualHp.trim()) : NaN
+    const manualEuroTrim = manualEuro.trim()
     const rowPayload: VehicleFitRow = {
       id: editingRowId ?? newRowId(),
       categoryId: catId,
@@ -554,6 +575,13 @@ export function VehicleFitPicker({
           }),
       ...(driveType ? { driveType } : {}),
       ...(engineCode ? { engineCode } : {}),
+      ...(manualChassisTrim ? { chassisCode: manualChassisTrim } : {}),
+      ...(manualTrimVal ? { trim: manualTrimVal } : {}),
+      ...(Number.isFinite(manualHpNum) && manualHpNum > 0 ? { hp: manualHpNum } : {}),
+      ...(manualEuroTrim ? { euroStandard: manualEuroTrim } : {}),
+      ...(editingRow?.vehicleType ? { vehicleType: editingRow.vehicleType } : {}),
+      ...(editingRow?.engineSeries ? { engineSeries: editingRow.engineSeries } : {}),
+      ...(editingRow?.engineSize ? { engineSize: editingRow.engineSize } : {}),
       brakePosition: brakePos || undefined,
     }
     if (editingRowId) onUpdate(editingRowId, rowPayload)
@@ -716,16 +744,16 @@ export function VehicleFitPicker({
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           <div>
             <div className="mb-1 flex items-center justify-between">
-              <p className="text-[11px] font-semibold text-slate-500">เครื่องยนต์</p>
+              <p className="text-[11px] font-semibold text-slate-500">ความจุเครื่อง</p>
               {rows.length > 0 && !editingRowId && (
                 <button type="button" onClick={copyLastRowSpec} className="text-[10px] text-sky-600 hover:underline">↺ ล่าสุด</button>
               )}
             </div>
-            <input className={inputCls} value={manualEngineText} onChange={(e) => setManualEngineText(e.target.value)} placeholder="เช่น 2.0, 1KD" />
+            <input className={inputCls} value={manualEngineText} onChange={(e) => setManualEngineText(e.target.value)} placeholder="เช่น 2.0, 2.5" />
           </div>
           <div>
-            <p className="mb-1 text-[11px] font-semibold text-slate-500">ขับเคลื่อน</p>
-            <input className={inputCls} value={manualDriveType} onChange={(e) => setManualDriveType(e.target.value.toUpperCase())} placeholder="4WD, AWD" />
+            <p className="mb-1 text-[11px] font-semibold text-slate-500">รหัสเครื่อง</p>
+            <input className={inputCls} value={manualEngineCode} onChange={(e) => setManualEngineCode(e.target.value.toUpperCase())} placeholder="เช่น 1KD-FTV, 2GR-FE" />
           </div>
           <div>
             <p className="mb-1 text-[11px] font-semibold text-slate-500">ปีเริ่มต้น</p>
@@ -736,6 +764,30 @@ export function VehicleFitPicker({
             <p className="mb-1 text-[11px] font-semibold text-slate-500">ปีสิ้นสุด</p>
             <input className={inputCls} inputMode="numeric" value={manualYearTo} onChange={(e) => setManualYearTo(e.target.value)} placeholder="เช่น 2015" />
             {hasYearToInput && parsedYearTo === undefined && <p className="mt-0.5 text-[10px] text-rose-600">ปีไม่ถูกต้อง</p>}
+          </div>
+        </div>
+
+        {/* ── Chassis / Trim / Drive·Wheels / HP / Euro row ── */}
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+          <div>
+            <p className="mb-1 text-[11px] font-semibold text-slate-500">รหัสตัวถัง</p>
+            <input className={inputCls} value={manualChassisCode} onChange={(e) => setManualChassisCode(e.target.value.toUpperCase())} placeholder="เช่น GUN125, AE86" />
+          </div>
+          <div>
+            <p className="mb-1 text-[11px] font-semibold text-slate-500">รุ่นย่อย / Trim</p>
+            <input className={inputCls} value={manualTrim} onChange={(e) => setManualTrim(e.target.value)} placeholder="เช่น e:HEV, Vigo, Cedia" />
+          </div>
+          <div>
+            <p className="mb-1 text-[11px] font-semibold text-slate-500">ขับเคลื่อน / ล้อ</p>
+            <input className={inputCls} value={manualDriveType} onChange={(e) => setManualDriveType(e.target.value.toUpperCase())} placeholder="เช่น 4WD, 10WD" />
+          </div>
+          <div>
+            <p className="mb-1 text-[11px] font-semibold text-slate-500">แรงม้า (HP)</p>
+            <input className={inputCls} inputMode="numeric" value={manualHp} onChange={(e) => setManualHp(e.target.value.replace(/[^\d]/g, ''))} placeholder="เช่น 215, 360" />
+          </div>
+          <div>
+            <p className="mb-1 text-[11px] font-semibold text-slate-500">มาตรฐาน Euro</p>
+            <input className={inputCls} value={manualEuro} onChange={(e) => setManualEuro(e.target.value)} placeholder="เช่น Euro 3, Euro 5" />
           </div>
         </div>
 
@@ -924,7 +976,7 @@ export function VehicleFitPicker({
                           )}
                         >
                           <span className="flex min-w-0 flex-1 flex-wrap items-center gap-x-1.5 gap-y-0.5">
-                            {(parts.length > 0 || r.chassisCode || r.hp || r.wheels || r.euroStandard || r.engineSize) ? (
+                            {(parts.length > 0 || r.chassisCode || r.trim || r.hp || r.wheels || r.euroStandard || r.engineSize) ? (
                               <>
                                 {/* Chassis code (or fallback to engineDisplay) */}
                                 {r.chassisCode ? (
@@ -941,6 +993,10 @@ export function VehicleFitPicker({
                                 ) : null}
                                 {r.euroStandard ? (
                                   <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">{r.euroStandard}</span>
+                                ) : null}
+                                {/* Trim / submodel */}
+                                {r.trim ? (
+                                  <span className="rounded bg-pink-50 px-1.5 py-0.5 text-[10px] font-semibold text-pink-700">{r.trim}</span>
                                 ) : null}
                                 {/* Wheels */}
                                 {r.wheels ? (
