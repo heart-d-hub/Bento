@@ -618,7 +618,7 @@ function CrossBranchRow({ row }: { row: CrossBranchStockRow }) {
   )
 }
 
-type CatalogViewMode = 'list' | 'grid-5' | 'flip-card'
+type CatalogViewMode = 'list' | 'flip-card'
 
 function ProductThumb({ sku, className }: { sku: string; className?: string }) {
   return (
@@ -763,53 +763,219 @@ function ProductCardMeta({
   )
 }
 
-const ProductMasterGridCard = memo(function ProductMasterGridCard({
+const ProductMasterFlipCard = memo(function ProductMasterFlipCard({
   product,
   onOpenProduct,
   onSelectProduct,
   selected,
   onContextMenuProduct,
-  dimensionSearchActive,
   preferredFitment,
   matchingFitments,
+  bulkSelected,
+  onToggleBulk,
 }: {
   product: ProductMasterDetail
   onOpenProduct: (id: string) => void
   onSelectProduct: (id: string) => void
   selected: boolean
   onContextMenuProduct: (e: React.MouseEvent, id: string) => void
-  dimensionSearchActive?: boolean
   preferredFitment?: VehicleFitmentRef
   matchingFitments?: VehicleFitmentRef[]
+  bulkSelected: boolean
+  onToggleBulk: (id: string) => void
 }) {
+  const [flipped, setFlipped] = useState(false)
+
+  // Group fitments by car brand for the back face
+  const fitGroups = useMemo(() => {
+    const fits = matchingFitments ?? product.vehicleFitments ?? []
+    const order: string[] = []
+    const map = new Map<string, Set<string>>()
+    const seenPair = new Set<string>()
+    for (const f of fits) {
+      if (!f?.brandName || !f?.modelName) continue
+      const pairKey = `${f.brandName}|${f.modelName}`
+      if (seenPair.has(pairKey)) continue
+      seenPair.add(pairKey)
+      if (!map.has(f.brandName)) {
+        map.set(f.brandName, new Set())
+        order.push(f.brandName)
+      }
+      map.get(f.brandName)!.add(f.modelName)
+    }
+    return order.map((brand) => ({ brand, models: [...map.get(brand)!] }))
+  }, [product.vehicleFitments, matchingFitments])
+
+  const oemTags = (product.oemTags ?? []).filter((t) => t && t.trim().length > 0)
+  const stock = totalCrossBranchStock(product)
+  const dimStr = product.physicalDimensions ? formatDimsCompact(product.physicalDimensions) : ''
+  const loc = (product.storageLocation ?? '').trim()
+  const carSummary = preferredFitment
+    ? [
+        preferredFitment.brandName,
+        preferredFitment.modelName,
+        preferredFitment.yearRangeText ? `ปี ${preferredFitment.yearRangeText}` : '',
+      ]
+        .filter(Boolean)
+        .join(' · ')
+    : [product.carBrand, product.carModelLabel, product.yearLabel ? `ปี ${product.yearLabel}` : '']
+        .filter((s) => s && s !== '—')
+        .join(' · ')
+
+  const faceClass = clsx(
+    'col-start-1 row-start-1 flex w-full flex-col rounded-2xl border bg-white p-3 text-left shadow-sm transition pos-compact:rounded-xl pos-compact:p-2.5',
+    bulkSelected
+      ? 'border-violet-400 ring-2 ring-violet-300/80'
+      : selected
+        ? 'border-violet-300 ring-2 ring-violet-200/70'
+        : 'border-slate-200',
+  )
+
   return (
-    <div className="relative w-full">
+    <div className="relative w-full" style={{ perspective: '1200px' }}>
+      <input
+        type="checkbox"
+        checked={bulkSelected}
+        onChange={() => onToggleBulk(product.id)}
+        onClick={(e) => e.stopPropagation()}
+        className="absolute left-2 top-2 z-20 size-4 cursor-pointer rounded border-slate-300 bg-white shadow-sm accent-violet-600"
+        aria-label={`เลือก ${product.name}`}
+      />
       <button
         type="button"
-        onClick={() => onSelectProduct(product.id)}
-        onDoubleClick={() => onOpenProduct(product.id)}
-        onContextMenu={(e) => onContextMenuProduct(e, product.id)}
-        className={clsx(
-          'flex w-full flex-col rounded-2xl border bg-white p-3 text-left shadow-sm transition hover:shadow-md pos-compact:rounded-xl pos-compact:p-2.5',
-          selected ? 'border-violet-300 ring-2 ring-violet-200/70' : 'border-slate-200 hover:border-slate-300',
-        )}
+        onClick={(e) => {
+          e.stopPropagation()
+          setFlipped((v) => !v)
+        }}
+        className="absolute right-2 top-2 z-20 inline-flex size-6 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500 shadow-sm transition hover:bg-slate-50 hover:text-slate-700"
+        title={flipped ? 'พลิกกลับ' : 'พลิกดูรายละเอียด'}
+        aria-label={flipped ? 'พลิกกลับ' : 'พลิกดูรายละเอียด'}
       >
-        <ProductThumb sku={product.sku} className="mb-2" />
-        <p className="line-clamp-2 text-sm font-semibold leading-snug text-slate-900 pos-compact:text-[13px]">
-          {product.name}
-        </p>
-        <ProductPortfolioBadges product={product} />
-        <ProductCardMeta product={product} preferredFitment={preferredFitment} matchingFitments={matchingFitments} />
-        {dimensionSearchActive && product.physicalDimensions ? (
-          <p className="mt-1.5 line-clamp-3 text-[11px] leading-snug text-violet-900/95 tabular-nums">
-            <span className="font-medium text-violet-950">ในระบบ:</span> {formatPhysicalDimensionsSearchRow(product.physicalDimensions)}
-          </p>
-        ) : null}
-        <p className="mt-1.5 font-mono text-[11px] text-slate-400">{product.sku}</p>
-        <p className="mt-2 text-base font-semibold tabular-nums text-rose-600 pos-compact:mt-1.5 pos-compact:text-sm">
-          ฿{product.sellPrice.toLocaleString('th-TH')}
-        </p>
+        <FlipHorizontal2 className="size-3.5" strokeWidth={1.75} aria-hidden />
       </button>
+
+      <div
+        className="grid transition-transform duration-500 ease-out"
+        style={{
+          transformStyle: 'preserve-3d',
+          transform: flipped ? 'rotateY(180deg)' : 'rotateY(0deg)',
+        }}
+      >
+        {/* ── Front face ── */}
+        <div
+          className={faceClass}
+          style={{ backfaceVisibility: 'hidden', WebkitBackfaceVisibility: 'hidden' }}
+        >
+          <button
+            type="button"
+            onClick={() => onSelectProduct(product.id)}
+            onDoubleClick={() => onOpenProduct(product.id)}
+            onContextMenu={(e) => onContextMenuProduct(e, product.id)}
+            className="-m-3 flex flex-1 flex-col gap-2 rounded-2xl p-3 text-left pos-compact:-m-2.5 pos-compact:p-2.5"
+          >
+            <ProductThumb sku={product.sku} />
+            <p className="line-clamp-2 text-sm font-semibold leading-snug text-slate-900 pos-compact:text-[13px]">
+              {product.name}
+            </p>
+            <ProductPortfolioBadges product={product} />
+            {carSummary ? (
+              <p className="line-clamp-2 text-[11px] leading-snug text-slate-500">{carSummary}</p>
+            ) : null}
+            <div className="mt-auto flex items-end justify-between gap-2 pt-1">
+              <p className="font-mono text-[11px] text-slate-400">{product.sku}</p>
+              <p className="text-base font-semibold tabular-nums text-rose-600 pos-compact:text-sm">
+                ฿{product.sellPrice.toLocaleString('th-TH')}
+              </p>
+            </div>
+          </button>
+        </div>
+
+        {/* ── Back face ── */}
+        <div
+          className={faceClass}
+          style={{
+            backfaceVisibility: 'hidden',
+            WebkitBackfaceVisibility: 'hidden',
+            transform: 'rotateY(180deg)',
+          }}
+        >
+          <button
+            type="button"
+            onClick={() => onSelectProduct(product.id)}
+            onDoubleClick={() => onOpenProduct(product.id)}
+            onContextMenu={(e) => onContextMenuProduct(e, product.id)}
+            className="-m-3 flex flex-1 flex-col gap-2 overflow-y-auto rounded-2xl p-3 text-left pos-compact:-m-2.5 pos-compact:p-2.5"
+          >
+            <p className="line-clamp-2 pr-7 text-[12px] font-semibold leading-snug text-slate-900">
+              {product.name}
+            </p>
+            <p className="font-mono text-[10px] text-slate-400">{product.sku}</p>
+
+            {oemTags.length > 0 ? (
+              <div>
+                <p className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                  OEM
+                </p>
+                <div className="flex flex-wrap gap-1">
+                  {oemTags.slice(0, 8).map((t, i) => (
+                    <span
+                      key={i}
+                      className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-700"
+                    >
+                      {t}
+                    </span>
+                  ))}
+                  {oemTags.length > 8 ? (
+                    <span className="text-[10px] text-slate-400">+{oemTags.length - 8}</span>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
+
+            {fitGroups.length > 0 ? (
+              <div>
+                <p className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                  ใช้ได้กับ
+                </p>
+                <div className="space-y-0.5">
+                  {fitGroups.slice(0, 5).map((g) => (
+                    <p key={g.brand} className="text-[11px] leading-snug text-slate-600">
+                      <span className="font-semibold text-slate-700">{g.brand}</span>:{' '}
+                      <span className="text-slate-500">{g.models.slice(0, 4).join(', ')}</span>
+                      {g.models.length > 4 ? (
+                        <span className="text-slate-400"> +{g.models.length - 4}</span>
+                      ) : null}
+                    </p>
+                  ))}
+                  {fitGroups.length > 5 ? (
+                    <p className="text-[10px] italic text-slate-400">
+                      …และอีก {fitGroups.length - 5} ยี่ห้อ
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
+
+            <div className="mt-auto flex flex-wrap items-end justify-between gap-x-3 gap-y-1 pt-1">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-slate-500">
+                <span>
+                  สต็อก <span className="tabular-nums text-slate-700">{stock}</span>
+                </span>
+                {dimStr ? <span className="tabular-nums">{dimStr}</span> : null}
+                {loc ? (
+                  <span className="inline-flex items-center gap-0.5 text-slate-400">
+                    <MapPin className="size-2.5 shrink-0" aria-hidden />
+                    {loc}
+                  </span>
+                ) : null}
+              </div>
+              <p className="text-base font-semibold tabular-nums text-rose-600 pos-compact:text-sm">
+                ฿{product.sellPrice.toLocaleString('th-TH')}
+              </p>
+            </div>
+          </button>
+        </div>
+      </div>
     </div>
   )
 })
@@ -823,6 +989,8 @@ const ProductMasterListRow = memo(function ProductMasterListRow({
   dimensionSearchActive,
   preferredFitment,
   matchingFitments,
+  bulkSelected,
+  onToggleBulk,
 }: {
   product: ProductMasterDetail
   onOpenProduct: (id: string) => void
@@ -832,6 +1000,8 @@ const ProductMasterListRow = memo(function ProductMasterListRow({
   dimensionSearchActive?: boolean
   preferredFitment?: VehicleFitmentRef
   matchingFitments?: VehicleFitmentRef[]
+  bulkSelected: boolean
+  onToggleBulk: (id: string) => void
 }) {
   return (
     <tr
@@ -849,9 +1019,29 @@ const ProductMasterListRow = memo(function ProductMasterListRow({
       }}
       className={clsx(
         'cursor-pointer border-b border-slate-100 transition',
-        selected ? 'bg-violet-50/70 ring-1 ring-inset ring-violet-200' : 'hover:bg-slate-50/80',
+        bulkSelected
+          ? 'bg-violet-100/80 ring-1 ring-inset ring-violet-300'
+          : selected
+            ? 'bg-violet-50/70 ring-1 ring-inset ring-violet-200'
+            : 'hover:bg-slate-50/80',
       )}
     >
+      <td
+        className="w-9 py-2 pl-3 pr-1 pos-compact:w-8 pos-compact:pl-2"
+        onClick={(e) => {
+          e.stopPropagation()
+          onToggleBulk(product.id)
+        }}
+      >
+        <input
+          type="checkbox"
+          checked={bulkSelected}
+          onChange={() => onToggleBulk(product.id)}
+          onClick={(e) => e.stopPropagation()}
+          className="size-4 cursor-pointer rounded border-slate-300 accent-violet-600"
+          aria-label={`เลือก ${product.name}`}
+        />
+      </td>
       <td className="w-20 py-2 pl-2.5 pr-2 pos-compact:w-[4.25rem] pos-compact:py-1.5 pos-compact:pl-2">
         <ProductImage sku={product.sku} size="md" />
       </td>
@@ -895,6 +1085,132 @@ const ProductMasterListRow = memo(function ProductMasterListRow({
     </tr>
   )
 })
+
+type CategoryOption = {
+  value: string
+  label: string
+  main: string
+  sub?: string
+  subSub?: string
+}
+
+function buildCategoryOptions(tree: MainCategory[]): CategoryOption[] {
+  const out: CategoryOption[] = []
+  for (const main of tree) {
+    if (main.subcategories.length === 0) {
+      out.push({ value: main.id, label: main.name, main: main.name })
+      continue
+    }
+    for (const sub of main.subcategories) {
+      if (sub.subSubcategories.length === 0) {
+        out.push({
+          value: `${main.id}::${sub.id}`,
+          label: `${main.name} / ${sub.name}`,
+          main: main.name,
+          sub: sub.name,
+        })
+        continue
+      }
+      for (const ss of sub.subSubcategories) {
+        out.push({
+          value: `${main.id}::${sub.id}::${ss.id}`,
+          label: `${main.name} / ${sub.name} / ${ss.name}`,
+          main: main.name,
+          sub: sub.name,
+          subSub: ss.name,
+        })
+      }
+    }
+  }
+  return out
+}
+
+function BulkMoveCategoryPicker({
+  tree,
+  count,
+  onClose,
+  onApply,
+}: {
+  tree: MainCategory[]
+  count: number
+  onClose: () => void
+  onApply: (main: string, sub: string | undefined, subSub: string | undefined) => void
+}) {
+  const options = useMemo(() => buildCategoryOptions(tree), [tree])
+  const [filter, setFilter] = useState('')
+  const [selectedValue, setSelectedValue] = useState<string | null>(null)
+  const filtered = useMemo(() => {
+    const q = filter.trim().toLowerCase()
+    if (!q) return options
+    return options.filter((o) => o.label.toLowerCase().includes(q))
+  }, [options, filter])
+  const selected = options.find((o) => o.value === selectedValue) ?? null
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="flex w-full max-w-md flex-col gap-3 rounded-2xl bg-white p-5 shadow-xl">
+        <div>
+          <p className="text-base font-semibold text-slate-900">ย้ายไปหมวด</p>
+          <p className="mt-0.5 text-xs text-slate-500">
+            ย้าย <span className="font-semibold tabular-nums">{count.toLocaleString('th-TH')}</span> รายการที่เลือก
+          </p>
+        </div>
+        <input
+          type="search"
+          autoFocus
+          placeholder="ค้นหาหมวด..."
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm shadow-sm outline-none focus:border-slate-400 focus:ring-1 focus:ring-slate-200"
+        />
+        <div className="max-h-72 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50/40">
+          {filtered.length === 0 ? (
+            <p className="px-3 py-6 text-center text-xs text-slate-500">ไม่พบหมวดที่ตรงกับคำค้น</p>
+          ) : (
+            <ul className="divide-y divide-slate-100">
+              {filtered.map((o) => (
+                <li key={o.value}>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedValue(o.value)}
+                    className={clsx(
+                      'flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm transition',
+                      selectedValue === o.value
+                        ? 'bg-violet-100 font-medium text-violet-900'
+                        : 'text-slate-700 hover:bg-white',
+                    )}
+                  >
+                    <span className="truncate">{o.label}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex-1 rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+          >
+            ยกเลิก
+          </button>
+          <button
+            type="button"
+            disabled={!selected}
+            onClick={() => {
+              if (!selected) return
+              onApply(selected.main, selected.sub, selected.subSub)
+            }}
+            className="flex-1 rounded-xl bg-violet-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-violet-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
+          >
+            ย้าย
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 function breadcrumbLabel(
   tree: MainCategory[],
@@ -1416,7 +1732,10 @@ export function ProductDataFileView() {
   const [detailProductId, setDetailProductId] = useState<string | null>(null)
 
   const _c = readCache()
-  const [catalogViewMode, setCatalogViewMode] = useState<CatalogViewMode>(_c.catalogViewMode)
+  const [catalogViewMode, setCatalogViewMode] = useState<CatalogViewMode>(
+    // Coerce the legacy 'grid-5' cached value into the new merged 'flip-card' view
+    _c.catalogViewMode === ('grid-5' as CatalogViewMode) ? 'flip-card' : _c.catalogViewMode,
+  )
 
   const [categoryTree, setCategoryTree] = useState<MainCategory[]>(() => loadCategoryTree())
   const [expandedMain, setExpandedMain] = useState<Set<string>>(() => new Set(_c.expandedMain))
@@ -1448,11 +1767,67 @@ export function ProductDataFileView() {
   const [products, setProducts] = useState<ProductMasterDetail[]>(() => [...getProductMasterList()])
   const [showBin, setShowBin] = useState(false)
   const [hardDeleteTarget, setHardDeleteTarget] = useState<ProductMasterDetail | null>(null)
+  const [bulkSelected, setBulkSelected] = useState<Set<string>>(() => new Set())
+  const [moveCategoryPickerOpen, setMoveCategoryPickerOpen] = useState(false)
 
   useEffect(() => {
     if (showBin) setShowBin(false)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [navSelection])
+
+  const clearBulk = useCallback(() => setBulkSelected(new Set()), [])
+
+  // Clear bulk selection whenever the visible list shape changes substantially
+  // (nav, search query, in-store toggle, bin) so users don't act on hidden rows.
+  useEffect(() => {
+    setBulkSelected(new Set())
+  }, [navSelection, q, filterInStoreOnly, showMissingCategoryOnly, showBin])
+
+  const toggleBulkOne = useCallback((id: string) => {
+    setBulkSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
+
+  const bulkSetInStore = useCallback((ids: string[], inStore: boolean) => {
+    if (ids.length === 0) return
+    const idSet = new Set(ids)
+    setProducts((prev) =>
+      prev.map((p) => (idSet.has(p.id) ? { ...p, inStoreCatalog: inStore } : p)),
+    )
+    setBulkSelected(new Set())
+  }, [])
+
+  const bulkMoveCategory = useCallback(
+    (ids: string[], main: string, sub: string | undefined, subSub: string | undefined) => {
+      if (ids.length === 0) return
+      const idSet = new Set(ids)
+      setProducts((prev) =>
+        prev.map((p) =>
+          idSet.has(p.id)
+            ? { ...p, category: main, subCategory: sub ?? '', subSubCategory: subSub ?? '' }
+            : p,
+        ),
+      )
+      setBulkSelected(new Set())
+      setMoveCategoryPickerOpen(false)
+    },
+    [],
+  )
+
+  const bulkSoftDelete = useCallback((ids: string[]) => {
+    if (ids.length === 0) return
+    const now = new Date().toISOString()
+    const idSet = new Set(ids)
+    setProducts((prev) =>
+      prev.map((p) => (idSet.has(p.id) ? { ...p, deletedAt: now } : p)),
+    )
+    setBulkSelected(new Set())
+    setSelectedProductId((cur) => (cur && idSet.has(cur) ? null : cur))
+  }, [])
 
   const activeProducts = useMemo(() => products.filter((p) => !p.deletedAt), [products])
   const binProducts = useMemo(() => products.filter((p) => !!p.deletedAt), [products])
@@ -2819,11 +3194,10 @@ export function ProductDataFileView() {
                   className="inline-flex shrink-0 flex-wrap rounded-lg border border-slate-200 bg-slate-50 p-0.5"
                 >
                   {viewToggleBtn('list', 'รายการ', <LayoutList className="size-3.5" strokeWidth={1.75} />)}
-                  {viewToggleBtn('grid-5', '5 คอล', <LayoutGrid className="size-3.5" strokeWidth={1.75} />)}
                   {viewToggleBtn(
                     'flip-card',
-                    'Flip card',
-                    <FlipHorizontal2 className="size-3.5" strokeWidth={1.75} />,
+                    'การ์ด',
+                    <LayoutGrid className="size-3.5" strokeWidth={1.75} />,
                   )}
                 </div>
               </div>
@@ -2900,6 +3274,59 @@ export function ProductDataFileView() {
               </div>
             </div>
 
+        {!showBin && allowCost && bulkSelected.size > 0 ? (
+          <div className="sticky top-0 z-30 flex flex-wrap items-center gap-2 rounded-xl border border-violet-300/80 bg-violet-50/95 px-3 py-2 shadow-sm backdrop-blur pos-compact:px-2 pos-compact:py-1.5">
+            <span className="text-xs font-semibold text-violet-900 pos-compact:text-[11px]">
+              เลือกแล้ว <span className="tabular-nums">{bulkSelected.size.toLocaleString('th-TH')}</span> รายการ
+            </span>
+            {allowCost ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => bulkSetInStore([...bulkSelected], true)}
+                  className="inline-flex items-center gap-1 rounded-lg border border-emerald-300 bg-white px-2.5 py-1 text-xs font-medium text-emerald-800 shadow-sm hover:bg-emerald-50 pos-compact:text-[11px]"
+                >
+                  <Store className="size-3" />
+                  เปิดใช้ในร้าน
+                </button>
+                <button
+                  type="button"
+                  onClick={() => bulkSetInStore([...bulkSelected], false)}
+                  className="rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 shadow-sm hover:bg-slate-50 pos-compact:text-[11px]"
+                >
+                  ปิดใช้ในร้าน
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMoveCategoryPickerOpen(true)}
+                  className="rounded-lg border border-sky-300 bg-white px-2.5 py-1 text-xs font-medium text-sky-800 shadow-sm hover:bg-sky-50 pos-compact:text-[11px]"
+                >
+                  ย้ายไปหมวด…
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (window.confirm(`ย้าย ${bulkSelected.size} รายการไปถังขยะ?`)) {
+                      bulkSoftDelete([...bulkSelected])
+                    }
+                  }}
+                  className="inline-flex items-center gap-1 rounded-lg border border-rose-300 bg-white px-2.5 py-1 text-xs font-medium text-rose-700 shadow-sm hover:bg-rose-50 pos-compact:text-[11px]"
+                >
+                  <Trash2 className="size-3" />
+                  ย้ายไปถังขยะ
+                </button>
+              </>
+            ) : null}
+            <button
+              type="button"
+              onClick={clearBulk}
+              className="ml-auto rounded-lg px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-100 pos-compact:text-[11px]"
+            >
+              ยกเลิก
+            </button>
+          </div>
+        ) : null}
+
         {sortedList.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50/50 px-4 py-12 text-center text-sm text-slate-500 pos-compact:rounded-xl pos-compact:py-6 pos-compact:px-3 pos-compact:text-xs">
             {catalogFilterHidesAllInNav
@@ -2913,6 +3340,33 @@ export function ProductDataFileView() {
                 <table className="w-full min-w-[600px] table-fixed border-collapse text-left text-sm pos-narrow:min-w-[540px] xl:min-w-[680px]">
                   <thead>
                     <tr className="border-b border-slate-100 bg-slate-50 text-xs font-medium text-slate-500 pos-compact:text-[10px]">
+                      <th className="w-9 py-2.5 pl-3 pr-1 pos-compact:w-8 pos-compact:pl-2">
+                        <input
+                          type="checkbox"
+                          checked={visibleList.length > 0 && visibleList.every((p) => bulkSelected.has(p.id))}
+                          ref={(el) => {
+                            if (!el) return
+                            const all = visibleList.length > 0 && visibleList.every((p) => bulkSelected.has(p.id))
+                            const some = visibleList.some((p) => bulkSelected.has(p.id))
+                            el.indeterminate = some && !all
+                          }}
+                          onChange={() => {
+                            setBulkSelected((prev) => {
+                              const next = new Set(prev)
+                              const allSelected =
+                                visibleList.length > 0 && visibleList.every((p) => prev.has(p.id))
+                              if (allSelected) {
+                                visibleList.forEach((p) => next.delete(p.id))
+                              } else {
+                                visibleList.forEach((p) => next.add(p.id))
+                              }
+                              return next
+                            })
+                          }}
+                          className="size-4 cursor-pointer rounded border-slate-300 accent-violet-600"
+                          aria-label="เลือกทั้งหมดที่มองเห็น"
+                        />
+                      </th>
                       <th className="w-[5.5rem] py-2.5 pl-3 pr-1 pos-compact:w-[4.5rem] pos-compact:py-2 pos-compact:pl-2">
                         รูป
                       </th>
@@ -2956,11 +3410,13 @@ export function ProductDataFileView() {
                         onContextMenuProduct={openProductContextMenu}
                         preferredFitment={findPreferredFitment(p)}
                         matchingFitments={findMatchingFitments(p)}
+                        bulkSelected={bulkSelected.has(p.id)}
+                        onToggleBulk={toggleBulkOne}
                       />
                     ))}
                     {visibleCount < sortedList.length ? (
                       <tr>
-                        <td colSpan={6} className="py-3 text-center">
+                        <td colSpan={7} className="py-3 text-center">
                           <button
                             type="button"
                             onClick={() => setVisibleCount((n) => n + PAGE_SIZE)}
@@ -2976,11 +3432,6 @@ export function ProductDataFileView() {
               </div>
             ) : (
               <div className="min-w-0 space-y-2">
-                {catalogViewMode === 'flip-card' ? (
-                  <p className="rounded-lg border border-amber-200/90 bg-amber-50/80 px-3 py-2 text-[11px] leading-snug text-amber-950 pos-compact:text-[10px]">
-                    มุมมอง Flip card — กำลังพัฒนา แสดงกริด 5 คอลัมน์ชั่วคราว
-                  </p>
-                ) : null}
                 <div
                   className={clsx(
                     'grid gap-3 pos-compact:gap-2',
@@ -2988,16 +3439,17 @@ export function ProductDataFileView() {
                   )}
                 >
                   {visibleList.map((p) => (
-                    <ProductMasterGridCard
+                    <ProductMasterFlipCard
                       key={p.id}
                       product={p}
-                      dimensionSearchActive={measActive}
                       onOpenProduct={openProductDetail}
                       onSelectProduct={handleSelectProduct}
                       selected={selectedProductId === p.id}
                       onContextMenuProduct={openProductContextMenu}
                       preferredFitment={findPreferredFitment(p)}
                       matchingFitments={findMatchingFitments(p)}
+                      bulkSelected={bulkSelected.has(p.id)}
+                      onToggleBulk={toggleBulkOne}
                     />
                   ))}
                 </div>
@@ -3108,6 +3560,18 @@ export function ProductDataFileView() {
           </div>
         ) : null}
         </>
+        )}
+
+        {/* Bulk move-category picker */}
+        {moveCategoryPickerOpen && (
+          <BulkMoveCategoryPicker
+            tree={categoryTree}
+            count={bulkSelected.size}
+            onClose={() => setMoveCategoryPickerOpen(false)}
+            onApply={(main, sub, subSub) =>
+              bulkMoveCategory([...bulkSelected], main, sub, subSub)
+            }
+          />
         )}
 
         {/* Hard-delete confirmation modal */}

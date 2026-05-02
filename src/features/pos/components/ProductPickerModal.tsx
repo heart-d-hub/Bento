@@ -2,13 +2,18 @@ import * as React from 'react'
 import { useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { clsx } from 'clsx'
-import { Car, Check, CheckSquare, Eye, EyeOff, LayoutGrid, List, MapPin, Minus, Plus, Search, ShoppingCart, X } from 'lucide-react'
+import { Car, Check, CheckSquare, ChevronDown, ChevronRight, Eye, EyeOff, LayoutGrid, List, MapPin, Minus, Plus, Search, ShoppingCart, X } from 'lucide-react'
 import {
   collectInventoryCarFilterOptions,
   getProductMasterBySku,
   productMatchesInventoryCarFilters,
   type ProductMasterDetail,
 } from '@/features/inventory/data/productMasterData'
+import {
+  INVENTORY_CATEGORIES_UPDATED_EVENT,
+  loadCategoryTree,
+  type MainCategory,
+} from '@/features/inventory/data/inventoryCategories'
 import {
   getPosSellConfig,
   pickDefaultPosUnitAndPrice,
@@ -122,6 +127,11 @@ export function ProductPickerModal({
 }: ProductPickerModalProps) {
   const [searchQuery, setSearchQuery] = useState('')
   const [category, setCategory] = useState<string | null>(null)
+  const [subCategory, setSubCategory] = useState<string | null>(null)
+  const [subSubCategory, setSubSubCategory] = useState<string | null>(null)
+  const [categoryTree, setCategoryTree] = useState<MainCategory[]>(() => loadCategoryTree())
+  const [expandedMain, setExpandedMain] = useState<Set<string>>(() => new Set())
+  const [expandedSub, setExpandedSub] = useState<Set<string>>(() => new Set())
   const [make, setMake] = useState(FILTER_ALL)
   const [model, setModel] = useState(FILTER_ALL)
   const [engine, setEngine] = useState(FILTER_ALL)
@@ -176,6 +186,10 @@ export function ProductPickerModal({
     if (!open) {
       setSearchQuery('')
       setCategory(null)
+      setSubCategory(null)
+      setSubSubCategory(null)
+      setExpandedMain(new Set())
+      setExpandedSub(new Set())
       resetFilters()
       setSelectedProduct(null)
       setTab('all')
@@ -184,6 +198,33 @@ export function ProductPickerModal({
       setVehicleHintDismissed(false)
     }
   }, [open])
+
+  // Refresh categoryTree if it gets edited elsewhere while the picker is open
+  useEffect(() => {
+    if (!open) return
+    setCategoryTree(loadCategoryTree())
+    const onUpdate = () => setCategoryTree(loadCategoryTree())
+    window.addEventListener(INVENTORY_CATEGORIES_UPDATED_EVENT, onUpdate)
+    return () => window.removeEventListener(INVENTORY_CATEGORIES_UPDATED_EVENT, onUpdate)
+  }, [open])
+
+  const toggleMainExpand = (id: string) => {
+    setExpandedMain((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+  const toggleSubExpand = (mainId: string, subId: string) => {
+    const key = `${mainId}::${subId}`
+    setExpandedSub((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
 
   // ลูกค้าเปลี่ยน → reset dismiss
   useEffect(() => {
@@ -272,7 +313,8 @@ export function ProductPickerModal({
 
   const masterProducts = useMemo<ProductMasterDetail[]>(() => {
     // Scope filter options to:
-    //   1) currently-selected category (so picking «เบรก» only shows brands with brake pads)
+    //   1) currently-selected category / sub / sub-sub (so picking «เบรก / ผ้าเบรก»
+    //      only shows brands with brake pads)
     //   2) AND active search-bar query (so typing "Vios" narrows make/model/year to the result set)
     const tokens = tokenizeSearch(deferredSearchQuery)
     const hasText = tokens.length > 0
@@ -287,10 +329,13 @@ export function ProductPickerModal({
       if (seen.has(p.code)) continue
       seen.add(p.code)
       const master = getProductMasterBySku(p.code)
-      if (master) list.push(master)
+      if (!master) continue
+      if (subCategory && (master.subCategory ?? '') !== subCategory) continue
+      if (subSubCategory && (master.subSubCategory ?? '') !== subSubCategory) continue
+      list.push(master)
     }
     return list
-  }, [products, productHaystackMap, category, deferredSearchQuery])
+  }, [products, productHaystackMap, category, subCategory, subSubCategory, deferredSearchQuery])
 
   const carFilterOptions = useMemo(() => {
     const base = collectInventoryCarFilterOptions(masterProducts, {
@@ -366,6 +411,35 @@ export function ProductPickerModal({
     const seen = new Set<string>()
     for (const p of products) if (p.brand) seen.add(p.brand)
     return [...seen].sort((a, b) => a.localeCompare(b, 'th'))
+  }, [products])
+
+  /** Per-level product counts for the category sidebar.
+   *  Counts ignore the currently-selected category/sub so users can see how many
+   *  parts exist in each branch of the tree at a glance. */
+  const navCounts = useMemo(() => {
+    const main = new Map<string, number>()
+    const sub = new Map<string, number>() // `${main}::${sub}` → count
+    const subSub = new Map<string, number>() // `${main}::${sub}::${subSub}` → count
+    const seen = new Set<string>()
+    let total = 0
+    for (const p of products) {
+      if (seen.has(p.code)) continue
+      seen.add(p.code)
+      total += 1
+      const m = (p.category ?? '').trim()
+      if (!m || m === '—') continue
+      main.set(m, (main.get(m) ?? 0) + 1)
+      const master = getProductMasterBySku(p.code)
+      const s = (master?.subCategory ?? '').trim()
+      if (s) {
+        sub.set(`${m}::${s}`, (sub.get(`${m}::${s}`) ?? 0) + 1)
+        const ss = (master?.subSubCategory ?? '').trim()
+        if (ss) {
+          subSub.set(`${m}::${s}::${ss}`, (subSub.get(`${m}::${s}::${ss}`) ?? 0) + 1)
+        }
+      }
+    }
+    return { main, sub, subSub, total }
   }, [products])
 
   const activeVehicleFilterCount =
@@ -474,13 +548,19 @@ export function ProductPickerModal({
     const hasEuro = euro !== FILTER_ALL
     const hasTrim = trim !== FILTER_ALL
     const hasAnyVehicleFilter = hasMake || hasModel || hasEngine || hasDrive || hasYear || hasHp || hasEuro || hasTrim
-    if (!category && !hasAnyVehicleFilter && !hasPartBrand && !hasText && !hasChassisFilter) {
+    if (!category && !subCategory && !subSubCategory && !hasAnyVehicleFilter && !hasPartBrand && !hasText && !hasChassisFilter) {
       // ใน tab !== 'all' ให้รวมทั้งหมดก่อน filter ตาม tab — กันเสียโอกาสเพราะ slice 150
       return tab === 'all' ? products.slice(0, 150) : applyTabFilter(products)
     }
 
     const passFilters = (p: PickerProduct) => {
       if (category && p.category !== category) return false
+      if (subCategory || subSubCategory) {
+        const master = getProductMasterBySku(p.code)
+        if (!master) return false
+        if (subCategory && (master.subCategory ?? '') !== subCategory) return false
+        if (subSubCategory && (master.subSubCategory ?? '') !== subSubCategory) return false
+      }
       if (hasPartBrand && p.brand !== partBrand) return false
       if (hasAnyVehicleFilter) {
         const master = getProductMasterBySku(p.code)
@@ -561,7 +641,7 @@ export function ProductPickerModal({
       .sort((a, b) => b[1] - a[1])
       .map(([p]) => p)
     return tab === 'all' ? ranked.slice(0, 200) : applyTabFilter(ranked)
-  }, [products, productHaystackMap, deferredSearchQuery, category, make, model, engine, drive, year, partBrand, hp, euro, trim, chassisCodeQuery, tab, todaySkuMap, customerSkuMap])
+  }, [products, productHaystackMap, deferredSearchQuery, category, subCategory, subSubCategory, make, model, engine, drive, year, partBrand, hp, euro, trim, chassisCodeQuery, tab, todaySkuMap, customerSkuMap])
 
   // Auto-select first product เมื่อ list เปลี่ยน
   useEffect(() => {
@@ -1026,8 +1106,180 @@ export function ProductPickerModal({
           )}
 
 
-          {/* Split view: list + detail */}
+          {/* Split view: category sidebar + list + detail */}
           <div className="flex min-h-0 flex-1 overflow-hidden">
+            {/* SIDEBAR — category tree (mirrors product-folder layout) */}
+            <aside className="hidden w-44 shrink-0 overflow-y-auto border-r border-slate-200 bg-slate-50/40 px-1.5 py-2 dark:border-[#2a2d3e] dark:bg-[#0a0c13] sm:block">
+              <button
+                type="button"
+                onClick={() => {
+                  setCategory(null)
+                  setSubCategory(null)
+                  setSubSubCategory(null)
+                }}
+                className={clsx(
+                  'mb-1 flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] font-medium transition',
+                  category === null
+                    ? 'bg-blue-100 text-blue-900 ring-1 ring-blue-200/80 dark:bg-cyan-900/30 dark:text-cyan-100 dark:ring-cyan-700/40'
+                    : 'text-slate-700 hover:bg-white dark:text-slate-300 dark:hover:bg-[#12141c]',
+                )}
+              >
+                <span>ทั้งหมด</span>
+                <span className="rounded-md bg-white/80 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-slate-700 dark:bg-[#12141c] dark:text-slate-400">
+                  {navCounts.total.toLocaleString('th-TH')}
+                </span>
+              </button>
+              {categoryTree.length === 0 ? (
+                <p className="rounded-lg border border-amber-200/80 bg-amber-50/90 px-2 py-2 text-center text-[10px] leading-snug text-amber-900 dark:border-amber-700/40 dark:bg-amber-950/30 dark:text-amber-300">
+                  ยังไม่มีหมวดหมู่
+                </p>
+              ) : (
+                categoryTree.map((main) => {
+                  const subs = main.subcategories
+                  const open = expandedMain.has(main.id)
+                  const mainSelected = category === main.name
+                  const mainCount = navCounts.main.get(main.name) ?? 0
+                  return (
+                    <div key={main.id} className="mb-0.5">
+                      {subs.length === 0 ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCategory(main.name)
+                            setSubCategory(null)
+                            setSubSubCategory(null)
+                          }}
+                          className={clsx(
+                            'flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] transition',
+                            mainSelected
+                              ? 'bg-blue-100 font-medium text-blue-900 ring-1 ring-blue-200/80 dark:bg-cyan-900/30 dark:text-cyan-100 dark:ring-cyan-700/40'
+                              : 'font-medium text-slate-700 hover:bg-white dark:text-slate-300 dark:hover:bg-[#12141c]',
+                          )}
+                        >
+                          <span className="line-clamp-2">{main.name}</span>
+                          <span className="shrink-0 rounded-md bg-white/80 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-slate-700 dark:bg-[#12141c] dark:text-slate-400">
+                            {mainCount.toLocaleString('th-TH')}
+                          </span>
+                        </button>
+                      ) : (
+                        <>
+                          <div className="flex min-w-0 items-stretch gap-0.5">
+                            <button
+                              type="button"
+                              onClick={() => toggleMainExpand(main.id)}
+                              className="flex shrink-0 items-center justify-center rounded-lg px-0.5 text-slate-500 hover:bg-white hover:text-slate-800 dark:text-slate-500 dark:hover:bg-[#12141c]"
+                              aria-expanded={open}
+                              aria-label={open ? 'ยุบหมวดย่อย' : 'ขยายหมวดย่อย'}
+                            >
+                              {open ? <ChevronDown className="size-3.5" aria-hidden /> : <ChevronRight className="size-3.5" aria-hidden />}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setCategory(main.name)
+                                setSubCategory(null)
+                                setSubSubCategory(null)
+                                setExpandedMain(new Set([main.id]))
+                                setExpandedSub(new Set())
+                              }}
+                              className={clsx(
+                                'min-w-0 flex-1 rounded-lg px-2 py-1.5 text-left text-[12px] transition',
+                                mainSelected
+                                  ? 'bg-blue-100 font-medium text-blue-900 ring-1 ring-blue-200/80 dark:bg-cyan-900/30 dark:text-cyan-100 dark:ring-cyan-700/40'
+                                  : 'font-medium text-slate-700 hover:bg-white dark:text-slate-300 dark:hover:bg-[#12141c]',
+                              )}
+                            >
+                              <span className="flex items-center justify-between gap-2">
+                                <span className="line-clamp-2">{main.name}</span>
+                                <span className="shrink-0 rounded-md bg-white/80 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-slate-700 dark:bg-[#12141c] dark:text-slate-400">
+                                  {mainCount.toLocaleString('th-TH')}
+                                </span>
+                              </span>
+                            </button>
+                          </div>
+                          {open && (
+                            <div className="ml-4 space-y-0.5 border-l border-slate-200/90 py-0.5 pl-2 dark:border-[#2a2d3e]">
+                              {subs.map((sub) => {
+                                const subSel = mainSelected && subCategory === sub.name
+                                const subSubs = sub.subSubcategories
+                                const subKey = `${main.id}::${sub.id}`
+                                const subOpen = expandedSub.has(subKey)
+                                const subCount = navCounts.sub.get(`${main.name}::${sub.name}`) ?? 0
+                                return (
+                                  <div key={sub.id} className="space-y-0.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setCategory(main.name)
+                                        setSubCategory(sub.name)
+                                        setSubSubCategory(null)
+                                        if (subSubs.length > 0) toggleSubExpand(main.id, sub.id)
+                                      }}
+                                      className={clsx(
+                                        'w-full rounded-md px-2 py-1 text-left text-[11.5px] transition',
+                                        subSel
+                                          ? 'bg-blue-100 font-medium text-blue-900 ring-1 ring-blue-200/80 dark:bg-cyan-900/30 dark:text-cyan-100 dark:ring-cyan-700/40'
+                                          : 'text-slate-600 hover:bg-white dark:text-slate-400 dark:hover:bg-[#12141c]',
+                                      )}
+                                    >
+                                      <span className="flex items-center justify-between gap-2">
+                                        <span className="line-clamp-2">{sub.name}</span>
+                                        <span className="shrink-0 rounded-md bg-white/80 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-slate-700 dark:bg-[#12141c] dark:text-slate-400">
+                                          {subCount.toLocaleString('th-TH')}
+                                        </span>
+                                      </span>
+                                    </button>
+                                    {subSubs.length > 0 && subOpen ? (
+                                      <div className="ml-0 space-y-0.5 border-l border-slate-200/70 py-0.5 pl-2 dark:border-[#2a2d3e]">
+                                        {subSubs.map((ss) => {
+                                          const ssSel =
+                                            mainSelected &&
+                                            subCategory === sub.name &&
+                                            subSubCategory === ss.name
+                                          const ssCount =
+                                            navCounts.subSub.get(
+                                              `${main.name}::${sub.name}::${ss.name}`,
+                                            ) ?? 0
+                                          return (
+                                            <button
+                                              key={ss.id}
+                                              type="button"
+                                              onClick={() => {
+                                                setCategory(main.name)
+                                                setSubCategory(sub.name)
+                                                setSubSubCategory(ss.name)
+                                              }}
+                                              className={clsx(
+                                                'w-full rounded-md py-1 pl-3 pr-2 text-left text-[11px] leading-snug transition',
+                                                ssSel
+                                                  ? 'bg-blue-100 font-medium text-blue-900 ring-1 ring-blue-200/80 dark:bg-cyan-900/30 dark:text-cyan-100 dark:ring-cyan-700/40'
+                                                  : 'text-slate-500 hover:bg-white dark:text-slate-400 dark:hover:bg-[#12141c]',
+                                              )}
+                                            >
+                                              <span className="flex items-center justify-between gap-2">
+                                                <span className="line-clamp-2">{ss.name}</span>
+                                                <span className="shrink-0 rounded-md bg-white/80 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-slate-700 dark:bg-[#12141c] dark:text-slate-400">
+                                                  {ssCount.toLocaleString('th-TH')}
+                                                </span>
+                                              </span>
+                                            </button>
+                                          )
+                                        })}
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )
+                })
+              )}
+            </aside>
+
             {/* LEFT — list / grid */}
             <div
               ref={listContainerRef}

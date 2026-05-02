@@ -1539,9 +1539,10 @@ export async function hydrateProductMasterFromDb(): Promise<ProductMasterDetail[
     const afterHose = migrateLegacyHoseProductTag(list)
     const oemFix = migrateSkuDuplicateFromOemToFactory(afterHose)
     const wheelsFix = migrateWheels1WD(oemFix.list)
-    const bremboFix = normalizeBremboModelTrim(wheelsFix.list)
+    const dedupeFix = dedupeBySku(wheelsFix.list)
+    const bremboFix = normalizeBremboModelTrim(dedupeFix.list)
     const normalized = bremboFix.list
-    if (oemFix.dirty || wheelsFix.dirty || bremboFix.dirty) {
+    if (oemFix.dirty || wheelsFix.dirty || dedupeFix.dirty || bremboFix.dirty) {
       void persistProductMasterListToDb(normalized).catch((e) => {
         console.error('[product-master] migrate persist failed', e)
       })
@@ -1600,6 +1601,34 @@ function migrateSkuDuplicateFromOemToFactory(list: ProductMasterDetail[]): {
     const rest = tags.filter((t) => t.toLowerCase() !== skuLower)
     return { ...p, factoryNo: matchSku[0], oemTags: rest }
   })
+  return { list: next, dirty }
+}
+
+/**
+ * Drop products with a duplicate SKU, keeping only the first occurrence (lowest
+ * index in the list). Sakura's import created one duplicate (`SFA 3019P` —
+ * Foton Aumark air filter); this guards against any others slipping in.
+ */
+function dedupeBySku(list: ProductMasterDetail[]): {
+  list: ProductMasterDetail[]
+  dirty: boolean
+} {
+  const seen = new Set<string>()
+  let dirty = false
+  const next: ProductMasterDetail[] = []
+  for (const p of list) {
+    const sku = (p.sku ?? '').trim().toLowerCase()
+    if (!sku) {
+      next.push(p)
+      continue
+    }
+    if (seen.has(sku)) {
+      dirty = true
+      continue
+    }
+    seen.add(sku)
+    next.push(p)
+  }
   return { list: next, dirty }
 }
 
@@ -1735,9 +1764,10 @@ export function getProductMasterList(): ProductMasterDetail[] {
     const afterHose = migrateLegacyHoseProductTag(parsed as ProductMasterDetail[])
     const oemFix = migrateSkuDuplicateFromOemToFactory(afterHose)
     const wheelsFix = migrateWheels1WD(oemFix.list)
-    const bremboFix = normalizeBremboModelTrim(wheelsFix.list)
+    const dedupeFix = dedupeBySku(wheelsFix.list)
+    const bremboFix = normalizeBremboModelTrim(dedupeFix.list)
     const finalList = bremboFix.list
-    if (oemFix.dirty || wheelsFix.dirty || bremboFix.dirty) {
+    if (oemFix.dirty || wheelsFix.dirty || dedupeFix.dirty || bremboFix.dirty) {
       try {
         localStorage.setItem(PRODUCT_MASTER_LIST_LS_KEY, JSON.stringify(finalList))
       } catch {
