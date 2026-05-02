@@ -1,5 +1,6 @@
 import {
   getProductMasterList,
+  normalizeBremboModelTrim,
   saveProductMasterList,
   type ProductMasterDetail,
 } from '@/features/inventory/data/productMasterData'
@@ -39,7 +40,8 @@ export async function runBremboImport(): Promise<BremboImportResult> {
   const existing = getProductMasterList()
   const kept = existing.filter((p) => p.brand.trim().toLowerCase() !== BREMBO_BRAND.toLowerCase())
   const removed = existing.length - kept.length
-  const next = [...importProducts, ...kept]
+  const merged = [...importProducts, ...kept]
+  const { list: next } = normalizeBremboModelTrim(merged)
   saveProductMasterList(next)
 
   const newSubCategories = ensureBremboCategoryTree(importProducts)

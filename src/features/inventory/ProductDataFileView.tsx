@@ -27,11 +27,13 @@ import { normalizeCrossBranchRows } from '@/features/inventory/data/branchInvent
 import {
   collectInventoryCarFilterOptions,
   effectiveSellPriceTier,
+  fitmentYearRangeKey,
   flushProductMasterDbSave,
   formatMmWithHunApprox,
   generateNextTenDigitSku,
   getProductMasterList,
   mmToHun,
+  normalizeEngineLabelForFilter,
   normalizeSalesUnits,
   PRODUCT_MASTER_LIST_CHANGED_EVENT,
   productMatchesInventoryCarFilters,
@@ -69,7 +71,6 @@ import {
   Store,
   Trash2,
 } from 'lucide-react'
-import { runBremboImport } from '@/features/inventory/data/bremboImportRunner'
 import { SearchableFilterSelect } from '@/features/inventory/components/SearchableFilterSelect'
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
@@ -654,20 +655,111 @@ function ProductPortfolioBadges({ product }: { product: ProductMasterDetail }) {
   )
 }
 
-function ProductCardMeta({ product }: { product: ProductMasterDetail }) {
+function ProductCardMeta({
+  product,
+  matchingFitments,
+}: {
+  product: ProductMasterDetail
+  preferredFitment?: VehicleFitmentRef
+  /** When user has active filters, this is the subset of fitments that match them.
+   *  If undefined (no filters), all fitments are considered. */
+  matchingFitments?: VehicleFitmentRef[]
+}) {
   const skip = (v: string | undefined) => !v || v === '—'
   const brand = skip(product.brand) ? null : product.brand
-  const car = [
-    skip(product.carBrand) ? null : product.carBrand,
-    skip(product.carModelLabel) ? null : product.carModelLabel,
-    skip(product.yearLabel) ? null : `ปี ${product.yearLabel}`,
-  ].filter(Boolean).join(' ')
-  const parts = [brand, car || null].filter(Boolean)
-  if (!parts.length) return null
+  const sourceFits = matchingFitments ?? product.vehicleFitments ?? []
+
+  type Entry = { model: string; year: string }
+  const brandOrder: string[] = []
+  const brandMap = new Map<string, Entry[]>()
+  const seen = new Set<string>()
+  for (const f of sourceFits) {
+    const cb = f.brandName
+    if (!cb) continue
+    const modelLabel = f.trim ? `${f.modelName} ${f.trim}` : f.modelName
+    const key = `${cb}|${modelLabel}|${f.yearRangeText ?? ''}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    if (!brandMap.has(cb)) {
+      brandMap.set(cb, [])
+      brandOrder.push(cb)
+    }
+    brandMap.get(cb)!.push({ model: modelLabel, year: f.yearRangeText ?? '' })
+  }
+
+  const carParts: string[] = []
+  for (const cb of brandOrder) {
+    const entries = brandMap.get(cb)!
+    if (entries.length === 1) {
+      const e = entries[0]
+      carParts.push(e.year ? `${cb} ${e.model} ปี ${e.year}` : `${cb} ${e.model}`)
+    } else {
+      const sharedYear = entries.every((e) => e.year === entries[0].year) ? entries[0].year : ''
+      const models = entries.map((e) => e.model).join(', ')
+      carParts.push(sharedYear ? `${cb}: ${models} ปี ${sharedYear}` : `${cb}: ${models}`)
+    }
+  }
+
+  if (carParts.length === 0) {
+    const car = [
+      skip(product.carBrand) ? null : product.carBrand,
+      skip(product.carModelLabel) ? null : product.carModelLabel,
+      skip(product.yearLabel) ? null : `ปี ${product.yearLabel}`,
+    ].filter(Boolean).join(' ')
+    const parts = [brand, car || null].filter(Boolean)
+    if (!parts.length) return null
+    return (
+      <div className="mt-1 flex flex-wrap items-start gap-1">
+        <p className="line-clamp-2 flex-1 min-w-0 text-xs leading-relaxed text-slate-500">
+          {parts.join(' · ')}
+        </p>
+      </div>
+    )
+  }
+
+  const parts = [brand, ...carParts].filter(Boolean)
+  const totalFits = seen.size
+  const flatList = brandOrder.flatMap((cb) =>
+    brandMap.get(cb)!.map((e) => ({ brand: cb, model: e.model, year: e.year })),
+  )
+  const tooltipText = flatList
+    .map((f) => `${f.brand} ${f.model}${f.year ? ' ปี ' + f.year : ''}`)
+    .join('\n')
+
   return (
-    <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-slate-500">
-      {parts.join(' · ')}
-    </p>
+    <div className="mt-1 flex flex-wrap items-start gap-1">
+      <p className="line-clamp-2 flex-1 min-w-0 text-xs leading-relaxed text-slate-500">
+        {parts.join(' · ')}
+      </p>
+      {totalFits > 2 ? (
+        <span
+          className="group relative inline-flex shrink-0 items-center align-middle"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <span
+            className="cursor-help rounded bg-sky-50 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 hover:bg-sky-100"
+            title={tooltipText}
+          >
+            {totalFits} รุ่น
+          </span>
+          <div className="pointer-events-none invisible absolute right-0 top-full z-[100] mt-1 max-h-64 w-72 overflow-y-auto rounded-md border border-slate-200 bg-white p-2 text-[11px] leading-snug text-slate-700 opacity-0 shadow-xl transition-opacity duration-150 group-hover:visible group-hover:opacity-100">
+            <p className="mb-1 text-[10px] font-bold uppercase tracking-wide text-slate-400">
+              ใช้ได้ทั้งหมด {totalFits} รุ่น
+            </p>
+            {brandOrder.map((cb) => (
+              <div key={cb} className="mb-1.5 last:mb-0">
+                <p className="text-[10px] font-semibold text-slate-500">{cb}</p>
+                {brandMap.get(cb)!.map((e, i) => (
+                  <p key={i} className="py-0.5 pl-2 text-slate-600">
+                    · {e.model}{e.year ? ` ปี ${e.year}` : ''}
+                  </p>
+                ))}
+              </div>
+            ))}
+          </div>
+        </span>
+      ) : null}
+    </div>
   )
 }
 
@@ -678,6 +770,8 @@ const ProductMasterGridCard = memo(function ProductMasterGridCard({
   selected,
   onContextMenuProduct,
   dimensionSearchActive,
+  preferredFitment,
+  matchingFitments,
 }: {
   product: ProductMasterDetail
   onOpenProduct: (id: string) => void
@@ -685,6 +779,8 @@ const ProductMasterGridCard = memo(function ProductMasterGridCard({
   selected: boolean
   onContextMenuProduct: (e: React.MouseEvent, id: string) => void
   dimensionSearchActive?: boolean
+  preferredFitment?: VehicleFitmentRef
+  matchingFitments?: VehicleFitmentRef[]
 }) {
   return (
     <div className="relative w-full">
@@ -703,7 +799,7 @@ const ProductMasterGridCard = memo(function ProductMasterGridCard({
           {product.name}
         </p>
         <ProductPortfolioBadges product={product} />
-        <ProductCardMeta product={product} />
+        <ProductCardMeta product={product} preferredFitment={preferredFitment} matchingFitments={matchingFitments} />
         {dimensionSearchActive && product.physicalDimensions ? (
           <p className="mt-1.5 line-clamp-3 text-[11px] leading-snug text-violet-900/95 tabular-nums">
             <span className="font-medium text-violet-950">ในระบบ:</span> {formatPhysicalDimensionsSearchRow(product.physicalDimensions)}
@@ -725,6 +821,8 @@ const ProductMasterListRow = memo(function ProductMasterListRow({
   selected,
   onContextMenuProduct,
   dimensionSearchActive,
+  preferredFitment,
+  matchingFitments,
 }: {
   product: ProductMasterDetail
   onOpenProduct: (id: string) => void
@@ -732,6 +830,8 @@ const ProductMasterListRow = memo(function ProductMasterListRow({
   selected: boolean
   onContextMenuProduct: (e: React.MouseEvent, id: string) => void
   dimensionSearchActive?: boolean
+  preferredFitment?: VehicleFitmentRef
+  matchingFitments?: VehicleFitmentRef[]
 }) {
   return (
     <tr
@@ -758,7 +858,7 @@ const ProductMasterListRow = memo(function ProductMasterListRow({
       <td className="min-w-0 py-2 pr-2 pos-compact:py-1.5">
         <p className="font-medium text-slate-900 pos-compact:text-sm">{product.name}</p>
         <ProductPortfolioBadges product={product} />
-        <ProductCardMeta product={product} />
+        <ProductCardMeta product={product} preferredFitment={preferredFitment} matchingFitments={matchingFitments} />
         {dimensionSearchActive && product.physicalDimensions ? (
           <p className="mt-1 line-clamp-2 text-[11px] leading-snug text-violet-900/95 tabular-nums">
             <span className="font-medium text-violet-950">ในระบบ:</span> {formatPhysicalDimensionsSearchRow(product.physicalDimensions)}
@@ -1331,6 +1431,7 @@ export function ProductDataFileView() {
   const [filterDrive, setFilterDrive] = useState(_c.filterDrive)
   const [filterYear, setFilterYear] = useState(_c.filterYear)
   const [filterChassisCode, setFilterChassisCode] = useState(_c.filterChassisCode ?? '')
+  const [filterTrim, setFilterTrim] = useState<string>(FILTER_ALL)
   const [catalogSort, setCatalogSort] = useState<MasterCatalogSort>(_c.catalogSort)
   /** A=ใน/กว้าง → inner, B=นอก/ยาว → outer, C=หนา/สูง → height */
   const [measA, setMeasA] = useState(_c.measA)
@@ -1347,6 +1448,11 @@ export function ProductDataFileView() {
   const [products, setProducts] = useState<ProductMasterDetail[]>(() => [...getProductMasterList()])
   const [showBin, setShowBin] = useState(false)
   const [hardDeleteTarget, setHardDeleteTarget] = useState<ProductMasterDetail | null>(null)
+
+  useEffect(() => {
+    if (showBin) setShowBin(false)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navSelection])
 
   const activeProducts = useMemo(() => products.filter((p) => !p.deletedAt), [products])
   const binProducts = useMemo(() => products.filter((p) => !!p.deletedAt), [products])
@@ -1536,8 +1642,8 @@ export function ProductDataFileView() {
   )
 
   const afterSearch = useMemo(
-    () => (hasSearched ? filterProductsBySearch(searchIndex, q) : []),
-    [hasSearched, searchIndex, q],
+    () => filterProductsBySearch(searchIndex, q),
+    [searchIndex, q],
   )
 
   const filteredBeforeChassis = useMemo(
@@ -1546,15 +1652,21 @@ export function ProductDataFileView() {
   )
   const filtered = useMemo(() => {
     const q = filterChassisCode.trim().toUpperCase()
-    if (!q) return filteredBeforeChassis
+    const hasChassis = q.length > 0
+    const hasTrim = filterTrim !== FILTER_ALL
+    if (!hasChassis && !hasTrim) return filteredBeforeChassis
     return filteredBeforeChassis.filter((p) => {
       const fits = p.vehicleFitments ?? []
       return fits.some((f) => {
-        const codes = [f.chassisCode, f.engineCode, f.engineText].filter(Boolean) as string[]
-        return codes.some((c) => c.toUpperCase().includes(q))
+        if (hasChassis) {
+          const codes = [f.chassisCode, f.engineCode, f.engineText].filter(Boolean) as string[]
+          if (!codes.some((c) => c.toUpperCase().includes(q))) return false
+        }
+        if (hasTrim && (f.trim ?? '') !== filterTrim) return false
+        return true
       })
     })
-  }, [filteredBeforeChassis, filterChassisCode])
+  }, [filteredBeforeChassis, filterChassisCode, filterTrim])
 
   const measureInput = useMemo(() => {
     const id = parseMeasureMm(measA)
@@ -1599,14 +1711,106 @@ export function ProductDataFileView() {
   useEffect(() => { setVisibleCount(PAGE_SIZE) }, [sortedList])
   const visibleList = useMemo(() => sortedList.slice(0, visibleCount), [sortedList, visibleCount])
 
+  // Are any vehicle filters / search active? Used to decide whether to filter the popup list
+  const hasActiveVehicleFilter =
+    filterCarBrand !== FILTER_ALL ||
+    filterCarModel !== FILTER_ALL ||
+    filterEngine !== FILTER_ALL ||
+    filterDrive !== FILTER_ALL ||
+    filterYear !== FILTER_ALL ||
+    filterTrim !== FILTER_ALL ||
+    filterChassisCode.trim().length > 0 ||
+    (hasSearched && q.trim().length > 0)
+
+  // Returns ALL fitments that pass the active filters (used to scope the "+N รุ่น" popup list)
+  const findMatchingFitments = (product: ProductMasterDetail): VehicleFitmentRef[] | undefined => {
+    if (!product.vehicleFitments?.length) return undefined
+    if (!hasActiveVehicleFilter) return undefined // no filters → caller uses full list
+    const chassisQ = filterChassisCode.trim().toUpperCase()
+    const searchTokens = hasSearched && q.trim()
+      ? q.trim().toLowerCase().split(/\s+/).filter((t) => t.length >= 2)
+      : []
+    return product.vehicleFitments.filter((f) => {
+      if (filterCarBrand !== FILTER_ALL && f.brandName !== filterCarBrand) return false
+      if (filterCarModel !== FILTER_ALL && f.modelName !== filterCarModel) return false
+      if (filterEngine !== FILTER_ALL && normalizeEngineLabelForFilter(f.engineLabel) !== filterEngine) return false
+      if (filterDrive !== FILTER_ALL) {
+        const dt = filterDrive.toUpperCase()
+        if ((f.driveType ?? '').toUpperCase() !== dt && (f.wheels ?? '').toUpperCase() !== dt) return false
+      }
+      if (filterYear !== FILTER_ALL && fitmentYearRangeKey(f) !== filterYear) return false
+      if (filterTrim !== FILTER_ALL && (f.trim ?? '') !== filterTrim) return false
+      if (chassisQ) {
+        const codes = [f.chassisCode, f.engineCode, f.engineText].filter(Boolean) as string[]
+        if (!codes.some((c) => c.toUpperCase().includes(chassisQ))) return false
+      }
+      if (searchTokens.length > 0) {
+        const fitText = `${f.brandName} ${f.modelName}`.toLowerCase().replace(/[-\s]/g, '')
+        const matches = searchTokens.some((tok) => fitText.includes(tok.replace(/[-\s]/g, '')))
+        if (!matches) return false
+      }
+      return true
+    })
+  }
+
+  // When user has filters set OR a search query, find the fitment row that matches
+  // (so the row display shows the relevant fitment, not just the first one)
+  const findPreferredFitment = (product: ProductMasterDetail): VehicleFitmentRef | undefined => {
+    if (!product.vehicleFitments?.length) return undefined
+    const chassisQ = filterChassisCode.trim().toUpperCase()
+    const searchTokens = hasSearched && q.trim()
+      ? q.trim().toLowerCase().split(/\s+/).filter((t) => t.length >= 2)
+      : []
+    const hasAny =
+      filterCarBrand !== FILTER_ALL ||
+      filterCarModel !== FILTER_ALL ||
+      filterEngine !== FILTER_ALL ||
+      filterDrive !== FILTER_ALL ||
+      filterYear !== FILTER_ALL ||
+      filterTrim !== FILTER_ALL ||
+      chassisQ.length > 0 ||
+      searchTokens.length > 0
+    if (!hasAny) return undefined
+    for (const f of product.vehicleFitments) {
+      if (filterCarBrand !== FILTER_ALL && f.brandName !== filterCarBrand) continue
+      if (filterCarModel !== FILTER_ALL && f.modelName !== filterCarModel) continue
+      if (filterEngine !== FILTER_ALL && normalizeEngineLabelForFilter(f.engineLabel) !== filterEngine) continue
+      if (filterDrive !== FILTER_ALL) {
+        const dt = filterDrive.toUpperCase()
+        if ((f.driveType ?? '').toUpperCase() !== dt && (f.wheels ?? '').toUpperCase() !== dt) continue
+      }
+      if (filterYear !== FILTER_ALL && fitmentYearRangeKey(f) !== filterYear) continue
+      if (filterTrim !== FILTER_ALL && (f.trim ?? '') !== filterTrim) continue
+      if (chassisQ) {
+        const codes = [f.chassisCode, f.engineCode, f.engineText].filter(Boolean) as string[]
+        if (!codes.some((c) => c.toUpperCase().includes(chassisQ))) continue
+      }
+      // For search tokens, prefer fitments where the brand/model contains a token
+      if (searchTokens.length > 0) {
+        const fitText = `${f.brandName} ${f.modelName}`.toLowerCase().replace(/[-\s]/g, '')
+        const matches = searchTokens.some((tok) => fitText.includes(tok.replace(/[-\s]/g, '')))
+        if (!matches) continue
+      }
+      return f
+    }
+    return undefined
+  }
+
   function handleCatalogHeaderSort(key: MasterCatalogSortKey) {
     setCatalogSort((prev) => toggleMasterCatalogSort(prev, key))
   }
 
   const filterOptions = useMemo(() => {
-    // Scope filter options to the currently-selected category (so clicking
-    // «เบรก» only shows brands/models that actually have brake pads, not all)
-    const base = filterInStoreOnly ? fromNav.filter((p) => p.inStoreCatalog !== false) : fromNav
+    // Scope filter options to:
+    //   1) currently-selected category (sidebar)
+    //   2) AND the active search-bar query (so typing "Vios" narrows make/model/year dropdowns
+    //      to only what's in the Vios results)
+    let base = filterInStoreOnly ? fromNav.filter((p) => p.inStoreCatalog !== false) : fromNav
+    if (hasSearched && q.trim().length > 0) {
+      const matched = filterProductsBySearch(searchIndex, q)
+      const matchedIds = new Set(matched.map((p) => p.id))
+      base = base.filter((p) => matchedIds.has(p.id))
+    }
     const brands = [...new Set(base.map((p) => p.brand))].sort((a, b) => a.localeCompare(b, 'th'))
     const { carBrands, models, engines, driveTypes, years } = collectInventoryCarFilterOptions(base, {
       carBrand: filterCarBrand,
@@ -1615,8 +1819,18 @@ export function ProductDataFileView() {
       driveType: filterDrive,
       filterAll: FILTER_ALL,
     })
-    return { brands, carBrands, models, engines, driveTypes, years }
-  }, [fromNav, filterInStoreOnly, filterCarBrand, filterCarModel, filterEngine, filterDrive])
+    // Trim options — collect from active products' fitments (cascade with model/brand)
+    const trimSet = new Set<string>()
+    for (const p of base) {
+      for (const f of p.vehicleFitments ?? []) {
+        if (filterCarBrand !== FILTER_ALL && f.brandName !== filterCarBrand) continue
+        if (filterCarModel !== FILTER_ALL && f.modelName !== filterCarModel) continue
+        if (f.trim?.trim()) trimSet.add(f.trim.trim())
+      }
+    }
+    const trims = [...trimSet].sort((a, b) => a.localeCompare(b, 'th'))
+    return { brands, carBrands, models, engines, driveTypes, years, trims }
+  }, [fromNav, filterInStoreOnly, filterCarBrand, filterCarModel, filterEngine, filterDrive, hasSearched, q, searchIndex])
 
   const hasOrphans = useMemo(() => {
     const names = new Set(categoryTree.map((m) => norm(m.name)))
@@ -2200,48 +2414,21 @@ export function ProductDataFileView() {
             />
           </div>
           {allowCost ? (
-            <>
-              <button
-                type="button"
-                title="นำเข้าผ้าเบรก Brembo (322 ตัว) — ลบเฉพาะ brand=Brembo เดิม ไม่กระทบยี่ห้ออื่น"
-                onClick={async () => {
-                  const ok = window.confirm(
-                    'นำเข้าผ้าเบรก Brembo 322 SKU?\n\n• ลบเฉพาะสินค้า brand=Brembo เดิม (ถ้ามี)\n• สินค้ายี่ห้ออื่น (Sakura ฯลฯ) ไม่ถูกแตะต้อง\n• เพิ่มหมวดหลัก «เบรก» และ subcategory «ผ้าเบรก» ให้ถ้ายังไม่มี',
-                  )
-                  if (!ok) return
-                  try {
-                    const r = await runBremboImport()
-                    const subMsg = r.newSubCategories.length
-                      ? `\nเพิ่ม subcategory ใหม่: ${r.newSubCategories.join(', ')}`
-                      : ''
-                    window.alert(
-                      `นำเข้าเสร็จ\n• ลบของเดิม ${r.removed} ตัว\n• เพิ่มใหม่ ${r.added} ตัว\n• สินค้าทั้งหมดในระบบ ${r.total} ตัว${subMsg}`,
-                    )
-                  } catch (err) {
-                    console.error('[brembo-import] failed', err)
-                    window.alert('นำเข้าไม่สำเร็จ — ดู console')
-                  }
-                }}
-                className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-900 shadow-sm transition hover:bg-amber-100"
-              >
-                นำเข้า Brembo
-              </button>
-              <button
-                type="button"
-                disabled={categoryTree.length === 0}
-                title={categoryTree.length === 0 ? 'เพิ่มหมวดหมู่ก่อน (จัดการหมวดหมู่)' : undefined}
-                onClick={() => {
-                  setModalEditProduct(null)
-                  setAddProductCopySource(null)
-                  setCopySuggestedSku(undefined)
-                  setProductModalOpen(true)
-                }}
-                className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg border border-emerald-600 bg-emerald-600 px-3 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-200 disabled:text-slate-500"
-              >
-                <Plus className="size-3.5" strokeWidth={2} />
-                เพิ่มสินค้า
-              </button>
-            </>
+            <button
+              type="button"
+              disabled={categoryTree.length === 0}
+              title={categoryTree.length === 0 ? 'เพิ่มหมวดหมู่ก่อน (จัดการหมวดหมู่)' : undefined}
+              onClick={() => {
+                setModalEditProduct(null)
+                setAddProductCopySource(null)
+                setCopySuggestedSku(undefined)
+                setProductModalOpen(true)
+              }}
+              className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg border border-emerald-600 bg-emerald-600 px-3 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-200 disabled:text-slate-500"
+            >
+              <Plus className="size-3.5" strokeWidth={2} />
+              เพิ่มสินค้า
+            </button>
           ) : null}
         </div>
 
@@ -2265,7 +2452,7 @@ export function ProductDataFileView() {
           browseNav={navSelection}
         />
 
-        <div className="grid w-full gap-1.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+        <div className="grid w-full gap-1.5 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8">
           <label className="block min-w-0">
             <span className="mb-0.5 block text-[11px] text-slate-500">แบรนด์</span>
             <SearchableFilterSelect
@@ -2350,6 +2537,16 @@ export function ProductDataFileView() {
             </div>
           </label>
           <label className="block min-w-0">
+            <span className="mb-0.5 block text-[11px] text-slate-500">รุ่นย่อย / Trim</span>
+            <SearchableFilterSelect
+              value={filterTrim}
+              options={filterOptions.trims}
+              allValue={FILTER_ALL}
+              onChange={setFilterTrim}
+              ariaLabel="รุ่นย่อย / Trim"
+            />
+          </label>
+          <label className="block min-w-0">
             <span className="mb-0.5 block text-[11px] text-slate-500">รหัสตัวถัง / chassis</span>
             <div className="relative">
               <input
@@ -2373,6 +2570,39 @@ export function ProductDataFileView() {
             </div>
           </label>
         </div>
+
+        {(() => {
+          const activeFilterCount =
+            (filterBrand !== FILTER_ALL ? 1 : 0)
+            + (filterCarBrand !== FILTER_ALL ? 1 : 0)
+            + (filterCarModel !== FILTER_ALL ? 1 : 0)
+            + (filterEngine !== FILTER_ALL ? 1 : 0)
+            + (filterDrive !== FILTER_ALL ? 1 : 0)
+            + (filterYear !== FILTER_ALL ? 1 : 0)
+            + (filterTrim !== FILTER_ALL ? 1 : 0)
+            + (filterChassisCode.trim().length > 0 ? 1 : 0)
+          if (activeFilterCount === 0) return null
+          return (
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={() => {
+                  setFilterBrand(FILTER_ALL)
+                  setFilterCarBrand(FILTER_ALL)
+                  setFilterCarModel(FILTER_ALL)
+                  setFilterEngine(FILTER_ALL)
+                  setFilterDrive(FILTER_ALL)
+                  setFilterYear(FILTER_ALL)
+                  setFilterTrim(FILTER_ALL)
+                  setFilterChassisCode('')
+                }}
+                className="inline-flex items-center gap-1 rounded-full border border-rose-200 bg-rose-50 px-2.5 py-0.5 text-[11px] font-semibold text-rose-700 hover:bg-rose-100"
+              >
+                ล้างตัวกรอง ({activeFilterCount})
+              </button>
+            </div>
+          )
+        })()}
 
         {measPanelOpen ? (
         <section
@@ -2672,9 +2902,7 @@ export function ProductDataFileView() {
 
         {sortedList.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50/50 px-4 py-12 text-center text-sm text-slate-500 pos-compact:rounded-xl pos-compact:py-6 pos-compact:px-3 pos-compact:text-xs">
-            {!hasSearched
-              ? 'ยังไม่ได้ค้นหา — พิมพ์คำค้นแล้วกด Enter เพื่อแสดงสินค้า'
-              : catalogFilterHidesAllInNav
+            {catalogFilterHidesAllInNav
               ? 'ในมุมมองนี้มีเฉพาะสินค้าอ้างอิง — ปิดสวิตช์ «เฉพาะในร้าน» ด้านบนเพื่อดูในแฟ้มข้อมูล หรือเปลี่ยนหมวด'
               : dimensionMatch.kind === 'no_dim_in_filter'
                 ? 'ไม่มีสินค้าที่มีมิติในระบบในรายการนี้ — ลองเปลี่ยนหมวดหรือตัวกรอง'
@@ -2726,6 +2954,8 @@ export function ProductDataFileView() {
                         onSelectProduct={handleSelectProduct}
                         selected={selectedProductId === p.id}
                         onContextMenuProduct={openProductContextMenu}
+                        preferredFitment={findPreferredFitment(p)}
+                        matchingFitments={findMatchingFitments(p)}
                       />
                     ))}
                     {visibleCount < sortedList.length ? (
@@ -2766,6 +2996,8 @@ export function ProductDataFileView() {
                       onSelectProduct={handleSelectProduct}
                       selected={selectedProductId === p.id}
                       onContextMenuProduct={openProductContextMenu}
+                      preferredFitment={findPreferredFitment(p)}
+                      matchingFitments={findMatchingFitments(p)}
                     />
                   ))}
                 </div>

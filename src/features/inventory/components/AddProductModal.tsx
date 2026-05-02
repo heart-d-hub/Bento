@@ -167,6 +167,7 @@ function normalizeVehicleLine(
     ...(f.vehicleType ? { vehicleType: f.vehicleType } : {}),
     ...(f.engineSeries ? { engineSeries: f.engineSeries } : {}),
     ...(f.chassisCode ? { chassisCode: f.chassisCode } : {}),
+    ...(f.trim ? { trim: f.trim } : {}),
     ...(f.wheels ? { wheels: f.wheels } : {}),
     ...(f.hp ? { hp: f.hp } : {}),
     ...(f.euroStandard ? { euroStandard: f.euroStandard } : {}),

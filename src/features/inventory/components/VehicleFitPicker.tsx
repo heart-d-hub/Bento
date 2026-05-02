@@ -949,6 +949,12 @@ export function VehicleFitPicker({
                         (r.engineLabel && r.engineLabel !== 'ไม่ระบุเครื่อง/ปี'
                           ? extractEngineTextFromLabel(r.engineLabel)
                           : '')
+                      const displacement =
+                        r.engineSize ||
+                        (engineDisplay && /^\d+(?:\.\d+)?$/.test(engineDisplay.trim())
+                          ? engineDisplay.trim()
+                          : '')
+                      const showEngineDisplayAsSlate = engineDisplay && engineDisplay.trim() !== displacement
                       const yearDisplay = (() => {
                         if (r.yearFrom !== undefined || r.yearTo !== undefined)
                           return buildYearRangeLabel(r.yearFrom, r.yearTo)
@@ -964,8 +970,6 @@ export function VehicleFitPicker({
                       if (engineDisplay) parts.push(engineDisplay)
                       if (r.engineCode) parts.push(`[${r.engineCode}]`)
                       if (r.driveType) parts.push(r.driveType)
-                      if (r.brakePosition === 'front') parts.push('เบรกหน้า')
-                      else if (r.brakePosition === 'rear') parts.push('เบรกหลัง')
                       const isEditing = editingRowId === r.id
                       return (
                         <div
@@ -976,17 +980,17 @@ export function VehicleFitPicker({
                           )}
                         >
                           <span className="flex min-w-0 flex-1 flex-wrap items-center gap-x-1.5 gap-y-0.5">
-                            {(parts.length > 0 || r.chassisCode || r.trim || r.hp || r.wheels || r.euroStandard || r.engineSize) ? (
+                            {(parts.length > 0 || r.chassisCode || r.trim || r.hp || r.wheels || r.euroStandard || r.engineSize || displacement) ? (
                               <>
-                                {/* Chassis code (or fallback to engineDisplay) */}
+                                {/* Chassis code, or non-numeric engine descriptor (e.g. "VVT-i") */}
                                 {r.chassisCode ? (
                                   <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-semibold text-slate-700">{r.chassisCode}</span>
-                                ) : engineDisplay ? (
+                                ) : showEngineDisplayAsSlate ? (
                                   <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-semibold text-slate-700">{engineDisplay}</span>
                                 ) : null}
-                                {/* Engine size + HP + Euro */}
-                                {r.engineSize ? (
-                                  <span className="rounded bg-violet-50 px-1.5 py-0.5 text-[10px] font-semibold text-violet-700">{r.engineSize}L</span>
+                                {/* Engine displacement (highlighted) */}
+                                {displacement ? (
+                                  <span className="rounded bg-violet-50 px-1.5 py-0.5 text-[10px] font-semibold text-violet-700">{displacement}L</span>
                                 ) : null}
                                 {r.hp != null ? (
                                   <span className="rounded bg-orange-50 px-1.5 py-0.5 text-[10px] font-semibold text-orange-700">{r.hp} HP</span>
@@ -1002,18 +1006,26 @@ export function VehicleFitPicker({
                                 {r.wheels ? (
                                   <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700">{r.wheels}</span>
                                 ) : null}
-                                {r.driveType ? (
-                                  <span className="rounded bg-sky-50 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700">{r.driveType}</span>
-                                ) : null}
+                                {r.driveType
+                                  ? r.driveType
+                                      .split(/[\/,+]/)
+                                      .map((d) => d.trim())
+                                      .filter(Boolean)
+                                      .map((d, i) => (
+                                        <span
+                                          key={`${r.id}-drive-${i}`}
+                                          className="rounded bg-sky-50 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700"
+                                        >
+                                          {d}
+                                        </span>
+                                      ))
+                                  : null}
                                 {/* Engine code in brackets */}
                                 {r.engineCode ? (
                                   <span className="text-[10px] font-mono text-slate-400">[{r.engineCode}]</span>
                                 ) : null}
                                 {yearDisplay ? (
                                   <span className="text-[11px] text-slate-500">ปี {yearDisplay}</span>
-                                ) : null}
-                                {r.brakePosition ? (
-                                  <span className="text-[10px] text-slate-400">{r.brakePosition === 'front' ? 'เบรกหน้า' : 'เบรกหลัง'}</span>
                                 ) : null}
                               </>
                             ) : (

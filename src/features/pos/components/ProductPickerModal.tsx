@@ -271,19 +271,26 @@ export function ProductPickerModal({
   }, [open, customerAccountCode])
 
   const masterProducts = useMemo<ProductMasterDetail[]>(() => {
+    // Scope filter options to:
+    //   1) currently-selected category (so picking «เบรก» only shows brands with brake pads)
+    //   2) AND active search-bar query (so typing "Vios" narrows make/model/year to the result set)
+    const tokens = tokenizeSearch(deferredSearchQuery)
+    const hasText = tokens.length > 0
     const list: ProductMasterDetail[] = []
     const seen = new Set<string>()
     for (const p of products) {
-      // Scope filter options to the currently-selected category — so
-      // brand/make/model dropdowns only show what's available in that category
       if (category && p.category !== category) continue
+      if (hasText) {
+        const hay = productHaystackMap.get(p.code) ?? ''
+        if (!tokens.every((t) => hay.includes(t))) continue
+      }
       if (seen.has(p.code)) continue
       seen.add(p.code)
       const master = getProductMasterBySku(p.code)
       if (master) list.push(master)
     }
     return list
-  }, [products, category])
+  }, [products, productHaystackMap, category, deferredSearchQuery])
 
   const carFilterOptions = useMemo(() => {
     const base = collectInventoryCarFilterOptions(masterProducts, {
@@ -899,16 +906,14 @@ export function ProductPickerModal({
                   placeholder="Euro"
                 />
               )}
-              {trimOptions.length > 0 && (
-                <SearchableFilterSelect
-                  value={trim}
-                  options={trimOptions}
-                  allValue={FILTER_ALL}
-                  onChange={setTrim}
-                  ariaLabel="รุ่นย่อย / Trim"
-                  placeholder="รุ่นย่อย / Trim"
-                />
-              )}
+              <SearchableFilterSelect
+                value={trim}
+                options={trimOptions}
+                allValue={FILTER_ALL}
+                onChange={setTrim}
+                ariaLabel="รุ่นย่อย / Trim"
+                placeholder="รุ่นย่อย / Trim"
+              />
               <div className="relative">
                 <input
                   type="text"

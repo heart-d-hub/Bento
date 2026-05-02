@@ -217,6 +217,15 @@ export function normalizeEngineLabelForFilter(label: string | null | undefined):
 }
 
 /** เปรียบเทียบฉลากเครื่องยนต์โดยให้ความสำคัญกับตัวเลขนำ (0.8, 1.0, 1.5, 100, 104, ...) */
+/** Split compound drive-type strings like "2WD/4WD" or "4X2,AWD" into individual tokens. */
+function splitDriveTypeTokens(s: string | undefined | null): string[] {
+  if (!s) return []
+  return s
+    .split(/[\/,+]/)
+    .map((t) => t.trim().toUpperCase())
+    .filter(Boolean)
+}
+
 function compareEngineLabel(a: string, b: string): number {
   const numA = a.match(/^(\d+(?:\.\d+)?)/)?.[1]
   const numB = b.match(/^(\d+(?:\.\d+)?)/)?.[1]
@@ -275,11 +284,11 @@ export function productMatchesInventoryCarFilters(
       normalizeEngineLabelForFilter(f.engineLabel) !== engineLabel
     ) return false
     if (driveType && driveType !== filterAll) {
-      // Match against either driveType (4WD/AWD) or wheels (10WD/6WD truck wheel-count)
+      // Match against either driveType (4WD/AWD) or wheels (10WD/6WD truck wheel-count).
+      // Compound values like "2WD/4WD" are split so picking "2WD" matches a row tagged "2WD/4WD".
       const dt = driveType.toUpperCase()
-      const fdt = (f.driveType ?? '').toUpperCase()
-      const fw = (f.wheels ?? '').toUpperCase()
-      if (fdt !== dt && fw !== dt) return false
+      const fitTokens = [...splitDriveTypeTokens(f.driveType), ...splitDriveTypeTokens(f.wheels)]
+      if (!fitTokens.includes(dt)) return false
     }
     return true
   })
@@ -321,23 +330,25 @@ export function collectInventoryCarFilterOptions(
         if (engineKey) engines.add(engineKey)
       }
       // cascade: driveTypes from brand+model+engine — include both driveType AND wheels
-      // (truck wheel-count e.g. "10WD" lives in `wheels`, drive ratio e.g. "4WD" lives in `driveType`)
+      // (truck wheel-count e.g. "10WD" lives in `wheels`, drive ratio e.g. "4WD" lives in `driveType`).
+      // Compound values like "2WD/4WD" are split into discrete tokens so the dropdown shows "2WD" and "4WD" separately.
       if (
         (!activeBrand || f.brandName === activeBrand) &&
         (!activeModel || f.modelName === activeModel) &&
         (!activeEngine || engineKey === activeEngine)
       ) {
-        if (f.driveType?.trim()) driveTypes.add(f.driveType.trim().toUpperCase())
-        if (f.wheels?.trim()) driveTypes.add(f.wheels.trim().toUpperCase())
+        for (const t of splitDriveTypeTokens(f.driveType)) driveTypes.add(t)
+        for (const t of splitDriveTypeTokens(f.wheels)) driveTypes.add(t)
       }
-      // cascade: years from brand+model+engine+drive (match against either field)
+      // cascade: years from brand+model+engine+drive (match against either field; compound values are split)
+      const driveTokens = activeDrive
+        ? [...splitDriveTypeTokens(f.driveType), ...splitDriveTypeTokens(f.wheels)]
+        : []
       if (
         (!activeBrand || f.brandName === activeBrand) &&
         (!activeModel || f.modelName === activeModel) &&
         (!activeEngine || engineKey === activeEngine) &&
-        (!activeDrive
-          || (f.driveType ?? '').toUpperCase() === activeDrive.toUpperCase()
-          || (f.wheels ?? '').toUpperCase() === activeDrive.toUpperCase())
+        (!activeDrive || driveTokens.includes(activeDrive.toUpperCase()))
       ) {
         const yr = fitmentYearRangeKey(f)
         if (yr) years.add(yr)
@@ -1527,10 +1538,12 @@ export async function hydrateProductMasterFromDb(): Promise<ProductMasterDetail[
       .filter((p) => p && typeof p.id === 'string' && typeof p.sku === 'string')
     const afterHose = migrateLegacyHoseProductTag(list)
     const oemFix = migrateSkuDuplicateFromOemToFactory(afterHose)
-    const normalized = oemFix.list
-    if (oemFix.dirty) {
+    const wheelsFix = migrateWheels1WD(oemFix.list)
+    const bremboFix = normalizeBremboModelTrim(wheelsFix.list)
+    const normalized = bremboFix.list
+    if (oemFix.dirty || wheelsFix.dirty || bremboFix.dirty) {
       void persistProductMasterListToDb(normalized).catch((e) => {
-        console.error('[product-master] migrate SKU→factory persist failed', e)
+        console.error('[product-master] migrate persist failed', e)
       })
     }
     productMasterMemoryCache = normalized
@@ -1590,6 +1603,126 @@ function migrateSkuDuplicateFromOemToFactory(list: ProductMasterDetail[]): {
   return { list: next, dirty }
 }
 
+/**
+ * Sakura's import data had one row tagged `wheels: "1WD"` (UD Trucks Quester CWE GWE),
+ * which is not a real configuration — should be "10WD". Patch any "1WD" already in
+ * localStorage so the dropdown stops listing it. Idempotent.
+ */
+function migrateWheels1WD(list: ProductMasterDetail[]): {
+  list: ProductMasterDetail[]
+  dirty: boolean
+} {
+  let dirty = false
+  const next = list.map((p) => {
+    if (!p.vehicleFitments?.length) return p
+    let productChanged = false
+    const newFits = p.vehicleFitments.map((f) => {
+      if (!f) return f
+      if ((f.wheels ?? '').trim().toUpperCase() === '1WD') {
+        productChanged = true
+        return { ...f, wheels: '10WD' }
+      }
+      return f
+    })
+    if (!productChanged) return p
+    dirty = true
+    return { ...p, vehicleFitments: newFits }
+  })
+  return { list: next, dirty }
+}
+
+/**
+ * Imported data sometimes bakes trim variants into modelName ("City CNG",
+ * "SK100 MARK II", "C-HR Premium Safety"). Split the trim text out of
+ * modelName so each car model collapses to a single dropdown entry, with the
+ * variant kept as `trim`. Idempotent.
+ *
+ * For ALL brands: only split when a shorter bare base exists in the same car
+ * brand's data. This protects legitimate multi-word names like Hino "Series 500".
+ *
+ * For brand=Brembo specifically: also fall back to splitting at the first space
+ * when no bare base exists, since Brembo's data has cases like "C-HR Premium Safety"
+ * where the bare "C-HR" never appears.
+ */
+export function normalizeBremboModelTrim(list: ProductMasterDetail[]): {
+  list: ProductMasterDetail[]
+  dirty: boolean
+} {
+  // Build per-(productBrand+carBrand) sets of model names. Scoping by both keeps,
+  // e.g., Brembo's "Honda City" variants from leaking into Sakura's "Honda City" rows.
+  const namesByKey = new Map<string, Set<string>>()
+  const idForKey = new Map<string, string>()
+  for (const p of list) {
+    const productBrand = (p.brand ?? '').trim().toLowerCase()
+    if (!productBrand) continue
+    for (const f of p.vehicleFitments ?? []) {
+      if (!f?.brandName || !f?.modelName) continue
+      const groupKey = `${productBrand}|${f.brandName}`
+      let names = namesByKey.get(groupKey)
+      if (!names) {
+        names = new Set()
+        namesByKey.set(groupKey, names)
+      }
+      names.add(f.modelName)
+      const idKey = `${groupKey}::${f.modelName}`
+      if (!idForKey.has(idKey) && f.modelId) idForKey.set(idKey, f.modelId)
+    }
+  }
+
+  type BaseEntry = { baseName: string; baseModelId?: string }
+  const baseMap = new Map<string, BaseEntry>()
+  for (const [groupKey, names] of namesByKey) {
+    const productBrand = groupKey.split('|', 1)[0]
+    const allowFirstSpaceFallback = productBrand === 'brembo'
+    const sortedDesc = [...names].sort((a, b) => b.length - a.length)
+    for (const name of names) {
+      let baseName = name
+      let baseModelId = idForKey.get(`${groupKey}::${name}`)
+      for (const candidate of sortedDesc) {
+        if (candidate === name) continue
+        if (name.startsWith(candidate + ' ')) {
+          baseName = candidate
+          baseModelId = idForKey.get(`${groupKey}::${candidate}`)
+          break
+        }
+      }
+      if (baseName === name && allowFirstSpaceFallback) {
+        const idx = name.indexOf(' ')
+        if (idx > 0) {
+          baseName = name.slice(0, idx)
+          baseModelId = undefined
+        }
+      }
+      baseMap.set(`${groupKey}::${name}`, { baseName, baseModelId })
+    }
+  }
+
+  let dirty = false
+  const next = list.map((p) => {
+    const productBrand = (p.brand ?? '').trim().toLowerCase()
+    if (!productBrand) return p
+    if (!p.vehicleFitments?.length) return p
+    let productChanged = false
+    const newFits = p.vehicleFitments.map((f) => {
+      if (!f?.brandName || !f?.modelName) return f
+      const key = `${productBrand}|${f.brandName}::${f.modelName}`
+      const base = baseMap.get(key)
+      if (!base || base.baseName === f.modelName) return f
+      const suffix = f.modelName.slice(base.baseName.length).trim()
+      productChanged = true
+      const updated: VehicleFitmentRef = { ...f, modelName: base.baseName }
+      if (base.baseModelId) updated.modelId = base.baseModelId
+      if (!f.trim && suffix) updated.trim = suffix
+      return updated
+    })
+    if (!productChanged) return p
+    dirty = true
+    return { ...p, vehicleFitments: newFits }
+  })
+
+  return { list: next, dirty }
+}
+
 export function getProductMasterList(): ProductMasterDetail[] {
   if (productMasterMemoryCache !== null) {
     return productMasterMemoryCache
@@ -1601,17 +1734,20 @@ export function getProductMasterList(): ProductMasterDetail[] {
     if (!Array.isArray(parsed) || parsed.length === 0) return [...PRODUCT_MASTER_DETAILS]
     const afterHose = migrateLegacyHoseProductTag(parsed as ProductMasterDetail[])
     const oemFix = migrateSkuDuplicateFromOemToFactory(afterHose)
-    if (oemFix.dirty) {
+    const wheelsFix = migrateWheels1WD(oemFix.list)
+    const bremboFix = normalizeBremboModelTrim(wheelsFix.list)
+    const finalList = bremboFix.list
+    if (oemFix.dirty || wheelsFix.dirty || bremboFix.dirty) {
       try {
-        localStorage.setItem(PRODUCT_MASTER_LIST_LS_KEY, JSON.stringify(oemFix.list))
+        localStorage.setItem(PRODUCT_MASTER_LIST_LS_KEY, JSON.stringify(finalList))
       } catch {
         /* ignore */
       }
       if (isTauri()) {
-        schedulePersistProductMasterListToDb(oemFix.list)
+        schedulePersistProductMasterListToDb(finalList)
       }
     }
-    return oemFix.list
+    return finalList
   } catch {
     return [...PRODUCT_MASTER_DETAILS]
   }
