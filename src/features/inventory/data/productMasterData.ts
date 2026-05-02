@@ -86,6 +86,20 @@ export type VehicleFitmentRef = {
   /** ระบบขับเคลื่อน เช่น 2WD, 4WD, AWD */
   driveType?: string
   engineCode?: string
+  /** มาตรฐานไอเสีย — เช่น "Euro 3", "Euro 5" — เก็บแยกจาก engineCode (ไม่ใช่รหัสเครื่อง) */
+  euroStandard?: string
+  /** ประเภทตัวรถ — รถบรรทุก / รถโดยสารประจำทาง / รถขุด / แทรคเตอร์ ฯลฯ (ไทย) */
+  vehicleType?: string
+  /** ซีรีย์ / family ของรุ่น เช่น "Mega", "Series 500", "Decca", "Elf" (ภาษาอังกฤษ) */
+  engineSeries?: string
+  /** จำนวนล้อ + รูปแบบขับ (เก็บแบบสั้น 10WD/6WD/4WD/12WD) */
+  wheels?: string
+  /** กำลังเครื่อง (HP) — สำหรับ filter ช่วงแรงม้า */
+  hp?: number
+  /** รหัสตัวถัง / chassis code — ทั้ง chassis variant (FM2P, FN527M, NQR) และ generation code (JZS155, AE100) */
+  chassisCode?: string
+  /** ขนาดเครื่อง / displacement เช่น "1.5", "2.5", "3.0" — string เพราะรองรับ multi-value */
+  engineSize?: string
   /** เฉพาะผ้าเบรก/ดิสก์ — ไม่ระบุ = ชิ้นทั่วไปที่ไม่แยกหน้า-หลัง */
   brakePosition?: 'front' | 'rear'
 }
@@ -161,13 +175,58 @@ export function masterProductsForEngine(
 
 /** ดึงช่วงปีสำหรับใช้เป็น key ในตัวกรอง เช่น "2009-2015", "2016+", "ถึง 2010" */
 export function fitmentYearRangeKey(f: VehicleFitmentRef): string {
-  if (f.yearFrom != null && f.yearTo != null) return `${f.yearFrom}-${f.yearTo}`
+  if (f.yearFrom != null && f.yearTo != null) {
+    if (f.yearTo >= 2100) return `${f.yearFrom}+`
+    return `${f.yearFrom}-${f.yearTo}`
+  }
   if (f.yearFrom != null) return `${f.yearFrom}+`
   if (f.yearTo != null) return `ถึง ${f.yearTo}`
   const t = f.yearRangeText?.trim()
-  if (t) return t
+  // ใช้ yearRangeText เป็น key เฉพาะเมื่อมีตัวเลข 4 หลักในช่วงปีจริง (1980-2100)
+  // ไม่งั้นรหัสเครื่อง / รหัสรุ่น tractor (เช่น "5055E", "6610B") จะหลุดมาอยู่ใน year filter
+  if (t) {
+    const m = t.match(/(\d{4})/)
+    if (m) {
+      const y = parseInt(m[1], 10)
+      if (y >= 1980 && y <= 2100) return t
+    }
+  }
   const m = (f.engineLabel ?? '').match(/(\d{4}\s*[-–]\s*\d{4})/)
   return m?.[1] ?? ''
+}
+
+/**
+ * ค่าเครื่องยนต์ที่ใช้กรองในรายการสินค้า — ตัดวงเล็บท้ายข้อความออกทั้งหมด
+ * (ทั้งปี เช่น "(2014-2018)" / "(2015+)" และโค้ดเครื่อง เช่น "(1KD)", "(JZS155)")
+ * เพื่อให้ "1.0", "1.0 (SCP10)", "1.0 (2009-2014)" ถูกรวมเป็น filter ตัวเดียว
+ * ปรับ "HP" → "hp" ให้สม่ำเสมอ, และคืนค่าว่างเมื่อเป็นเครื่องหมายเว้นว่าง ("—", "-")
+ */
+export function normalizeEngineLabelForFilter(label: string | null | undefined): string {
+  if (!label) return ''
+  let s = label.trim()
+  if (!s || s === '—' || s === '-') return ''
+  // ตัดวงเล็บท้ายซ้ำ ๆ — ครอบคลุมทั้งปี ("(2014-2018)", "(2020+)") และโค้ดเครื่อง ("(1KD)")
+  const trailingParen = /\s*\([^()]*\)\s*$/
+  while (trailingParen.test(s)) {
+    s = s.replace(trailingParen, '').trim()
+  }
+  s = s.replace(/\bHP\b/g, 'hp')
+  return s
+}
+
+/** เปรียบเทียบฉลากเครื่องยนต์โดยให้ความสำคัญกับตัวเลขนำ (0.8, 1.0, 1.5, 100, 104, ...) */
+function compareEngineLabel(a: string, b: string): number {
+  const numA = a.match(/^(\d+(?:\.\d+)?)/)?.[1]
+  const numB = b.match(/^(\d+(?:\.\d+)?)/)?.[1]
+  if (numA && numB) {
+    const diff = parseFloat(numA) - parseFloat(numB)
+    if (diff !== 0) return diff
+  } else if (numA) {
+    return -1
+  } else if (numB) {
+    return 1
+  }
+  return a.localeCompare(b, 'th')
 }
 
 /** ใช้กับแฟ้มข้อมูลสินค้า — กรองยี่ห้อ/รุ่น/เครื่อง-ปี จาก vehicleFitments หรือฟิลด์สรุปเดิม */
@@ -190,22 +249,38 @@ export function productMatchesInventoryCarFilters(
     if (carBrand !== filterAll && p.carBrand !== carBrand) return false
     if (carModel !== filterAll && p.carModelLabel !== carModel) return false
     if (year !== filterAll && p.yearLabel !== year) return false
+    // legacy summary fields don't carry engine/drive info — if the user is
+    // filtering by either, this product can't possibly match
+    if (engineLabel && engineLabel !== filterAll) return false
+    if (driveType && driveType !== filterAll) return false
     return true
   }
 
   const fits = p.vehicleFitments
   if (!fits?.length) return matchLegacy()
 
-  const anyFit = fits.some((f) => {
+  // เมื่อมี vehicleFitments — กรองตาม fitment เท่านั้น (ห้าม fallback ไป matchLegacy
+  // เพราะ matchLegacy ไม่รู้จัก engine/drive จะทำให้ filter ขาดประสิทธิภาพ — ผลลัพธ์
+  // จะรวมสินค้าที่ไม่ตรงกับ engine/drive ที่ผู้ใช้เลือก)
+  return fits.some((f) => {
     if (!f) return false
     if (carBrand !== filterAll && f.brandName !== carBrand) return false
     if (carModel !== filterAll && f.modelName !== carModel) return false
     if (year !== filterAll && fitmentYearRangeKey(f) !== year) return false
-    if (engineLabel && engineLabel !== filterAll && (f.engineLabel ?? '').trim() !== engineLabel) return false
-    if (driveType && driveType !== filterAll && (f.driveType ?? '').toUpperCase() !== driveType.toUpperCase()) return false
+    if (
+      engineLabel &&
+      engineLabel !== filterAll &&
+      normalizeEngineLabelForFilter(f.engineLabel) !== engineLabel
+    ) return false
+    if (driveType && driveType !== filterAll) {
+      // Match against either driveType (4WD/AWD) or wheels (10WD/6WD truck wheel-count)
+      const dt = driveType.toUpperCase()
+      const fdt = (f.driveType ?? '').toUpperCase()
+      const fw = (f.wheels ?? '').toUpperCase()
+      if (fdt !== dt && fw !== dt) return false
+    }
     return true
   })
-  return anyFit || matchLegacy()
 }
 
 export function collectInventoryCarFilterOptions(
@@ -234,28 +309,33 @@ export function collectInventoryCarFilterOptions(
     for (const f of p.vehicleFitments ?? []) {
       if (!f) continue
       if (f.brandName) carBrands.add(f.brandName)
+      const engineKey = normalizeEngineLabelForFilter(f.engineLabel)
       // cascade: models from brand
       if (!activeBrand || f.brandName === activeBrand) {
         if (f.modelName) models.add(f.modelName)
       }
       // cascade: engines from brand+model
       if ((!activeBrand || f.brandName === activeBrand) && (!activeModel || f.modelName === activeModel)) {
-        if (f.engineLabel?.trim()) engines.add(f.engineLabel.trim())
+        if (engineKey) engines.add(engineKey)
       }
-      // cascade: driveTypes from brand+model+engine
+      // cascade: driveTypes from brand+model+engine — include both driveType AND wheels
+      // (truck wheel-count e.g. "10WD" lives in `wheels`, drive ratio e.g. "4WD" lives in `driveType`)
       if (
         (!activeBrand || f.brandName === activeBrand) &&
         (!activeModel || f.modelName === activeModel) &&
-        (!activeEngine || (f.engineLabel ?? '').trim() === activeEngine)
+        (!activeEngine || engineKey === activeEngine)
       ) {
         if (f.driveType?.trim()) driveTypes.add(f.driveType.trim().toUpperCase())
+        if (f.wheels?.trim()) driveTypes.add(f.wheels.trim().toUpperCase())
       }
-      // cascade: years from brand+model+engine+drive
+      // cascade: years from brand+model+engine+drive (match against either field)
       if (
         (!activeBrand || f.brandName === activeBrand) &&
         (!activeModel || f.modelName === activeModel) &&
-        (!activeEngine || (f.engineLabel ?? '').trim() === activeEngine) &&
-        (!activeDrive || (f.driveType ?? '').toUpperCase() === activeDrive.toUpperCase())
+        (!activeEngine || engineKey === activeEngine) &&
+        (!activeDrive
+          || (f.driveType ?? '').toUpperCase() === activeDrive.toUpperCase()
+          || (f.wheels ?? '').toUpperCase() === activeDrive.toUpperCase())
       ) {
         const yr = fitmentYearRangeKey(f)
         if (yr) years.add(yr)
@@ -270,10 +350,40 @@ export function collectInventoryCarFilterOptions(
   return {
     carBrands: [...carBrands].sort((a, b) => a.localeCompare(b, 'th')),
     models: [...models].sort((a, b) => a.localeCompare(b, 'th')),
-    engines: [...engines].sort((a, b) => a.localeCompare(b, 'th')),
-    driveTypes: [...driveTypes].sort(),
-    years: [...years].sort((a, b) => a.localeCompare(b, 'th')),
+    engines: [...engines].sort(compareEngineLabel),
+    driveTypes: [...driveTypes].sort(compareDriveType),
+    years: [...years].sort(compareYearRange),
   }
+}
+
+/** เรียง driveType โดยอ่านตัวเลขนำ — "4WD" ก่อน "6WD" ก่อน "10WD" (ไม่ใช่เรียงตามตัวอักษร) */
+function compareDriveType(a: string, b: string): number {
+  const numA = a.match(/^(\d+)/)?.[1]
+  const numB = b.match(/^(\d+)/)?.[1]
+  if (numA && numB) {
+    const diff = parseInt(numA, 10) - parseInt(numB, 10)
+    if (diff !== 0) return diff
+  } else if (numA) {
+    return -1
+  } else if (numB) {
+    return 1
+  }
+  return a.localeCompare(b)
+}
+
+/** เรียงช่วงปีโดยอ่านปีเริ่มต้นเป็นตัวเลข — "2009-2014" มาก่อน "2014-2018" ก่อน "2020" */
+function compareYearRange(a: string, b: string): number {
+  const numA = a.match(/(\d{4})/)?.[1]
+  const numB = b.match(/(\d{4})/)?.[1]
+  if (numA && numB) {
+    const diff = parseInt(numA, 10) - parseInt(numB, 10)
+    if (diff !== 0) return diff
+  } else if (numA) {
+    return -1
+  } else if (numB) {
+    return 1
+  }
+  return a.localeCompare(b, 'th')
 }
 
 /** ฐานของตัวเลข % ในแถวระดับราคาขาย (ร่วมกับ sellPriceTiers) */
@@ -386,6 +496,8 @@ export type ProductMasterDetail = {
    * โหมดคอลัมน์ % ในแถวระดับราคา: กำไรจากทุน (ค่าเริ่มต้น) หรือ ลด% จากราคาตั้ง (supplierListPrice)
    */
   sellTierPercentBasis?: SellTierPercentBasis
+  /** ราคาขั้นบันไดตามจำนวน — override ราคา tier เมื่อ qty ถึงเกณฑ์ */
+  quantityBreaks?: QuantityBreaksConfig
   /** ถ้ามี — ใช้ในค้นหาตามมิติ (เช่น ไส้กรองที่วัดได้แต่ไม่มีเบอร์) */
   physicalDimensions?: PhysicalDimensions
   crossBranch: CrossBranchStockRow[]
@@ -491,6 +603,27 @@ export function effectiveQtyFromScheme(scheme: string | undefined): number {
   const free = Number(m[2])
   if (!Number.isFinite(buy) || buy <= 0 || !Number.isFinite(free) || free < 0) return 1
   return buy + free
+}
+
+/** หนึ่งขั้นในตารางราคาขั้นบันได — ซื้อ ≥ minQty ของหน่วยนี้ ได้ราคา price บาทต่อหน่วย */
+export type QuantityBreakRow = {
+  minQty: number
+  /** ราคาต่อหน่วย (ไม่ใช่ราคารวม) ที่ขั้นนี้ */
+  price: number
+}
+
+/** ตารางราคาขั้นบันไดของ product หนึ่งหน่วย — เริ่มต้นใช้ทุก tier; per-tier override ทับเฉพาะ tier ที่ระบุ */
+export type QuantityBreaksForUnit = {
+  /** index ของ unit ใน salesUnits ที่ขั้นบันไดนี้ใช้กับ */
+  unitIndex: number
+  /** ขั้นบันไดเริ่มต้น — ใช้กับทุกระดับลูกค้าเว้นแต่ tier ใดมี override */
+  defaultBreaks?: QuantityBreakRow[]
+  /** override ตาม tier index: 0=ปลีก 1=อู่ 2=ร้านค้า 3=VIP */
+  perTierBreaks?: { [tierIndex: number]: QuantityBreakRow[] }
+}
+
+export type QuantityBreaksConfig = {
+  perUnit: QuantityBreaksForUnit[]
 }
 
 export type SellPriceTierPricingContext = {
@@ -638,6 +771,50 @@ export function tierHasExplicitUnitPrice(
   return false
 }
 
+/**
+ * หาราคาขั้นบันไดที่เหมาะกับ qty บนหน่วยนี้ — เลือก row ที่ minQty ≤ qty และ minQty มากที่สุด
+ * คืนค่า null ถ้าไม่มี break ใดเข้าเงื่อนไข (เช่น qty < minQty ของ row แรก หรือไม่มี breaks เลย)
+ */
+export function pickQuantityBreakPrice(
+  breaks: QuantityBreakRow[] | undefined,
+  qty: number,
+): QuantityBreakRow | null {
+  if (!breaks || breaks.length === 0 || qty <= 0) return null
+  let best: QuantityBreakRow | null = null
+  for (const row of breaks) {
+    if (!row || !Number.isFinite(row.minQty) || !Number.isFinite(row.price)) continue
+    if (row.price <= 0 || row.minQty <= 0) continue
+    if (qty >= row.minQty && (best === null || row.minQty > best.minQty)) {
+      best = row
+    }
+  }
+  return best
+}
+
+/**
+ * ราคาขั้นบันไดสำหรับ (product, unit, tier, qty) — ลำดับลำดับศักดิ์:
+ *   1. perTierBreaks[tierIndex] ของ unit นี้ → break ที่ qty ถึง
+ *   2. defaultBreaks ของ unit นี้ → break ที่ qty ถึง
+ *   3. null (ใช้ราคา tier matrix แบบ single-qty ที่อยู่ภายนอก)
+ */
+export function quantityBreakPriceFor(
+  master: ProductMasterDetail | undefined,
+  unitIndex: number,
+  tierIndex: number,
+  qty: number,
+): { price: number; minQty: number; source: 'tier' | 'default' } | null {
+  const cfg = master?.quantityBreaks
+  if (!cfg?.perUnit?.length) return null
+  const forUnit = cfg.perUnit.find((u) => u.unitIndex === unitIndex)
+  if (!forUnit) return null
+  const tierRows = forUnit.perTierBreaks?.[tierIndex]
+  const tierMatch = pickQuantityBreakPrice(tierRows, qty)
+  if (tierMatch) return { price: tierMatch.price, minQty: tierMatch.minQty, source: 'tier' }
+  const defaultMatch = pickQuantityBreakPrice(forUnit.defaultBreaks, qty)
+  if (defaultMatch) return { price: defaultMatch.price, minQty: defaultMatch.minQty, source: 'default' }
+  return null
+}
+
 /** ดึงตัวเลขนำหน้าจากข้อความบรรจุ (เช่น "12 ชิ้น/ลัง" → 12) */
 export function parsePiecesPerPack(packaging: string | undefined): number {
   if (!packaging?.trim()) return 1
@@ -712,6 +889,48 @@ export const PRODUCT_MASTER_DETAILS: ProductMasterDetail[] = [
         status: 'low',
         showTransfer: true,
       },
+    ],
+  },
+  {
+    id: 'pm-oil-idemitsu-15w40',
+    sku: 'OIL-IDM-15W40-1L',
+    name: 'น้ำมันเครื่อง Idemitsu Zepro 15W-40 (1 ลิตร)',
+    brand: 'Idemitsu',
+    category: 'น้ำมันเครื่อง',
+    subCategory: 'น้ำมันเครื่อง · ดีเซล',
+    carBrand: '—',
+    carModelLabel: '—',
+    yearLabel: '—',
+    oemTags: [],
+    carModels: [],
+    costPrice: 600,
+    scheme: '3+0',
+    avgCost: 605,
+    sellPrice: 870,
+    salesUnits: [
+      { id: 'oil-piece', label: 'ขวด', baseUnits: 1 },
+      { id: 'oil-box', label: 'ลัง', baseUnits: 3 },
+    ],
+    sellPriceTiers: [
+      { price: 0, discountPercent: 0, explicitUnitPrices: [870, 2550] },
+    ],
+    /** ตัวอย่างราคาขั้นบันได: ซื้อหลายลังลดราคา/ลัง — ใช้กับทุกระดับลูกค้า */
+    quantityBreaks: {
+      perUnit: [
+        {
+          unitIndex: 1, // ลัง
+          defaultBreaks: [
+            { minQty: 1, price: 2550 },
+            { minQty: 2, price: 2530 },
+            { minQty: 3, price: 2515 },
+          ],
+        },
+      ],
+    },
+    packaging: '3 ขวด/ลัง',
+    posDisplayNote: 'ซื้อ 3 ลังขึ้นไป ฿2,515/ลัง',
+    crossBranch: [
+      { id: 'oil-cb1', locationLabel: 'คลังกลาง', stock: 48, position: 'OIL-A1', status: 'normal' },
     ],
   },
   {

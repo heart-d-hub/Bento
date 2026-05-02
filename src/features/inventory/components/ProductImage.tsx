@@ -4,10 +4,12 @@ import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 
 const SIZE_CLS = {
-  xs: 'size-8',
-  sm: 'size-10',
-  md: 'size-16',
-  lg: 'size-24',
+  xs: 'h-8 w-8',
+  sm: 'h-10 w-10',
+  md: 'h-16 w-16',
+  lg: 'h-24 w-24',
+  xl: 'h-28 w-28',
+  fill: 'h-full w-full',
 } as const
 
 type Props = {
@@ -16,9 +18,35 @@ type Props = {
   className?: string
   zoomable?: boolean
   onProject?: () => void
+  /** เมื่อไม่มีรูปจริง — แสดง avatar gradient + ตัวอักษรนี้แทน (เช่น 'I' จาก IDEMITSU) */
+  fallbackLetter?: string
+  /** เมื่อไม่มีรูปจริง + ไม่มี letter — แสดง emoji แทน (เช่น 🛢️ สำหรับน้ำมันเครื่อง) */
+  fallbackEmoji?: string
+  /** วิธีจัดรูปในกรอบ: contain = เห็นทั้งภาพ + letterbox · cover = เต็มกรอบ + crop */
+  objectFit?: 'contain' | 'cover'
+  /** Inline style ส่งให้ outer wrapper — ใช้กรณีที่ class-based sizing ไม่ทำงาน (Tailwind v4) */
+  style?: React.CSSProperties
 }
 
-export function ProductImage({ sku, size = 'md', className, zoomable = false, onProject }: Props) {
+/** Pick gradient ตาม hash ของ string — เพื่อให้สินค้า brand เดียวกันได้สีเดียวกัน */
+const FALLBACK_GRADIENTS = [
+  'from-blue-400 to-cyan-400',
+  'from-emerald-400 to-teal-400',
+  'from-violet-400 to-fuchsia-400',
+  'from-amber-400 to-orange-400',
+  'from-rose-400 to-pink-400',
+  'from-indigo-400 to-purple-400',
+  'from-sky-400 to-blue-500',
+  'from-lime-400 to-emerald-500',
+] as const
+
+function pickGradient(seed: string): string {
+  let h = 0
+  for (let i = 0; i < seed.length; i += 1) h = (h * 31 + seed.charCodeAt(i)) | 0
+  return FALLBACK_GRADIENTS[Math.abs(h) % FALLBACK_GRADIENTS.length]
+}
+
+export function ProductImage({ sku, size = 'md', className, zoomable = false, onProject, fallbackLetter, fallbackEmoji, objectFit = 'contain', style }: Props) {
   const [url, setUrl] = useState<string | null>(null)
   const [errored, setErrored] = useState(false)
   const [lightboxOpen, setLightboxOpen] = useState(false)
@@ -53,11 +81,12 @@ export function ProductImage({ sku, size = 'md', className, zoomable = false, on
   return (
     <>
       {hasImage ? (
-        <div className={`group relative shrink-0 ${sizeCls} ${className ?? ''}`}>
+        <div className={`group relative shrink-0 ${sizeCls} ${className ?? ''}`} style={style}>
           <img
             src={url}
             alt={sku}
-            className={`h-full w-full rounded-lg border border-slate-200 bg-slate-50 object-contain ${zoomable ? 'cursor-zoom-in' : onProject ? 'cursor-pointer' : ''}`}
+            style={{ objectPosition: 'center center' }}
+            className={`h-full w-full rounded-lg border border-slate-200 bg-slate-50 ${objectFit === 'cover' ? 'object-cover' : 'object-contain'} ${zoomable ? 'cursor-zoom-in' : onProject ? 'cursor-pointer' : ''}`}
             onError={() => setErrored(true)}
             onClick={(e) => {
               if (!zoomable && onProject) { e.stopPropagation(); onProject(); return }
@@ -84,9 +113,26 @@ export function ProductImage({ sku, size = 'md', className, zoomable = false, on
             </button>
           )}
         </div>
+      ) : fallbackLetter || fallbackEmoji ? (
+        <div
+          className={`relative flex shrink-0 items-center justify-center rounded-lg bg-gradient-to-br ${pickGradient(fallbackLetter || fallbackEmoji || sku)} text-white shadow-inner ${sizeCls} ${className ?? ''}`}
+          style={style}
+          aria-label={`ไม่มีรูป — ${sku}`}
+        >
+          {fallbackLetter ? (
+            <span className="select-none font-black uppercase leading-none tracking-tight" style={{ fontSize: 'min(60%, 2.5rem)' }}>
+              {fallbackLetter.charAt(0)}
+            </span>
+          ) : (
+            <span className="select-none leading-none" style={{ fontSize: 'min(55%, 2rem)' }}>
+              {fallbackEmoji}
+            </span>
+          )}
+        </div>
       ) : (
         <div
           className={`flex shrink-0 items-center justify-center rounded-lg border border-dashed border-slate-200 bg-slate-50 text-slate-300 ${sizeCls} ${className ?? ''}`}
+          style={style}
         >
           <ImageIcon className="size-5" strokeWidth={1.5} aria-hidden />
         </div>

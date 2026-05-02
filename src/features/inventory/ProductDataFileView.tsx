@@ -54,6 +54,7 @@ import {
   ChevronRight,
   ChevronUp,
   ClipboardCopy,
+  Download,
   ExternalLink,
   FlipHorizontal2,
   LayoutGrid,
@@ -69,6 +70,8 @@ import {
   Store,
   Trash2,
 } from 'lucide-react'
+import { runSakuraImport100 } from '@/features/inventory/data/sakuraImportRunner'
+import { SearchableFilterSelect } from '@/features/inventory/components/SearchableFilterSelect'
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
 function formatBaht(n: number) {
@@ -1263,6 +1266,7 @@ type ProductDataFileViewCache = {
   filterEngine: string
   filterDrive: string
   filterYear: string
+  filterChassisCode: string
   catalogSort: MasterCatalogSort
   catalogViewMode: CatalogViewMode
   filterInStoreOnly: boolean
@@ -1291,6 +1295,7 @@ function readCache(): ProductDataFileViewCache {
     filterEngine: FILTER_ALL,
     filterDrive: FILTER_ALL,
     filterYear: FILTER_ALL,
+    filterChassisCode: '',
     catalogSort: { key: 'name', dir: 'asc' },
     catalogViewMode: 'list',
     filterInStoreOnly: true,
@@ -1326,6 +1331,7 @@ export function ProductDataFileView() {
   const [filterEngine, setFilterEngine] = useState(_c.filterEngine)
   const [filterDrive, setFilterDrive] = useState(_c.filterDrive)
   const [filterYear, setFilterYear] = useState(_c.filterYear)
+  const [filterChassisCode, setFilterChassisCode] = useState(_c.filterChassisCode ?? '')
   const [catalogSort, setCatalogSort] = useState<MasterCatalogSort>(_c.catalogSort)
   /** A=ใน/กว้าง → inner, B=นอก/ยาว → outer, C=หนา/สูง → height */
   const [measA, setMeasA] = useState(_c.measA)
@@ -1380,6 +1386,7 @@ export function ProductDataFileView() {
       filterEngine,
       filterDrive,
       filterYear,
+      filterChassisCode,
       catalogSort,
       catalogViewMode,
       filterInStoreOnly,
@@ -1394,7 +1401,7 @@ export function ProductDataFileView() {
     }
   }, [
     navSelection, expandedMain, expandedSub, q, hasSearched,
-    filterBrand, filterCarBrand, filterCarModel, filterEngine, filterDrive, filterYear,
+    filterBrand, filterCarBrand, filterCarModel, filterEngine, filterDrive, filterYear, filterChassisCode,
     catalogSort, catalogViewMode, filterInStoreOnly, showMissingCategoryOnly, selectedProductId,
     measA, measB, measC, measTol, measActive, measPanelOpen,
   ])
@@ -1534,10 +1541,21 @@ export function ProductDataFileView() {
     [hasSearched, searchIndex, q],
   )
 
-  const filtered = useMemo(
+  const filteredBeforeChassis = useMemo(
     () => applyProductFilters(afterSearch, filterBrand, filterCarBrand, filterCarModel, filterEngine, filterDrive, filterYear),
     [afterSearch, filterBrand, filterCarBrand, filterCarModel, filterEngine, filterDrive, filterYear],
   )
+  const filtered = useMemo(() => {
+    const q = filterChassisCode.trim().toUpperCase()
+    if (!q) return filteredBeforeChassis
+    return filteredBeforeChassis.filter((p) => {
+      const fits = p.vehicleFitments ?? []
+      return fits.some((f) => {
+        const codes = [f.chassisCode, f.engineCode, f.engineText].filter(Boolean) as string[]
+        return codes.some((c) => c.toUpperCase().includes(q))
+      })
+    })
+  }, [filteredBeforeChassis, filterChassisCode])
 
   const measureInput = useMemo(() => {
     const id = parseMeasureMm(measA)
@@ -2181,21 +2199,49 @@ export function ProductDataFileView() {
             />
           </div>
           {allowCost ? (
-            <button
-              type="button"
-              disabled={categoryTree.length === 0}
-              title={categoryTree.length === 0 ? 'เพิ่มหมวดหมู่ก่อน (จัดการหมวดหมู่)' : undefined}
-              onClick={() => {
-                setModalEditProduct(null)
-                setAddProductCopySource(null)
-                setCopySuggestedSku(undefined)
-                setProductModalOpen(true)
-              }}
-              className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg border border-emerald-600 bg-emerald-600 px-3 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-200 disabled:text-slate-500"
-            >
-              <Plus className="size-3.5" strokeWidth={2} />
-              เพิ่มสินค้า
-            </button>
+            <>
+              <button
+                type="button"
+                title="ลบสินค้า Sakura เดิมแล้วนำเข้าทั้งหมด 1,305 ตัวจาก Excel กรองซากุระ (เป็นสินค้าอ้างอิง — ไม่แสดงใน POS)"
+                onClick={async () => {
+                  const ok = window.confirm(
+                    'นำเข้าสินค้า Sakura ทั้งหมด 1,305 ตัว (เป็นสินค้าอ้างอิง)?\n\nระบบจะลบสินค้ายี่ห้อ Sakura ทั้งหมดที่มีอยู่ก่อน แล้วเพิ่มชุดใหม่จากแฟ้ม Excel กรองซากุระ\n• inStoreCatalog = false → ไม่แสดงใน POS / ค้นหาหน้าร้าน\n• หมวด «ไส้กรอง» และ subcategory ทั้ง 14 ประเภทจะถูกสร้างให้อัตโนมัติ\n• ไฟล์ข้อมูล ~4MB — โหลดครั้งแรกอาจใช้เวลา 1-2 วินาที',
+                  )
+                  if (!ok) return
+                  try {
+                    const r = await runSakuraImport100()
+                    const subMsg = r.newSubCategories.length
+                      ? `\nเพิ่ม subcategory ใหม่: ${r.newSubCategories.join(', ')}`
+                      : ''
+                    window.alert(
+                      `นำเข้าเสร็จ\n• ลบของเดิม ${r.removed} ตัว\n• เพิ่มใหม่ ${r.added} ตัว\n• สินค้าทั้งหมดในระบบ ${r.total} ตัว${subMsg}`,
+                    )
+                  } catch (err) {
+                    console.error('[sakura-import] failed', err)
+                    window.alert('นำเข้าไม่สำเร็จ — ดู console')
+                  }
+                }}
+                className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg border border-violet-300 bg-violet-50 px-3 py-2 text-sm font-medium text-violet-900 shadow-sm transition hover:bg-violet-100"
+              >
+                <Download className="size-3.5" strokeWidth={2} />
+                นำเข้า Sakura ทั้งหมด
+              </button>
+              <button
+                type="button"
+                disabled={categoryTree.length === 0}
+                title={categoryTree.length === 0 ? 'เพิ่มหมวดหมู่ก่อน (จัดการหมวดหมู่)' : undefined}
+                onClick={() => {
+                  setModalEditProduct(null)
+                  setAddProductCopySource(null)
+                  setCopySuggestedSku(undefined)
+                  setProductModalOpen(true)
+                }}
+                className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg border border-emerald-600 bg-emerald-600 px-3 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-200 disabled:text-slate-500"
+              >
+                <Plus className="size-3.5" strokeWidth={2} />
+                เพิ่มสินค้า
+              </button>
+            </>
           ) : null}
         </div>
 
@@ -2222,71 +2268,65 @@ export function ProductDataFileView() {
         <div className="grid w-full gap-1.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
           <label className="block min-w-0">
             <span className="mb-0.5 block text-[11px] text-slate-500">แบรนด์</span>
-            <select className={selectClass} value={filterBrand} onChange={(e) => setFilterBrand(e.target.value)}>
-              <option value={FILTER_ALL}>{FILTER_ALL}</option>
-              {filterOptions.brands.map((b) => (
-                <option key={b} value={b}>
-                  {b}
-                </option>
-              ))}
-            </select>
+            <SearchableFilterSelect
+              value={filterBrand}
+              options={filterOptions.brands}
+              allValue={FILTER_ALL}
+              onChange={setFilterBrand}
+              ariaLabel="แบรนด์"
+            />
           </label>
           <label className="block min-w-0">
             <span className="mb-0.5 block text-[11px] text-slate-500">ยี่ห้อรถ</span>
-            <select className={selectClass} value={filterCarBrand} onChange={(e) => { setFilterCarBrand(e.target.value); setFilterCarModel(FILTER_ALL); setFilterEngine(FILTER_ALL); setFilterDrive(FILTER_ALL); setFilterYear(FILTER_ALL) }}>
-              <option value={FILTER_ALL}>{FILTER_ALL}</option>
-              {filterOptions.carBrands.map((b) => (
-                <option key={b} value={b}>
-                  {b}
-                </option>
-              ))}
-            </select>
+            <SearchableFilterSelect
+              value={filterCarBrand}
+              options={filterOptions.carBrands}
+              allValue={FILTER_ALL}
+              onChange={(v) => { setFilterCarBrand(v); setFilterCarModel(FILTER_ALL); setFilterEngine(FILTER_ALL); setFilterDrive(FILTER_ALL); setFilterYear(FILTER_ALL) }}
+              ariaLabel="ยี่ห้อรถ"
+            />
           </label>
           <label className="block min-w-0">
             <span className="mb-0.5 block text-[11px] text-slate-500">รุ่นรถ</span>
-            <select className={selectClass} value={filterCarModel} onChange={(e) => { setFilterCarModel(e.target.value); setFilterEngine(FILTER_ALL); setFilterDrive(FILTER_ALL); setFilterYear(FILTER_ALL) }}>
-              <option value={FILTER_ALL}>{FILTER_ALL}</option>
-              {filterOptions.models.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </select>
+            <SearchableFilterSelect
+              value={filterCarModel}
+              options={filterOptions.models}
+              allValue={FILTER_ALL}
+              onChange={(v) => { setFilterCarModel(v); setFilterEngine(FILTER_ALL); setFilterDrive(FILTER_ALL); setFilterYear(FILTER_ALL) }}
+              ariaLabel="รุ่นรถ"
+            />
           </label>
           <label className="block min-w-0">
             <span className="mb-0.5 block text-[11px] text-slate-500">เครื่องยนต์</span>
-            <select className={selectClass} value={filterEngine} onChange={(e) => { setFilterEngine(e.target.value); setFilterDrive(FILTER_ALL); setFilterYear(FILTER_ALL) }}>
-              <option value={FILTER_ALL}>{FILTER_ALL}</option>
-              {filterOptions.engines.map((en) => (
-                <option key={en} value={en}>{en}</option>
-              ))}
-            </select>
+            <SearchableFilterSelect
+              value={filterEngine}
+              options={filterOptions.engines}
+              allValue={FILTER_ALL}
+              onChange={(v) => { setFilterEngine(v); setFilterDrive(FILTER_ALL); setFilterYear(FILTER_ALL) }}
+              ariaLabel="เครื่องยนต์"
+            />
           </label>
           <label className="block min-w-0">
             <span className="mb-0.5 block text-[11px] text-slate-500">ขับเคลื่อน</span>
-            <select className={selectClass} value={filterDrive} onChange={(e) => { setFilterDrive(e.target.value); setFilterYear(FILTER_ALL) }}>
-              <option value={FILTER_ALL}>{FILTER_ALL}</option>
-              {filterOptions.driveTypes.map((d) => (
-                <option key={d} value={d}>{d}</option>
-              ))}
-            </select>
+            <SearchableFilterSelect
+              value={filterDrive}
+              options={filterOptions.driveTypes}
+              allValue={FILTER_ALL}
+              onChange={(v) => { setFilterDrive(v); setFilterYear(FILTER_ALL) }}
+              ariaLabel="ขับเคลื่อน"
+            />
           </label>
           <label className="block min-w-0">
             <span className="mb-0.5 block text-[11px] text-slate-500">รุ่นปี</span>
             <div className="flex min-w-0 items-stretch gap-1.5">
-              <select
-                className={clsx(selectClass, 'min-w-0 flex-1')}
+              <SearchableFilterSelect
                 value={filterYear}
-                onChange={(e) => setFilterYear(e.target.value)}
-                aria-label="รุ่นปี"
-              >
-                <option value={FILTER_ALL}>{FILTER_ALL}</option>
-                {filterOptions.years.map((y) => (
-                  <option key={y} value={y}>
-                    {y}
-                  </option>
-                ))}
-              </select>
+                options={filterOptions.years}
+                allValue={FILTER_ALL}
+                onChange={setFilterYear}
+                ariaLabel="รุ่นปี"
+                className="min-w-0 flex-1"
+              />
               <button
                 type="button"
                 aria-expanded={measPanelOpen}
@@ -2307,6 +2347,29 @@ export function ProductDataFileView() {
                   />
                 ) : null}
               </button>
+            </div>
+          </label>
+          <label className="block min-w-0">
+            <span className="mb-0.5 block text-[11px] text-slate-500">รหัสตัวถัง / chassis</span>
+            <div className="relative">
+              <input
+                type="text"
+                value={filterChassisCode}
+                onChange={(e) => setFilterChassisCode(e.target.value)}
+                placeholder="เช่น FM2P, JZS155"
+                className="h-9 w-full min-w-0 rounded-lg border border-slate-200 bg-white px-2 text-sm uppercase shadow-sm outline-none focus:border-slate-400 focus:ring-1 focus:ring-slate-200"
+                aria-label="ค้นหารหัสตัวถัง"
+              />
+              {filterChassisCode && (
+                <button
+                  type="button"
+                  onClick={() => setFilterChassisCode('')}
+                  className="absolute right-1.5 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                  aria-label="ล้างรหัสตัวถัง"
+                >
+                  ×
+                </button>
+              )}
             </div>
           </label>
         </div>

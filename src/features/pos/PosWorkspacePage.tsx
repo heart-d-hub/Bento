@@ -59,10 +59,27 @@ import { promptPayDataUrl } from '@/features/bank/promptPayQr'
 import { buildTaxInvoiceFormPrintHtml, printTaxInvoiceHtmlPreferSystemDialog, type TaxInvoiceLineItemRow } from '@/features/inventory/data/taxInvoiceFormCanvasShared'
 import { getActiveTaxInvoiceForm, loadTaxInvoiceFormDesignerState } from '@/features/inventory/data/taxInvoiceFormDesignerStore'
 import { MOCK_STORE_PROFILE } from '@/features/settings/data/mockStoreProfile'
-import { getB2bTierConfig, resolveB2bLineDiscount } from '@/features/settings/data/customerTiersStore'
+import { resolveB2bLineDiscount } from '@/features/settings/data/customerTiersStore'
 import { getProductMasterById } from '@/features/inventory/data/productMasterData'
 import { useThemePreference } from '@/features/settings/themePreference'
 import { ProductImage } from '@/features/inventory/components/ProductImage'
+import {
+  calcEarnedPoints,
+  customerTypeEarnsPoints,
+  loadLoyaltyConfig,
+  LOYALTY_CHANGED_EVENT,
+  pointsToBaht,
+} from '@/features/loyalty/data/loyaltyConfig'
+import { applyPointsDelta } from '@/features/loyalty/data/memberPointsApi'
+import { RedeemPointsModal } from '@/features/loyalty/components/RedeemPointsModal'
+import { PosLoyaltyCell } from '@/features/loyalty/components/PosLoyaltyCell'
+import { ProductPickerModal, type AddToCartOptions } from '@/features/pos/components/ProductPickerModal'
+import {
+  fitmentYearLabel,
+  getFitmentEngineName,
+  normalizeSearchText,
+  tokenizeSearch,
+} from '@/features/pos/utils/posSearchHelpers'
 import { clsx } from 'clsx'
 import {
   Activity,
@@ -86,6 +103,7 @@ import {
   Play,
   Send,
   ShoppingCart,
+  Sparkles,
   Sun,
   Moon,
   Trash2,
@@ -274,41 +292,6 @@ function parseYearsFromLabel(label: string): number[] {
   return []
 }
 
-function normalizeSearchText(s: string): string {
-  return s
-    .toLowerCase()
-    .normalize('NFKC')
-    .replace(/[^\p{L}\p{N}]+/gu, '')
-}
-
-function tokenizeSearch(q: string): string[] {
-  return q
-    .trim()
-    .split(/\s+/g)
-    .map((t) => normalizeSearchText(t))
-    .filter(Boolean)
-}
-
-function fitmentYearLabel(f: VehicleFitmentRef): string {
-  if (f.yearFrom != null && f.yearTo != null) return `${f.yearFrom}-${f.yearTo}`
-  if (f.yearFrom != null && f.yearTo == null) return `${f.yearFrom}-ปัจจุบัน`
-  if (f.yearFrom == null && f.yearTo != null) return `ถึง ${f.yearTo}`
-  const y = f.yearRangeText?.trim()
-  if (y) return y
-  const fromEngineLabel = f.engineLabel.match(/(\d{4}\s*[-–]\s*\d{4})/)
-  return fromEngineLabel?.[1] ?? '-'
-}
-
-function getFitmentEngineName(f: VehicleFitmentRef): string {
-  if (f.engineText?.trim()) return f.engineText.trim()
-  const label = f.engineLabel?.trim() || ''
-  if (!label || label === 'ไม่ระบุเครื่อง/ปี') return ''
-  // Strip trailing "(YYYY-YYYY)" or "(YYYY-ปัจจุบัน)"
-  const stripped = label.replace(/\s*\(\s*\d{4}[\s\S]*?\)\s*$/, '').trim()
-  // If what remains is a year range or "ปี" prefix, it's not engine info
-  if (/^ปี\s*\d/.test(stripped) || /^\d{4}\s*[-–]/.test(stripped) || /^\d{4}$/.test(stripped)) return ''
-  return stripped
-}
 
 function buildFitmentSummary(f: VehicleFitmentRef): string {
   const engine = getFitmentEngineName(f)
@@ -419,11 +402,6 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   const [barcodeInput, setBarcodeInput] = useState('')
   const [suggestHighlightIndex, setSuggestHighlightIndex] = useState(-1)
   const suggestDropdownRef = useRef<HTMLDivElement | null>(null)
-  const [productSearchQuery, setProductSearchQuery] = useState('')
-  const [productModalCategory, setProductModalCategory] = useState<string | null>(null)
-  const [productModalMake, setProductModalMake] = useState('ทั้งหมด')
-  const [productModalModel, setProductModalModel] = useState('ทั้งหมด')
-  const [selectedModalProduct, setSelectedModalProduct] = useState<Product | null>(null)
   const [showMemberModal, setShowMemberModal] = useState(false)
   const [showProductModal, setShowProductModal] = useState(false)
   const [showCheckoutModal, setShowCheckoutModal] = useState(false)
@@ -452,6 +430,9 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   const [mixedTransferAmount, setMixedTransferAmount] = useState('')
   const [billDiscount, setBillDiscount] = useState('')
   const [applyRounding, setApplyRounding] = useState(false)
+  const [pointsToRedeem, setPointsToRedeem] = useState(0)
+  const [showRedeemModal, setShowRedeemModal] = useState(false)
+  const [loyaltyTick, setLoyaltyTick] = useState(0)
   const [suspendedBills, setSuspendedBills] = useState<SuspendedBill[]>([])
   const [disabledWasherGiftByMaleCode, setDisabledWasherGiftByMaleCode] = useState<Record<string, boolean>>({})
 
@@ -463,6 +444,12 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     const on = () => setMemberTick((n) => n + 1)
     window.addEventListener(MEMBERS_CHANGED_EVENT, on)
     return () => window.removeEventListener(MEMBERS_CHANGED_EVENT, on)
+  }, [])
+
+  useEffect(() => {
+    const on = () => setLoyaltyTick((n) => n + 1)
+    window.addEventListener(LOYALTY_CHANGED_EVENT, on)
+    return () => window.removeEventListener(LOYALTY_CHANGED_EVENT, on)
   }, [])
 
   useEffect(() => {
@@ -524,6 +511,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
 
   useEffect(() => {
     setShowHistoryPopup(false)
+    setPointsToRedeem(0)
     if (customer.accountCode === WALK_IN_CUSTOMER.accountCode) {
       setMemberHistory([])
       return
@@ -689,84 +677,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     return map
   }, [mockProducts])
 
-  const deferredProductSearchQuery = useDeferredValue(productSearchQuery)
   const deferredBarcodeInput = useDeferredValue(barcodeInput)
-
-  const modalCategoryOptions = useMemo(() => {
-    const seen = new Set<string>()
-    for (const p of mockProducts) {
-      if (p.category) seen.add(p.category)
-    }
-    return [...seen].sort((a, b) => a.localeCompare(b, 'th'))
-  }, [mockProducts])
-
-  const modalMakeOptions = useMemo(() => {
-    const seen = new Set<string>()
-    for (const p of mockProducts) {
-      if (p.carBrand) seen.add(p.carBrand)
-    }
-    return ['ทั้งหมด', ...[...seen].sort((a, b) => a.localeCompare(b, 'th'))]
-  }, [mockProducts])
-
-  const modalModelOptions = useMemo(() => {
-    if (productModalMake === 'ทั้งหมด') return ['ทั้งหมด']
-    const seen = new Set<string>()
-    for (const p of mockProducts) {
-      if (p.carBrand === productModalMake && p.carModelLabel) seen.add(p.carModelLabel)
-    }
-    return ['ทั้งหมด', ...[...seen].sort((a, b) => a.localeCompare(b, 'th'))]
-  }, [mockProducts, productModalMake])
-
-  const filteredProducts = useMemo(() => {
-    const tokens = tokenizeSearch(deferredProductSearchQuery)
-    const hasMakeFilter = productModalMake !== 'ทั้งหมด'
-    const hasModelFilter = productModalModel !== 'ทั้งหมด'
-    const hasTextFilter = tokens.length > 0
-    if (!productModalCategory && !hasMakeFilter && !hasTextFilter) return mockProducts.slice(0, 150)
-
-    const passFilters = (p: InventoryProduct) => {
-      if (productModalCategory && p.category !== productModalCategory) return false
-      if (hasMakeFilter && p.carBrand !== productModalMake) return false
-      if (hasModelFilter && p.carModelLabel !== productModalModel) return false
-      return true
-    }
-    if (!hasTextFilter) return mockProducts.filter(passFilters).slice(0, 200)
-
-    const getHay = (p: InventoryProduct) => productHaystackMap.get(p.code) ?? ''
-    const q = tokens.join('')
-
-    const scoreProduct = (p: InventoryProduct): number => {
-      const hay = getHay(p)
-      const normSku  = normalizeSearchText(p.code)
-      const normOem  = normalizeSearchText(p.factoryOem ?? '')
-      const normName = normalizeSearchText(p.name)
-      if (normSku === q || normOem === q) return 100
-      if (normSku.startsWith(q) || normOem.startsWith(q)) return 80
-      if (tokens.every((t) => normSku.includes(t)) || tokens.every((t) => normOem.includes(t))) return 60
-      if (tokens.every((t) => normName.includes(t))) return 40
-      if (tokens.every((t) => hay.includes(t))) return 20
-      return (tokens.filter((t) => hay.includes(t)).length / tokens.length) * 10
-    }
-
-    const andMatches = mockProducts.filter((p) => passFilters(p) && tokens.every((t) => getHay(p).includes(t)))
-    const candidates = andMatches.length > 0
-      ? andMatches
-      : tokens.length > 1
-        ? mockProducts.filter((p) => passFilters(p) && tokens.some((t) => getHay(p).includes(t)))
-        : []
-
-    return candidates
-      .map((p) => [p, scoreProduct(p)] as const)
-      .sort((a, b) => b[1] - a[1])
-      .map(([p]) => p)
-      .slice(0, 200)
-  }, [mockProducts, productHaystackMap, deferredProductSearchQuery, productModalCategory, productModalMake, productModalModel])
-
-  useEffect(() => {
-    if (!showProductModal) return
-    if (selectedModalProduct && filteredProducts.some((p) => p.id === selectedModalProduct.id)) return
-    setSelectedModalProduct(filteredProducts[0] ?? null)
-  }, [filteredProducts, showProductModal])
 
   const quickTextMatchedProducts = useMemo(() => {
     const tokens = tokenizeSearch(deferredBarcodeInput)
@@ -823,6 +734,21 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
 
   const pricedCart = useMemo(() => {
     const next = cart.map((l) => ({ ...l }))
+    // Apply quantity-break pricing: when qty crosses a break threshold, swap line.price
+    // ใช้กับเฉพาะ line ที่ราคา = list price ปกติ (ไม่ได้ถูก cashier override)
+    next.forEach((l, idx) => {
+      if (l.stlBoltRole === 'washerGift') return
+      if (!l.productId || l.qty <= 0 || l.price <= 0) return
+      if (l.unitIndex == null || l.priceLevelIndex == null) return
+      const cfg = getPosSellConfig(l.productId)
+      const baseList = cfg.getListUnitPrice(l.unitIndex, l.priceLevelIndex)
+      // ถ้า cashier ปรับราคาเองแล้ว — เคารพราคาที่กรอกไว้ ไม่บังคับขั้นบันได
+      if (Math.abs(l.price - baseList) > 0.01) return
+      const breakPrice = cfg.getUnitPriceAtQty(l.unitIndex, l.priceLevelIndex, l.qty)
+      if (Math.abs(breakPrice - l.price) > 0.01) {
+        next[idx] = { ...next[idx], price: breakPrice }
+      }
+    })
     const promoInputs: Array<{
       idx: number
       productId: string
@@ -874,11 +800,23 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     return map
   }, [pricedCart, customer.b2bTier])
 
+  const loyaltyConfig = useMemo(() => loadLoyaltyConfig(), [loyaltyTick])
+
+  const canEarnPoints = useMemo(
+    () =>
+      customer.accountCode !== WALK_IN_CUSTOMER.accountCode
+      && customerTypeEarnsPoints(customer.customerType),
+    [customer.accountCode, customer.customerType],
+  )
+
   const totals = useMemo(() => {
     const subtotal = pricedCart.reduce((sum, line) => sum + line.price * line.qty - line.discount, 0)
     const discountAmt = Number.parseFloat(billDiscount || '0') || 0
     const tierDiscountAmt = [...b2bLineDiscounts.values()].reduce((s, v) => s + v.discountAmt, 0)
-    const subtotalAfterDiscount = Math.max(0, subtotal - discountAmt - tierDiscountAmt)
+    const pointsDiscountAmt = canEarnPoints && pointsToRedeem > 0
+      ? pointsToBaht(pointsToRedeem, loyaltyConfig)
+      : 0
+    const subtotalAfterDiscount = Math.max(0, subtotal - discountAmt - tierDiscountAmt - pointsDiscountAmt)
 
     const vatType = mode === 'tax' ? docInfo.vatType : 'none'
     const applyVat = (base: number) => {
@@ -905,8 +843,21 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
         : 0
     const grandTotal = rawGrandTotal + roundingAdjustment
 
-    return { subtotal, discountAmt, tierDiscountAmt, beforeVat, vatAmount, rawGrandTotal, roundingAdjustment, grandTotal }
-  }, [applyRounding, billDiscount, pricedCart, docInfo.vatType, mode, b2bLineDiscounts])
+    const earnedPoints = canEarnPoints ? calcEarnedPoints(beforeVat, loyaltyConfig) : 0
+
+    return {
+      subtotal,
+      discountAmt,
+      tierDiscountAmt,
+      pointsDiscountAmt,
+      beforeVat,
+      vatAmount,
+      rawGrandTotal,
+      roundingAdjustment,
+      grandTotal,
+      earnedPoints,
+    }
+  }, [applyRounding, billDiscount, pricedCart, docInfo.vatType, mode, b2bLineDiscounts, pointsToRedeem, loyaltyConfig, canEarnPoints])
 
   useEffect(() => {
     if (showQRModal) return
@@ -1034,16 +985,26 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     })
   }
 
-  const addProductToCart = (p: Product) => {
+  const addProductToCart = (p: Product, opts?: AddToCartOptions) => {
+    const addQty = Math.max(1, opts?.qty ?? 1)
     setCart((prev) => {
-      const idx = prev.findIndex((l) => l.code === p.code && !l.stlBoltRole)
+      const cfg = getPosSellConfig(p.id)
+      const preferredLevelIdx = opts?.priceLevelIndex ?? customerTypeToPriceLevelIndex(customer.customerType)
+      const preferredUnitIdx = opts?.unitIndex ?? 0
+      const idx = prev.findIndex(
+        (l) =>
+          l.code === p.code
+          && !l.stlBoltRole
+          && (opts?.unitIndex == null || l.unitIndex === opts.unitIndex)
+          && (opts?.priceLevelIndex == null || l.priceLevelIndex === opts.priceLevelIndex),
+      )
       if (idx === -1) {
-        const cfg = getPosSellConfig(p.id)
-        const preferredLevelIdx = customerTypeToPriceLevelIndex(customer.customerType)
-        const preferredLevel = cfg.priceLevels.find((l) => l.index === preferredLevelIdx && cfg.getUnitPrice(0, l.index) > 0)
-          ?? cfg.priceLevels.find((l) => cfg.getUnitPrice(0, l.index) > 0)
+        const preferredLevel =
+          cfg.priceLevels.find((l) => l.index === preferredLevelIdx && cfg.getUnitPrice(preferredUnitIdx, l.index) > 0)
+          ?? cfg.priceLevels.find((l) => cfg.getUnitPrice(preferredUnitIdx, l.index) > 0)
+        const preferredUnit = cfg.units.find((u) => u.index === preferredUnitIdx) ?? cfg.units[0]
         const picked = preferredLevel
-          ? { unit: cfg.units[0] ?? { index: 0, label: 'ชิ้น', baseUnits: 1 }, level: preferredLevel }
+          ? { unit: preferredUnit ?? { index: 0, label: 'ชิ้น', baseUnits: 1 }, level: preferredLevel }
           : pickDefaultPosUnitAndPrice(cfg)
         const selectedListPrice =
           picked != null ? cfg.getListUnitPrice(picked.unit.index, picked.level.index) : p.price
@@ -1065,13 +1026,13 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
             priceLevel: picked?.level.label ?? 'ราคา 1',
             priceLevelIndex: picked?.level.index ?? 0,
             discount: 0,
-            qty: 1,
+            qty: addQty,
             ...(bundleBreakdown ? { stockBreakdown: bundleBreakdown } : {}),
           },
         ]
       }
       const next = [...prev]
-      next[idx] = { ...next[idx], qty: next[idx].qty + 1 }
+      next[idx] = { ...next[idx], qty: next[idx].qty + addQty }
       return next
     })
   }
@@ -1272,6 +1233,7 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     setDisabledWasherGiftByMaleCode({})
     setBillDiscount('')
     setApplyRounding(false)
+    setPointsToRedeem(0)
     setCashReceived('')
     setSelectedBank('')
     setMixedCashAmount('')
@@ -1557,6 +1519,22 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
           unitPrice: line.price,
         })),
       })
+
+      if (canEarnPoints && customer.accountCode !== WALK_IN_CUSTOMER.accountCode) {
+        const delta = totals.earnedPoints - pointsToRedeem
+        if (delta !== 0) {
+          try {
+            const newBalance = await applyPointsDelta(customer.accountCode, delta)
+            if (typeof newBalance === 'number') {
+              setCustomer((prev) =>
+                prev.accountCode === customer.accountCode ? { ...prev, points: newBalance } : prev,
+              )
+            }
+          } catch (err) {
+            console.error('[pos] applyPointsDelta failed', err)
+          }
+        }
+      }
 
       // Tier upgrade notification for B2B customers
       if (customer.b2bTier) {
@@ -1896,15 +1874,15 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                     />
                   </div>
                   <div className="col-span-12 sm:col-span-4">
-                    <label className="mb-0.5 block text-[9px] font-black uppercase tracking-widest text-amber-800/90 dark:text-amber-400/90">
-                      แต้มสะสม
-                    </label>
-                    <div className="relative flex items-center justify-between gap-1.5 rounded border border-amber-200 bg-amber-50/80 px-2 py-1.5 dark:border-amber-600/40 dark:bg-amber-950/25">
-                      <span className="font-mono text-[11px] font-bold tabular-nums leading-none text-amber-900 dark:text-amber-200">
-                        {customer.points.toLocaleString('th-TH')}
-                      </span>
-                      <Medal className="size-4 shrink-0 text-amber-400 dark:text-amber-500" aria-hidden />
-                    </div>
+                    <PosLoyaltyCell
+                      canEarnPoints={canEarnPoints}
+                      customerType={customer.customerType}
+                      pointsBalance={customer.points}
+                      pointsToRedeem={pointsToRedeem}
+                      b2bTier={customer.b2bTier}
+                      isWalkIn={isWalkIn}
+                      onRedeemClick={() => setShowRedeemModal(true)}
+                    />
                   </div>
                   <div className="col-span-12 flex min-h-0 flex-col justify-center sm:col-span-4">
                     <div className="mb-1 flex items-start justify-between gap-2 text-[9px] font-black uppercase tracking-widest text-slate-600 dark:text-slate-400">
@@ -1986,15 +1964,15 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                     />
                   </div>
                   <div className="col-span-12 sm:col-span-2">
-                    <label className="mb-0.5 block text-[9px] font-black uppercase tracking-widest text-amber-800/90 dark:text-amber-400/90">
-                      แต้มสะสม
-                    </label>
-                    <div className="relative flex items-center justify-between gap-1.5 rounded border border-amber-200 bg-amber-50/80 px-2 py-1.5 dark:border-amber-600/40 dark:bg-amber-950/25">
-                      <span className="min-w-0 truncate font-mono text-[11px] font-bold tabular-nums leading-none text-amber-900 dark:text-amber-200">
-                        {customer.points.toLocaleString('th-TH')}
-                      </span>
-                      <Medal className="size-4 shrink-0 text-amber-400 dark:text-amber-500" aria-hidden />
-                    </div>
+                    <PosLoyaltyCell
+                      canEarnPoints={canEarnPoints}
+                      customerType={customer.customerType}
+                      pointsBalance={customer.points}
+                      pointsToRedeem={pointsToRedeem}
+                      b2bTier={customer.b2bTier}
+                      isWalkIn={isWalkIn}
+                      onRedeemClick={() => setShowRedeemModal(true)}
+                    />
                   </div>
                   <div className="col-span-12 flex min-h-0 flex-col justify-center sm:col-span-2">
                     <div className="mb-1 flex items-start justify-between gap-1 text-[9px] font-black uppercase tracking-widest text-slate-600 dark:text-slate-400">
@@ -2510,6 +2488,16 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                   </div>
                 )}
 
+                {pointsToRedeem > 0 && totals.pointsDiscountAmt > 0 && (
+                  <div className="flex items-center justify-between rounded-lg border border-emerald-200 bg-gradient-to-r from-emerald-50 to-amber-50 px-2 py-1.5 text-[10px] font-bold text-emerald-700 dark:border-emerald-600/40 dark:from-emerald-950/30 dark:to-amber-950/30 dark:text-emerald-300">
+                    <span className="flex items-center gap-1">
+                      <Medal className="size-3 shrink-0" aria-hidden />
+                      ใช้แต้ม {pointsToRedeem.toLocaleString('th-TH')}
+                    </span>
+                    <span className="font-mono">−{totals.pointsDiscountAmt.toLocaleString('th-TH', { minimumFractionDigits: 2 })}</span>
+                  </div>
+                )}
+
                 <div className="flex justify-between text-[11px] font-black uppercase tracking-wider text-slate-500 dark:text-slate-400">
                   <span>รวมเป็นเงิน</span>
                   <span className="font-mono text-slate-800 dark:text-slate-200">
@@ -2531,6 +2519,14 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                       {totals.grandTotal.toLocaleString('th-TH', { minimumFractionDigits: 2 })}
                     </span>
                   </div>
+                  {canEarnPoints && totals.earnedPoints > 0 && (
+                    <div className="mt-1.5 flex items-center justify-end gap-1.5 text-[10px] font-bold text-amber-700 dark:text-amber-400">
+                      <Sparkles className="size-3 shrink-0" aria-hidden />
+                      <span>
+                        + {totals.earnedPoints.toLocaleString('th-TH')} แต้มจะเข้าหลังยืนยัน
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-2 border-t border-slate-200 bg-white/80 p-3 dark:border-[#2a2d3e] dark:bg-[#0d0f17]/60 pos-720p:gap-1.5 pos-720p:p-2">
@@ -2616,6 +2612,17 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
           </aside>
         </div>
       </div>
+
+      <RedeemPointsModal
+        open={showRedeemModal}
+        onClose={() => setShowRedeemModal(false)}
+        customerName={customer.name}
+        availablePoints={customer.points}
+        billGrandTotalBaht={totals.grandTotal + totals.pointsDiscountAmt}
+        initialPoints={pointsToRedeem}
+        onConfirm={(points) => setPointsToRedeem(points)}
+        isDark={isDark}
+      />
 
       {showSuspendModal &&
         typeof document !== 'undefined' &&
@@ -2959,292 +2966,17 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
           document.body,
         )}
 
-      {showProductModal &&
-        typeof document !== 'undefined' &&
-        createPortal(
-          <div
-            className="fixed inset-0 z-[340] flex items-center justify-center bg-slate-900/60 p-3 backdrop-blur-sm dark:bg-black/70"
-            onMouseDown={(e) => {
-              if (e.target === e.currentTarget) {
-                setShowProductModal(false)
-                setProductSearchQuery('')
-                setProductModalCategory(null)
-                setProductModalMake('ทั้งหมด')
-                setProductModalModel('ทั้งหมด')
-                setSelectedModalProduct(null)
-              }
-            }}
-          >
-            <div className="flex w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-[#2a2d3e] dark:bg-[#0d0f17]" style={{ maxHeight: 'min(94vh, 860px)' }}>
-
-              {/* Header */}
-              <div className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 px-4 py-2.5 dark:border-[#2a2d3e] dark:bg-[#12141c]">
-                <div className="flex items-center gap-2">
-                  <ShoppingCart className="size-4 text-blue-500 dark:text-cyan-400" aria-hidden />
-                  <span className="text-sm font-black uppercase tracking-widest text-slate-800 dark:text-slate-100">เลือกสินค้า</span>
-                  <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-bold text-blue-700 dark:bg-cyan-900/40 dark:text-cyan-300">
-                    {filteredProducts.length} รายการ
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => { setShowProductModal(false); setProductSearchQuery(''); setProductModalCategory(null); setProductModalMake('ทั้งหมด'); setProductModalModel('ทั้งหมด'); setSelectedModalProduct(null) }}
-                  className="rounded-full p-1 text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-[#1a1f35]"
-                  aria-label="ปิด"
-                >
-                  <X className="size-5" />
-                </button>
-              </div>
-
-              {/* Search + car filter */}
-              <div className="shrink-0 border-b border-slate-200 bg-white px-3 py-2.5 dark:border-[#2a2d3e] dark:bg-[#050508]">
-                {/* Search bar */}
-                <div className="relative mb-2">
-                  <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400 dark:text-cyan-500/50" />
-                  <input
-                    value={productSearchQuery}
-                    onChange={(e) => setProductSearchQuery(e.target.value)}
-                    placeholder="ค้นหา รหัส / ชื่อสินค้า / เลขอะไหล่ OEM / ยี่ห้อ..."
-                    autoFocus
-                    className="w-full rounded-lg border border-slate-200 bg-slate-50 py-2 pl-10 pr-8 text-sm text-slate-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-cyan-100 dark:focus:border-cyan-500 dark:focus:ring-cyan-500/30"
-                  />
-                  {productSearchQuery && (
-                    <button
-                      type="button"
-                      onClick={() => setProductSearchQuery('')}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
-                    >
-                      <X className="size-3.5" />
-                    </button>
-                  )}
-                </div>
-                {/* Car make / model */}
-                <div className="flex gap-2">
-                  <div className="flex items-center gap-1.5">
-                    <span className="shrink-0 text-[10px] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-500">รถ</span>
-                    <select
-                      value={productModalMake}
-                      onChange={(e) => { setProductModalMake(e.target.value); setProductModalModel('ทั้งหมด') }}
-                      className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs font-semibold text-slate-700 outline-none focus:border-blue-400 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-cyan-100"
-                    >
-                      {modalMakeOptions.map((o) => <option key={o} value={o}>{o}</option>)}
-                    </select>
-                  </div>
-                  <select
-                    value={productModalModel}
-                    onChange={(e) => setProductModalModel(e.target.value)}
-                    disabled={productModalMake === 'ทั้งหมด'}
-                    className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs font-semibold text-slate-700 outline-none focus:border-blue-400 disabled:opacity-40 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-cyan-100"
-                  >
-                    {modalModelOptions.map((o) => <option key={o} value={o}>{o}</option>)}
-                  </select>
-                  {(productModalMake !== 'ทั้งหมด') && (
-                    <button
-                      type="button"
-                      onClick={() => { setProductModalMake('ทั้งหมด'); setProductModalModel('ทั้งหมด') }}
-                      className="ml-auto flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1.5 text-[11px] font-semibold text-slate-500 hover:bg-slate-100 dark:border-[#2a2d3e] dark:text-slate-400 dark:hover:bg-[#1a1f35]"
-                    >
-                      <X className="size-3" /> ล้าง
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {/* Category chips */}
-              {modalCategoryOptions.length > 0 && (
-                <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-slate-200 bg-slate-50 px-3 py-2 dark:border-[#2a2d3e] dark:bg-[#0a0c13]" style={{ scrollbarWidth: 'none' }}>
-                  <button
-                    type="button"
-                    onClick={() => setProductModalCategory(null)}
-                    className={clsx(
-                      'shrink-0 rounded-full border px-2.5 py-0.5 text-[11px] font-bold transition',
-                      productModalCategory === null
-                        ? 'border-blue-500 bg-blue-500 text-white dark:border-cyan-500 dark:bg-cyan-500 dark:text-slate-900'
-                        : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-slate-400 dark:hover:bg-[#1a1f35]',
-                    )}
-                  >
-                    ทั้งหมด
-                  </button>
-                  {modalCategoryOptions.map((cat) => (
-                    <button
-                      key={cat}
-                      type="button"
-                      onClick={() => setProductModalCategory(productModalCategory === cat ? null : cat)}
-                      className={clsx(
-                        'shrink-0 rounded-full border px-2.5 py-0.5 text-[11px] font-bold transition',
-                        productModalCategory === cat
-                          ? 'border-blue-500 bg-blue-500 text-white dark:border-cyan-500 dark:bg-cyan-500 dark:text-slate-900'
-                          : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-slate-400 dark:hover:bg-[#1a1f35]',
-                      )}
-                    >
-                      {cat}
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {/* Split view: left list + right detail */}
-              <div className="flex min-h-0 flex-1 overflow-hidden">
-
-                {/* LEFT — compact scrollable list */}
-                <div className="w-72 shrink-0 overflow-y-auto border-r border-slate-200 dark:border-[#2a2d3e]">
-                  {filteredProducts.length === 0 ? (
-                    <div className="flex flex-col items-center gap-2 px-4 py-12 text-center">
-                      <Search className="size-8 text-slate-300 dark:text-slate-600" />
-                      <p className="text-sm font-semibold text-slate-500 dark:text-slate-400">ไม่พบสินค้า</p>
-                      <p className="text-xs text-slate-400 dark:text-slate-500">ลองเปลี่ยนคำค้นหาหรือตัวกรอง</p>
-                    </div>
-                  ) : filteredProducts.map((p) => {
-                    const dotColor = p.stock <= 0 ? 'bg-rose-400' : p.stock <= 5 ? 'bg-amber-400' : 'bg-emerald-400'
-                    const stockText = p.stock <= 0 ? 'หมด' : `${p.stock}`
-                    const stockTextColor = p.stock <= 0 ? 'text-rose-500 dark:text-rose-400' : p.stock <= 5 ? 'text-amber-500 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'
-                    const cfg = getPosSellConfig(p.id)
-                    const picked = pickDefaultPosUnitAndPrice(cfg)
-                    const price = picked != null ? cfg.getListUnitPrice(picked.unit.index, picked.level.index) : 0
-                    const isSelected = selectedModalProduct?.id === p.id
-                    return (
-                      <button
-                        key={p.id}
-                        type="button"
-                        onClick={() => setSelectedModalProduct(p)}
-                        className={clsx(
-                          'flex w-full items-center gap-2.5 border-b border-slate-100 px-3 py-2.5 text-left transition-colors dark:border-[#1c1f2e]',
-                          isSelected ? 'bg-blue-50 dark:bg-[#1a1f35]' : 'hover:bg-slate-50 dark:hover:bg-[#1a1f35]/60',
-                        )}
-                      >
-                        <span className={clsx('mt-0.5 size-2 shrink-0 rounded-full', dotColor)} />
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate font-mono text-[11px] font-black text-blue-700 dark:text-cyan-300">{p.code}</span>
-                          <span className="block truncate text-[12px] font-semibold text-slate-700 dark:text-slate-200">{p.name}</span>
-                        </span>
-                        <span className="shrink-0 text-right">
-                          {price > 0 && <span className="block font-mono text-[11px] font-black text-slate-700 dark:text-slate-200">฿{price.toLocaleString('th-TH')}</span>}
-                          <span className={clsx('block font-mono text-[10px] font-bold tabular-nums', stockTextColor)}>{stockText}</span>
-                        </span>
-                      </button>
-                    )
-                  })}
-                </div>
-
-                {/* RIGHT — product detail panel */}
-                <div className="min-w-0 flex-1 overflow-y-auto">
-                  {selectedModalProduct ? (() => {
-                    const sp = selectedModalProduct
-                    const master = getProductMasterBySku(sp.code)
-                    const cfg = getPosSellConfig(sp.id)
-                    const picked = pickDefaultPosUnitAndPrice(cfg)
-                    const displayPrice = picked != null ? cfg.getListUnitPrice(picked.unit.index, picked.level.index) : 0
-                    const fits = (master?.vehicleFitments ?? []).filter(Boolean)
-                    const oem = [sp.factoryOem, sp.genuineNo].filter(Boolean).join(' / ')
-                    const dims = formatDims(sp.dimensions)
-                    const stockColor = sp.stock <= 0 ? 'text-rose-500 dark:text-rose-400' : sp.stock <= 5 ? 'text-amber-500 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'
-                    return (
-                      <div className="flex h-full flex-col gap-4 p-5">
-                        {/* Image + title */}
-                        <div className="flex gap-4">
-                          <ProductImage sku={sp.code} size="lg" className="shrink-0" zoomable onProject={() => showProductImage({ code: sp.code, name: sp.name, price: displayPrice, unit: picked?.unit.label ?? '' })} />
-                          <div className="min-w-0">
-                            <div className="mb-1.5 flex flex-wrap gap-1">
-                              {sp.brand && <span className="rounded bg-blue-50 px-1.5 py-px text-[10px] font-bold uppercase tracking-wide text-blue-600 dark:bg-blue-900/30 dark:text-blue-300">{sp.brand}</span>}
-                              {sp.category && <span className="rounded bg-slate-100 px-1.5 py-px text-[10px] font-bold uppercase tracking-wide text-slate-500 dark:bg-[#1a1f35] dark:text-slate-400">{sp.category}</span>}
-                            </div>
-                            <p className="font-mono text-[12px] font-black text-blue-700 dark:text-cyan-300">{sp.code}</p>
-                            <h2 className="mt-0.5 text-[15px] font-black leading-snug text-slate-900 dark:text-white">{sp.name}</h2>
-                          </div>
-                        </div>
-
-                        {/* Vehicle fitments */}
-                        {fits.length > 0 && (
-                          <div>
-                            <p className="mb-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-500">รุ่นรถที่ใช้ได้</p>
-                            <div className="flex flex-wrap gap-1.5">
-                              {fits.map((f, i) => {
-                                const eng = getFitmentEngineName(f)
-                                const yr = fitmentYearLabel(f)
-                                const engPart = eng ? ` · ${eng}` : ''
-                                const yrPart = yr !== '-' ? ` · ปี ${yr}` : ''
-                                const drivePart = f.driveType ? ` · ${f.driveType}` : ''
-                                const brakePart = f.brakePosition === 'front' ? ' · เบรกหน้า' : f.brakePosition === 'rear' ? ' · เบรกหลัง' : ''
-                                return (
-                                  <span key={i} className="rounded-lg border border-sky-100 bg-sky-50 px-2.5 py-1 text-[11px] text-sky-800 dark:border-sky-900/40 dark:bg-sky-900/20 dark:text-sky-300">
-                                    🚗 {f.brandName} {f.modelName}{engPart}{yrPart}{drivePart}{brakePart}
-                                  </span>
-                                )
-                              })}
-                            </div>
-                          </div>
-                        )}
-
-                        {/* OEM / dims / location */}
-                        {(oem || dims || sp.location) && (
-                          <div className="grid grid-cols-2 gap-3 rounded-xl border border-slate-100 bg-slate-50 p-3 dark:border-[#2a2d3e] dark:bg-[#0a0c13]">
-                            {oem && (
-                              <div>
-                                <p className="mb-0.5 text-[10px] font-bold uppercase tracking-wide text-slate-400">OEM / เบอร์แท้</p>
-                                <p className="font-mono text-[12px] font-semibold text-amber-700 dark:text-amber-400">{oem}</p>
-                              </div>
-                            )}
-                            {dims && (
-                              <div>
-                                <p className="mb-0.5 text-[10px] font-bold uppercase tracking-wide text-slate-400">มิติ (A/B/C)</p>
-                                <p className="font-mono text-[12px] font-semibold text-violet-600 dark:text-violet-400">{dims}</p>
-                              </div>
-                            )}
-                            {sp.location && (
-                              <div>
-                                <p className="mb-0.5 text-[10px] font-bold uppercase tracking-wide text-slate-400">ที่เก็บ</p>
-                                <p className="text-[12px] font-semibold text-slate-700 dark:text-slate-200">📍 {sp.location}</p>
-                              </div>
-                            )}
-                          </div>
-                        )}
-
-                        {/* Price + stock + add button */}
-                        <div className="mt-auto">
-                          <div className="mb-3 flex items-end justify-between rounded-xl border border-slate-100 bg-slate-50 px-4 py-3 dark:border-[#2a2d3e] dark:bg-[#0a0c13]">
-                            <div>
-                              <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">ราคาขาย</p>
-                              <p className="font-mono text-2xl font-black text-slate-900 dark:text-white">
-                                {displayPrice > 0 ? `฿${displayPrice.toLocaleString('th-TH', { minimumFractionDigits: 2 })}` : '—'}
-                              </p>
-                            </div>
-                            <div className="text-right">
-                              <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">คงเหลือ</p>
-                              <p className={clsx('font-mono text-2xl font-black', stockColor)}>{sp.stock} ชิ้น</p>
-                            </div>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              addProductToCart(sp)
-                              setShowProductModal(false)
-                              setProductSearchQuery('')
-                              setSelectedModalProduct(null)
-                              setProductModalCategory(null)
-                              setProductModalMake('ทั้งหมด')
-                              setProductModalModel('ทั้งหมด')
-                            }}
-                            className="w-full rounded-xl bg-blue-600 py-3 text-sm font-black uppercase tracking-widest text-white shadow-md transition hover:bg-blue-700 active:scale-[0.98] dark:bg-cyan-600 dark:hover:bg-cyan-500"
-                          >
-                            + เพิ่มเข้าตะกร้า
-                          </button>
-                        </div>
-                      </div>
-                    )
-                  })() : (
-                    <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
-                      <ShoppingCart className="size-12 text-slate-200 dark:text-slate-700" />
-                      <p className="text-sm font-semibold text-slate-400 dark:text-slate-500">เลือกสินค้าจากรายการ</p>
-                      <p className="text-xs text-slate-300 dark:text-slate-600">คลิกชื่อสินค้าเพื่อดูรายละเอียดและเพิ่มเข้าตะกร้า</p>
-                    </div>
-                  )}
-                </div>
-
-              </div>
-            </div>
-          </div>,
-          document.body,
-        )}
+      <ProductPickerModal
+        open={showProductModal}
+        onClose={() => setShowProductModal(false)}
+        products={mockProducts}
+        productHaystackMap={productHaystackMap}
+        defaultPriceLevelIndex={customerTypeToPriceLevelIndex(customer.customerType)}
+        isDark={isDark}
+        onAddToCart={(p, opts) => addProductToCart(p, opts)}
+        onShowProductImage={showProductImage}
+        customerAccountCode={isWalkIn ? undefined : customer.accountCode}
+      />
 
       {fitmentPreviewSku &&
         typeof document !== 'undefined' &&
@@ -4006,17 +3738,33 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
               </div>
               <div className="space-y-3 p-4">
                 <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700 dark:border-[#2a2d3e] dark:bg-[#050508] dark:text-slate-200">
-                  {pricedCart.map((l) => (
-                    <div key={l.id} className="flex items-center justify-between gap-3 py-1 text-[12px]">
-                      <div className="min-w-0">
-                        <div className="font-mono text-[10px] font-black text-blue-700 dark:text-cyan-300">{l.code}</div>
-                        <div className="truncate font-semibold">{l.name}</div>
+                  {pricedCart.map((l) => {
+                    const product = mockProducts.find((p) => p.code === l.code)
+                    const location = product?.location?.trim()
+                    return (
+                      <div key={l.id} className="flex items-center justify-between gap-3 border-b border-slate-200/60 py-1.5 last:border-0 dark:border-[#2a2d3e]/60 text-[12px]">
+                        <div className="min-w-0 flex-1">
+                          <div className="font-mono text-[10px] font-black text-blue-700 dark:text-cyan-300">{l.code}</div>
+                          <div className="truncate font-semibold">{l.name}</div>
+                        </div>
+                        <div className="flex shrink-0 flex-col items-end gap-0.5">
+                          <span className="font-mono text-[13px] font-black">
+                            {l.qty} {l.unit}
+                          </span>
+                          {location ? (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 font-mono text-[10px] font-black text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+                              <MapPin className="size-3" aria-hidden />
+                              {location}
+                            </span>
+                          ) : (
+                            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[9px] font-bold uppercase text-slate-400 dark:bg-[#1a1f35] dark:text-slate-500">
+                              ไม่ระบุที่เก็บ
+                            </span>
+                          )}
+                        </div>
                       </div>
-                      <div className="font-mono font-black">
-                        {l.qty} {l.unit}
-                      </div>
-                    </div>
-                  ))}
+                    )
+                  })}
                 </div>
                 <div className="flex gap-3">
                   <button

@@ -6,8 +6,9 @@ import { formatEngineDisplayName, formatYearRangeLabel, OPEN_END_YEAR } from '@/
 import { useVehicleCatalog } from '@/features/vehicle/context/VehicleCatalogContext'
 import { newEntityId } from '@/features/vehicle/lib/newId'
 import { clsx } from 'clsx'
-import { CheckCircle2, Database, Plus, ScanLine, Search, Trash2, X } from 'lucide-react'
+import { CheckCircle2, Database, Plus, ScanLine, Scissors, Search, Trash2, X } from 'lucide-react'
 import { useMemo, useState } from 'react'
+import { SplitSlashFieldsModal } from '@/features/vehicle/components/SplitSlashFieldsModal'
 
 const inputCls =
   'w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-[12px] text-slate-900 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-sky-400/70 focus:ring-1 focus:ring-sky-100'
@@ -152,6 +153,7 @@ export function VehicleManageView() {
   const [brandSearch, setBrandSearch] = useState('')
   const [modelName, setModelName] = useState('')
   const [modelSearch, setModelSearch] = useState('')
+  const [splitModalOpen, setSplitModalOpen] = useState(false)
 
   // Engine add form state
   const [engCode, setEngCode] = useState('')
@@ -460,6 +462,29 @@ export function VehicleManageView() {
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-violet-200 bg-violet-50/60 px-3 py-2">
+        <div className="flex items-center gap-2">
+          <Scissors className="size-4 text-violet-600" />
+          <div>
+            <p className="text-[12px] font-semibold text-violet-900">เครื่องมือจัดระเบียบข้อมูล</p>
+            <p className="text-[11px] text-violet-700">
+              แยกข้อมูลรุ่น/เครื่องที่ใส่ <code className="rounded bg-white/60 px-1 font-mono">/</code>{' '}
+              <code className="rounded bg-white/60 px-1 font-mono">,</code> รวมกัน เป็น records แยก
+            </p>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => setSplitModalOpen(true)}
+          className="inline-flex items-center gap-1.5 rounded-md bg-violet-600 px-3 py-1.5 text-[12px] font-semibold text-white shadow-sm hover:bg-violet-700"
+        >
+          <Scissors className="size-3.5" />
+          แยกข้อมูลที่มีตัวคั่น
+        </button>
+      </div>
+
+      <SplitSlashFieldsModal open={splitModalOpen} onClose={() => setSplitModalOpen(false)} />
+
       <VinImportBar categorySelected={hasCategory} onImport={handleVinImport} />
 
       <div className="grid min-h-0 flex-1 grid-cols-4 gap-2">

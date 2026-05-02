@@ -21,6 +21,14 @@ export type VehicleFitRow = {
   driveType?: string
   engineCode?: string
   brakePosition?: '' | 'front' | 'rear'
+  /** Structured fields surfaced from VehicleFitmentRef for richer display */
+  vehicleType?: string
+  engineSeries?: string
+  chassisCode?: string
+  wheels?: string
+  hp?: number
+  euroStandard?: string
+  engineSize?: string
 }
 
 const inputCls =
@@ -29,7 +37,6 @@ const inputCls =
 const dropdownPanelClass =
   'absolute z-[60] mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-slate-200 bg-white p-1 shadow-lg'
 
-const alignedLabelCls = 'mb-0.5 flex min-h-[1.75rem] items-end text-[10px] font-medium leading-snug text-slate-600'
 
 const PINNED_BRAND_NAMES = [
   'toyota', 'honda', 'isuzu', 'nissan', 'mitsubishi', 'ford',
@@ -70,7 +77,6 @@ type Props = {
   onAdd: (row: VehicleFitRow) => void
   onUpdate: (id: string, row: VehicleFitRow) => void
   onRemove: (id: string) => void
-  labelClass: string
   sectionClass: string
   sectionTitleClass: string
   titleAction?: ReactNode
@@ -168,7 +174,6 @@ export function VehicleFitPicker({
   onAdd,
   onUpdate,
   onRemove,
-  labelClass,
   sectionClass,
   sectionTitleClass,
   titleAction,
@@ -193,7 +198,6 @@ export function VehicleFitPicker({
   const [manualYearFrom, setManualYearFrom] = useState('')
   const [manualYearTo, setManualYearTo] = useState('')
   const [editingRowId, setEditingRowId] = useState<string | null>(null)
-  const [recentBrands, setRecentBrands] = useState<SearchBrandOption[]>(loadRecentBrands)
 
   const [showVin, setShowVin] = useState(false)
   const [vinInput, setVinInput] = useState('')
@@ -324,21 +328,34 @@ export function VehicleFitPicker({
     )
   }, [canAddResolved, catId, brandId, brandQuery, modelId, modelQuery, brakePos, manualEngineTextTrim, manualDriveType, parsedYearFrom, parsedYearTo, rows, editingRowId])
 
-  // ── Grouped rows for display ─────────────────────────────────────────────
+  // ── Grouped rows: Brand → sorted Model sub-groups ───────────────────────
   const groupedRows = useMemo(() => {
-    const groups: { key: string; brandName: string; categoryLabel: string; items: VehicleFitRow[] }[] = []
-    const seen = new Map<string, number>()
+    type ModelGroup = { modelKey: string; modelName: string; items: VehicleFitRow[] }
+    type BrandGroup = { key: string; brandName: string; categoryLabel: string; models: ModelGroup[] }
+    const brands: BrandGroup[] = []
+    const brandIdx = new Map<string, number>()
     for (const r of rows) {
-      const key = `${r.categoryId}::${r.brandId}`
-      const idx = seen.get(key)
-      if (idx === undefined) {
-        seen.set(key, groups.length)
-        groups.push({ key, brandName: r.brandName, categoryLabel: r.categoryLabel, items: [r] })
-      } else {
-        groups[idx].items.push(r)
+      const bKey = `${r.categoryId}::${r.brandId}`
+      let bi = brandIdx.get(bKey)
+      if (bi === undefined) {
+        bi = brands.length
+        brandIdx.set(bKey, bi)
+        brands.push({ key: bKey, brandName: r.brandName, categoryLabel: r.categoryLabel, models: [] })
       }
+      const bg = brands[bi]
+      const mKey = `${bKey}::${r.modelId}`
+      let mg = bg.models.find((m) => m.modelKey === mKey)
+      if (!mg) {
+        mg = { modelKey: mKey, modelName: r.modelName, items: [] }
+        bg.models.push(mg)
+      }
+      mg.items.push(r)
     }
-    return groups
+    // sort models alphabetically within each brand
+    for (const bg of brands) {
+      bg.models.sort((a, b) => a.modelName.localeCompare(b.modelName, undefined, { sensitivity: 'base' }))
+    }
+    return brands
   }, [rows])
 
   function resetFormState() {
@@ -365,7 +382,6 @@ export function VehicleFitPicker({
     setModelId('')
     setModelQuery('')
     pushRecentBrand(b)
-    setRecentBrands(loadRecentBrands())
     window.setTimeout(() => modelInputRef.current?.focus(), 30)
   }
 
@@ -486,7 +502,6 @@ export function VehicleFitPicker({
   function handleAddOrUpdate() {
     if (!canAddResolved || isDuplicate) return
     const editingRow = editingRowId ? rows.find((r) => r.id === editingRowId) : undefined
-    const bp = brakePos || ''
     const engineCodeMatch = manualEngineTextTrim.match(/\[([^\]]*)\]\s*$/)
     const engineCode = engineCodeMatch ? engineCodeMatch[1].trim() : ''
     const engineText = engineCodeMatch
@@ -546,12 +561,6 @@ export function VehicleFitPicker({
     resetFormState()
   }
 
-  // ── Visible recent brands (filtered by catId when selected) ──────────────
-  const visibleRecentBrands = useMemo(
-    () => recentBrands.filter((b) => !catId || b.categoryId === catId),
-    [recentBrands, catId],
-  )
-
   // ── Models already used in this product's fitment rows (for this brand) ──
   const existingModelsForBrand = useMemo(() => {
     if (!brandId && !brandQuery.trim()) return []
@@ -561,8 +570,6 @@ export function VehicleFitPicker({
       .map((r) => ({ id: r.modelId, name: r.modelName }))
       .filter((m, i, arr) => arr.findIndex((x) => x.id === m.id) === i)
   }, [rows, brandId, brandQuery])
-  const showRecentSection = !brandQuery.trim() && visibleRecentBrands.length > 0
-
   return (
     <div className={sectionClass}>
       {!hideSectionTitle ? (
@@ -574,593 +581,414 @@ export function VehicleFitPicker({
         </div>
       ) : null}
 
-      <div ref={formTopRef} className="flex flex-col gap-2">
+      <div ref={formTopRef} className="flex flex-col gap-3">
 
         {/* ── Category pills ── */}
-        <div>
-          <span className={clsx(labelClass, 'mb-1.5 block text-[10px] font-medium text-slate-600')}>ประเภท</span>
+        <div className="flex gap-1.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {visibleCategories.length === 0 ? (
             <span className="text-[11px] text-slate-400">ไม่มีประเภทที่แสดง</span>
-          ) : (
-            <div className="flex flex-wrap gap-1.5">
-              {visibleCategories.map((c) => (
-                <button
-                  key={c.id}
-                  type="button"
-                  onClick={() => onSelectCategory(c.id)}
-                  className={clsx(
-                    'rounded-lg border px-3 py-1 text-[12px] font-medium transition',
-                    catId === c.id
-                      ? 'border-sky-400 bg-sky-500 text-white shadow-sm'
-                      : 'border-slate-200 bg-white text-slate-700 hover:border-sky-300 hover:bg-sky-50',
-                  )}
-                >
-                  {c.label}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* ── VIN lookup ── */}
-        <div>
-          <button
-            type="button"
-            onClick={() => setShowVin((v) => !v)}
-            className={clsx(
-              'inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11px] font-medium transition',
-              showVin
-                ? 'border-violet-300 bg-violet-50 text-violet-700'
-                : 'border-slate-200 bg-white text-slate-600 hover:border-violet-300 hover:bg-violet-50',
-            )}
-          >
-            <ScanSearch className="size-3.5" />
-            ค้นหาจาก VIN
-          </button>
-
-          {showVin && (
-            <div className="mt-2 flex flex-col gap-2 rounded-xl border border-violet-200 bg-violet-50/60 p-3">
-              {/* Input row */}
-              <div className="flex items-center gap-2">
-                <input
-                  type="text"
-                  maxLength={17}
-                  value={vinInput}
-                  onChange={(e) => setVinInput(e.target.value.toUpperCase().replace(/[^A-HJ-NPR-Z0-9]/g, ''))}
-                  onKeyDown={(e) => { if (e.key === 'Enter' && vinResult?.isValid) applyVinResult() }}
-                  placeholder="กรอก VIN 17 หลัก เช่น MHF…"
-                  className="flex-1 rounded-lg border border-violet-200 bg-white px-3 py-1.5 font-mono text-[13px] tracking-widest text-slate-800 shadow-sm outline-none focus:border-violet-400 focus:ring-1 focus:ring-violet-100 placeholder:font-sans placeholder:tracking-normal placeholder:text-slate-400"
-                  autoFocus
-                />
-                <span className={clsx(
-                  'shrink-0 text-[11px] font-semibold tabular-nums',
-                  vinInput.length === 17 ? 'text-emerald-600' : 'text-slate-400',
-                )}>
-                  {vinInput.length}/17
-                </span>
-                <button type="button" onClick={() => { setShowVin(false); setVinInput('') }} className="rounded p-1 text-slate-400 hover:text-slate-700">
-                  <X className="size-3.5" />
-                </button>
-              </div>
-
-              {/* Decode result */}
-              {vinResult && (
-                <div className={clsx(
-                  'rounded-lg border px-3 py-2',
-                  vinResult.isValid ? 'border-emerald-200 bg-emerald-50' : 'border-rose-200 bg-rose-50',
-                )}>
-                  {!vinResult.isValid ? (
-                    <p className="text-[11px] font-semibold text-rose-700">{vinResult.error}</p>
-                  ) : (
-                    <div className="flex flex-col gap-1.5">
-                      <div className="flex flex-wrap items-center gap-2">
-                        {/* WMI */}
-                        <span className="font-mono text-[10px] font-semibold text-slate-400">
-                          {vinResult.vin.slice(0, 3)}
-                          <span className="text-slate-300">·</span>
-                          {vinResult.vin.slice(3, 8)}
-                          <span className="text-slate-300">·</span>
-                          <span className={clsx(
-                            vinResult.checkDigit === 'valid' ? 'text-emerald-600' :
-                            vinResult.checkDigit === 'invalid' ? 'text-rose-500' : 'text-slate-400',
-                          )}>{vinResult.vin[8]}</span>
-                          <span className="text-slate-300">·</span>
-                          {vinResult.vin.slice(9)}
-                        </span>
-                        {/* Check digit badge */}
-                        <CheckDigitBadge status={vinResult.checkDigit} />
-                      </div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        {vinResult.brand ? (
-                          <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[11px] font-bold text-sky-700">
-                            {vinResult.brand}
-                          </span>
-                        ) : (
-                          <span className="text-[11px] text-slate-400">ไม่พบยี่ห้อใน WMI table</span>
-                        )}
-                        {vinResult.modelYear && (
-                          <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-bold text-indigo-700">
-                            ปี {vinResult.modelYear}
-                            {vinResult.modelYearAlt ? <span className="font-normal text-indigo-400"> (หรือ {vinResult.modelYearAlt})</span> : null}
-                          </span>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => applyVinResult()}
-                          className="ml-auto rounded-lg bg-violet-600 px-3 py-1 text-[11px] font-bold text-white hover:bg-violet-700 active:scale-95"
-                        >
-                          ใช้ข้อมูลนี้ ↵
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* VIN history */}
-              {vinHistory.length > 0 && (
-                <div>
-                  <p className="mb-1 text-[9px] font-bold uppercase tracking-wide text-slate-400">VIN ล่าสุด</p>
-                  <div className="flex flex-col gap-0.5">
-                    {vinHistory.map((h) => (
-                      <button
-                        key={h.vin}
-                        type="button"
-                        onClick={() => {
-                          const r = decodeVin(h.vin)
-                          if (r.isValid) applyVinResult(r)
-                        }}
-                        className="flex items-center gap-2 rounded-lg px-2 py-1 text-left hover:bg-violet-100 transition"
-                      >
-                        <span className="font-mono text-[11px] text-slate-600">{h.vin}</span>
-                        {h.brand && <span className="rounded bg-sky-100 px-1.5 py-0.5 text-[9px] font-semibold text-sky-700">{h.brand}</span>}
-                        {h.year && <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-[9px] font-semibold text-indigo-600">ปี {h.year}</span>}
-                        <span className="ml-auto text-[9px] text-slate-400">
-                          {new Date(h.ts).toLocaleDateString('th-TH', { day: 'numeric', month: 'short' })}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <p className="text-[10px] text-slate-400">
-                WMI (3 ตัวแรก) = ยี่ห้อ · ตำแหน่งที่ 10 = ปีรถ · ตำแหน่งที่ 9 = check digit
-              </p>
-            </div>
-          )}
-        </div>
-
-        {/* ── Breadcrumb strip ── */}
-        {(catId || brandQuery || modelQuery) ? (
-          <div className="flex items-center gap-1.5 rounded-lg bg-slate-50 px-2.5 py-1.5">
-            {catId && (
-              <span className="rounded bg-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600">
-                {categoryLabel}
-              </span>
-            )}
-            {catId && brandQuery && <span className="text-[11px] text-slate-300">›</span>}
-            {brandQuery && (
-              <span className="rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700">
-                {brandQuery}
-              </span>
-            )}
-            {brandQuery && modelQuery && <span className="text-[11px] text-slate-300">›</span>}
-            {modelQuery && (
-              <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700">
-                {modelQuery}
-              </span>
-            )}
+          ) : visibleCategories.map((c) => (
             <button
+              key={c.id}
               type="button"
-              onClick={() => { setCatId(''); setBrandId(''); setBrandQuery(''); setModelId(''); setModelQuery('') }}
-              className="ml-auto rounded p-0.5 text-slate-400 hover:text-slate-700"
-              title="ล้างการเลือกทั้งหมด"
+              onClick={() => onSelectCategory(c.id)}
+              className={clsx(
+                'shrink-0 rounded-lg border px-3 py-1.5 text-[12px] font-medium transition',
+                catId === c.id
+                  ? 'border-sky-400 bg-sky-500 text-white shadow-sm'
+                  : 'border-slate-200 bg-white text-slate-600 hover:border-sky-300 hover:bg-sky-50',
+              )}
             >
-              <X className="size-3" />
+              {c.label}
             </button>
-          </div>
-        ) : null}
+          ))}
+        </div>
 
-        {/* ── Brand / Model / Spec fields ── */}
-        <div className="grid gap-1.5 sm:grid-cols-2 lg:grid-cols-4">
-
-          {/* ยี่ห้อ */}
-          <label className="block min-w-0">
-            <span className={clsx(labelClass, alignedLabelCls)}>ยี่ห้อ</span>
+        {/* ── Brand + Model row ── */}
+        <div className="grid grid-cols-2 gap-2">
+          {/* Brand */}
+          <div>
+            <p className="mb-1 text-[11px] font-semibold text-slate-500">ยี่ห้อ</p>
             <div className="relative">
               <input
-                className={inputCls}
+                className={clsx(inputCls, !catId && 'cursor-not-allowed opacity-40')}
                 value={brandQuery}
-                onFocus={() => {
-                  setBrandDropdownOpen(true)
-                  const idx = filteredBrands.findIndex((b) => b.id === brandId && b.categoryId === catId)
-                  setBrandHighlightedIndex(idx >= 0 ? idx : 0)
-                }}
+                disabled={!catId}
+                onFocus={() => { setBrandDropdownOpen(true); setBrandHighlightedIndex(0) }}
                 onBlur={() => window.setTimeout(() => setBrandDropdownOpen(false), 120)}
-                onChange={(e) => {
-                  setBrandDropdownOpen(true)
-                  setBrandQuery(e.target.value)
-                  setBrandHighlightedIndex(0)
-                  if (brandId) { setBrandId(''); setModelId('') }
-                }}
+                onChange={(e) => { setBrandDropdownOpen(true); setBrandQuery(e.target.value); setBrandHighlightedIndex(0); if (brandId) { setBrandId(''); setModelId(''); setModelQuery('') } }}
                 onKeyDown={(e) => {
                   if (e.key === 'ArrowDown') { e.preventDefault(); setBrandDropdownOpen(true); setBrandHighlightedIndex((p) => moveHighlightIndex(p, filteredBrands.length, 1)); return }
                   if (e.key === 'ArrowUp') { e.preventDefault(); setBrandDropdownOpen(true); setBrandHighlightedIndex((p) => moveHighlightIndex(p, filteredBrands.length, -1)); return }
-                  if (e.key === 'Escape') setBrandDropdownOpen(false)
-                  if (e.key === 'Enter' && filteredBrands.length > 0) {
-                    e.preventDefault()
-                    onBrandPick(filteredBrands[brandHighlightedIndex >= 0 ? brandHighlightedIndex : 0])
-                    setBrandDropdownOpen(false)
-                  }
+                  if (e.key === 'Escape') { setBrandDropdownOpen(false) }
+                  if (e.key === 'Enter' && filteredBrands.length > 0) { e.preventDefault(); onBrandPick(filteredBrands[brandHighlightedIndex >= 0 ? brandHighlightedIndex : 0]); setBrandDropdownOpen(false) }
                 }}
-                disabled={!visibleCategories.length || !allBrands.length}
-                placeholder={visibleCategories.length ? 'พิมพ์หรือเลือก...' : '—'}
+                placeholder={catId ? 'พิมพ์หรือเลือกยี่ห้อ' : 'เลือกประเภทก่อน'}
               />
-              {brandDropdownOpen && visibleCategories.length > 0 && allBrands.length > 0 ? (
+              {brandDropdownOpen && catId && filteredBrands.length > 0 ? (
                 <div ref={brandDropdownRef} className={dropdownPanelClass}>
-                  {/* Recent brands section */}
-                  {showRecentSection && (
-                    <>
-                      <p className="px-1.5 pb-0.5 pt-1 text-[9px] font-bold uppercase tracking-wide text-slate-400">ล่าสุด</p>
-                      {visibleRecentBrands.map((b) => {
-                        const isSelected = brandId === b.id && catId === b.categoryId
-                        return (
-                          <button
-                            key={`recent-${b.categoryId}-${b.id}`}
-                            type="button"
-                            onMouseDown={(ev) => ev.preventDefault()}
-                            onClick={() => { onBrandPick(b); setBrandDropdownOpen(false) }}
-                            className={clsx(
-                              'flex w-full items-center justify-between gap-1 rounded px-1.5 py-1 text-left text-[11px] transition',
-                              isSelected ? 'bg-sky-500 text-white' : 'text-slate-700 hover:bg-sky-50',
-                            )}
-                          >
-                            <span className="truncate font-medium">{b.name}</span>
-                            <span className={clsx('shrink-0 text-[9px]', isSelected ? 'text-sky-200' : 'text-slate-400')}>{b.categoryLabel}</span>
-                          </button>
-                        )
-                      })}
-                      <div className="my-1 border-t border-slate-100" />
-                      <p className="px-1.5 pb-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-400">ทั้งหมด</p>
-                    </>
-                  )}
-                  {filteredBrands.length === 0 ? (
-                    <p className="px-1.5 py-1 text-[11px] text-slate-500">ไม่พบยี่ห้อ</p>
-                  ) : (
-                    filteredBrands.map((b, idx) => {
-                      const count = modelCountByBrand.get(`${b.categoryId}::${b.id}`) ?? 0
-                      const isSelected = brandId === b.id && catId === b.categoryId
-                      const isHighlighted = idx === brandHighlightedIndex
-                      return (
-                        <button
-                          key={`${b.categoryId}-${b.id}`}
-                          type="button"
-                          data-brand-index={idx}
-                          onMouseDown={(ev) => ev.preventDefault()}
-                          onMouseEnter={() => setBrandHighlightedIndex(idx)}
-                          onClick={() => { onBrandPick(b); setBrandDropdownOpen(false) }}
-                          className={clsx(
-                            'flex w-full items-center justify-between gap-1 rounded px-1.5 py-1 text-left text-[11px] transition',
-                            isSelected ? 'bg-sky-500 text-white' : isHighlighted ? 'bg-sky-50 text-sky-900' : 'text-slate-700 hover:bg-slate-50',
-                          )}
-                        >
-                          <span className="truncate font-medium">{b.name}</span>
-                          {count > 0 && (
-                            <span className={clsx('shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-semibold', isSelected ? 'bg-sky-400 text-white' : 'bg-slate-100 text-slate-500')}>
-                              {count} รุ่น
-                            </span>
-                          )}
-                        </button>
-                      )
-                    })
-                  )}
+                  {filteredBrands.map((b, idx) => {
+                    const count = modelCountByBrand.get(`${b.categoryId}::${b.id}`) ?? 0
+                    const isSelected = brandId === b.id && catId === b.categoryId
+                    const isHighlighted = idx === brandHighlightedIndex
+                    return (
+                      <button key={`${b.categoryId}-${b.id}`} type="button" data-brand-index={idx}
+                        onMouseDown={(ev) => ev.preventDefault()} onMouseEnter={() => setBrandHighlightedIndex(idx)}
+                        onClick={() => { onBrandPick(b); setBrandDropdownOpen(false) }}
+                        className={clsx('flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-[12px] transition',
+                          isSelected ? 'bg-sky-500 text-white' : isHighlighted ? 'bg-sky-50 text-sky-900' : 'text-slate-700 hover:bg-slate-50')}>
+                        <span className="truncate font-medium">{b.name}</span>
+                        {count > 0 && <span className={clsx('shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-semibold', isSelected ? 'bg-sky-400 text-white' : 'bg-slate-100 text-slate-500')}>{count}</span>}
+                      </button>
+                    )
+                  })}
                 </div>
               ) : null}
             </div>
-          </label>
+          </div>
 
-          {/* รุ่น */}
-          <label className="block min-w-0">
-            <span className={clsx(labelClass, alignedLabelCls)}>รุ่น</span>
+          {/* Model */}
+          <div>
+            <p className="mb-1 text-[11px] font-semibold text-slate-500">รุ่น</p>
             <div className="relative">
               <input
                 ref={modelInputRef}
-                className={inputCls}
+                className={clsx(inputCls, (!catId || (!brandId && !brandQuery.trim())) && 'cursor-not-allowed opacity-40')}
+                disabled={!catId || (!brandId && !brandQuery.trim())}
                 value={modelQuery}
-                onFocus={() => {
-                  setModelDropdownOpen(true)
-                  const idx = filteredModels.findIndex((m) => m.id === modelId && m.categoryId === catId)
-                  setModelHighlightedIndex(idx >= 0 ? idx : 0)
-                }}
+                onFocus={() => { setModelDropdownOpen(true); setModelHighlightedIndex(0) }}
                 onBlur={() => window.setTimeout(() => setModelDropdownOpen(false), 120)}
-                onChange={(e) => {
-                  setModelDropdownOpen(true)
-                  setModelQuery(e.target.value)
-                  setModelHighlightedIndex(0)
-                  if (modelId) setModelId('')
-                }}
+                onChange={(e) => { setModelDropdownOpen(true); setModelQuery(e.target.value); setModelHighlightedIndex(0); if (modelId) setModelId('') }}
                 onKeyDown={(e) => {
                   if (e.key === 'ArrowDown') { e.preventDefault(); setModelDropdownOpen(true); setModelHighlightedIndex((p) => moveHighlightIndex(p, filteredModels.length, 1)); return }
                   if (e.key === 'ArrowUp') { e.preventDefault(); setModelDropdownOpen(true); setModelHighlightedIndex((p) => moveHighlightIndex(p, filteredModels.length, -1)); return }
                   if (e.key === 'Escape') setModelDropdownOpen(false)
-                  if (e.key === 'Enter' && filteredModels.length > 0) {
-                    e.preventDefault()
-                    onModelPick(filteredModels[modelHighlightedIndex >= 0 ? modelHighlightedIndex : 0])
-                    setModelDropdownOpen(false)
-                  }
+                  if (e.key === 'Enter' && filteredModels.length > 0) { e.preventDefault(); onModelPick(filteredModels[modelHighlightedIndex >= 0 ? modelHighlightedIndex : 0]); setModelDropdownOpen(false) }
                 }}
-                disabled={!visibleCategories.length || !allModels.length}
-                placeholder="พิมพ์หรือเลือก..."
+                placeholder={!catId || (!brandId && !brandQuery.trim()) ? 'เลือกยี่ห้อก่อน' : 'พิมพ์หรือเลือกรุ่น'}
               />
-              {modelDropdownOpen && visibleCategories.length > 0 && allModels.length > 0 ? (
+              {modelDropdownOpen && filteredModels.length > 0 ? (
                 <div ref={modelDropdownRef} className={dropdownPanelClass}>
-                  {/* VIN year context header */}
                   {lastVinYear && !modelQuery.trim() && (
                     <div className="mb-1 flex items-center gap-1.5 rounded bg-violet-50 px-2 py-1">
                       <span className="text-[9px] font-bold uppercase tracking-wide text-violet-500">VIN ปี {lastVinYear}</span>
                       <span className="text-[9px] text-violet-400">— เลือกรุ่นที่ตรงกัน</span>
                     </div>
                   )}
-                  {/* Models already in this product's fitment rows */}
                   {existingModelsForBrand.length > 0 && !modelQuery.trim() && (
                     <>
-                      <p className="px-1.5 pb-0.5 pt-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-400">มีในสินค้านี้แล้ว</p>
+                      <p className="px-2 pb-0.5 pt-1 text-[9px] font-bold uppercase tracking-wide text-slate-400">มีในสินค้านี้แล้ว</p>
                       {existingModelsForBrand.map((em) => {
                         const full = filteredModels.find((m) => m.id === em.id)
                         const isSelected = modelId === em.id
                         return (
-                          <button
-                            key={`existing-${em.id}`}
-                            type="button"
-                            onMouseDown={(ev) => ev.preventDefault()}
-                            onClick={() => {
-                              if (full) { onModelPick(full); setModelDropdownOpen(false) }
-                              else { setModelQuery(em.name); setModelId(em.id); setModelDropdownOpen(false) }
-                            }}
-                            className={clsx(
-                              'flex w-full items-center gap-1 rounded px-1.5 py-1 text-left text-[11px] transition',
-                              isSelected ? 'bg-indigo-500 text-white' : 'text-indigo-700 hover:bg-indigo-50',
-                            )}
-                          >
+                          <button key={`existing-${em.id}`} type="button" onMouseDown={(ev) => ev.preventDefault()}
+                            onClick={() => { if (full) { onModelPick(full); setModelDropdownOpen(false) } else { setModelQuery(em.name); setModelId(em.id); setModelDropdownOpen(false) } }}
+                            className={clsx('flex w-full items-center gap-1 rounded px-2 py-1.5 text-left text-[12px] transition', isSelected ? 'bg-indigo-500 text-white' : 'text-indigo-700 hover:bg-indigo-50')}>
                             <span className="truncate font-medium">{em.name}</span>
                             <span className={clsx('ml-auto shrink-0 text-[9px]', isSelected ? 'text-indigo-200' : 'text-indigo-400')}>+ เครื่องใหม่</span>
                           </button>
                         )
                       })}
                       <div className="my-1 border-t border-slate-100" />
-                      <p className="px-1.5 pb-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-400">ทั้งหมด</p>
                     </>
                   )}
-                  {filteredModels.length === 0 ? (
-                    <p className="px-1.5 py-1 text-[11px] text-slate-500">ไม่พบรุ่น</p>
-                  ) : (
-                    filteredModels.map((m, idx) => {
-                      const isSelected = modelId === m.id && catId === m.categoryId
-                      const isHighlighted = idx === modelHighlightedIndex
-                      return (
-                        <button
-                          key={`${m.categoryId}-${m.id}`}
-                          type="button"
-                          data-model-index={idx}
-                          onMouseDown={(ev) => ev.preventDefault()}
-                          onMouseEnter={() => setModelHighlightedIndex(idx)}
-                          onClick={() => { onModelPick(m); setModelDropdownOpen(false) }}
-                          className={clsx(
-                            'flex w-full items-center gap-1 rounded px-1.5 py-1 text-left text-[11px] transition',
-                            isSelected ? 'bg-indigo-500 text-white' : isHighlighted ? 'bg-indigo-50 text-indigo-900' : 'text-slate-700 hover:bg-slate-50',
-                          )}
-                        >
-                          <span className="truncate font-medium">{m.name}</span>
-                          {!catId && (
-                            <span className={clsx('ml-auto shrink-0 rounded px-1 text-[9px]', isSelected ? 'text-indigo-200' : 'text-slate-400')}>
-                              {m.categoryLabel}
-                            </span>
-                          )}
-                        </button>
-                      )
-                    })
-                  )}
+                  {filteredModels.map((m, idx) => {
+                    const isSelected = modelId === m.id && catId === m.categoryId
+                    const isHighlighted = idx === modelHighlightedIndex
+                    return (
+                      <button key={`${m.categoryId}-${m.id}`} type="button" data-model-index={idx}
+                        onMouseDown={(ev) => ev.preventDefault()} onMouseEnter={() => setModelHighlightedIndex(idx)}
+                        onClick={() => { onModelPick(m); setModelDropdownOpen(false) }}
+                        className={clsx('flex w-full items-center rounded px-2 py-1.5 text-left text-[12px] transition',
+                          isSelected ? 'bg-indigo-500 text-white' : isHighlighted ? 'bg-indigo-50 text-indigo-900' : 'text-slate-700 hover:bg-slate-50')}>
+                        <span className="truncate font-medium">{m.name}</span>
+                      </button>
+                    )
+                  })}
                 </div>
               ) : null}
             </div>
-          </label>
-
-          {/* เครื่อง — with "copy from last row" shortcut */}
-          <label className="block min-w-0">
-            <span className={clsx(labelClass, 'mb-0.5 flex min-h-[1.75rem] items-end justify-between text-[10px] font-medium leading-snug text-slate-600')}>
-              <span>เครื่อง</span>
-              {rows.length > 0 && !editingRowId && (
-                <button
-                  type="button"
-                  onClick={copyLastRowSpec}
-                  className="font-normal text-sky-600 hover:underline"
-                >
-                  ↺ แถวล่าสุด
-                </button>
-              )}
-            </span>
-            <input
-              className={inputCls}
-              value={manualEngineText}
-              onChange={(e) => setManualEngineText(e.target.value)}
-              placeholder="เช่น 2.0, 1KD, 4JA1"
-            />
-          </label>
-
-          {/* ขับเคลื่อน */}
-          <label className="block min-w-0">
-            <span className={clsx(labelClass, alignedLabelCls)}>ขับเคลื่อน</span>
-            <input
-              className={inputCls}
-              value={manualDriveType}
-              onChange={(e) => setManualDriveType(e.target.value.toUpperCase())}
-              placeholder="เช่น 4WD, AWD"
-            />
-          </label>
-
-          {/* ปีเริ่ม */}
-          <label className="block min-w-0">
-            <span className={clsx(labelClass, alignedLabelCls)}>ปีเริ่ม</span>
-            <input
-              className={inputCls}
-              inputMode="numeric"
-              value={manualYearFrom}
-              onChange={(e) => setManualYearFrom(e.target.value)}
-              placeholder="เช่น 1995"
-            />
-            {hasYearFromInput && parsedYearFrom === undefined ? (
-              <span className="mt-0.5 block text-[10px] text-rose-700">กรอกปีเริ่มเป็นตัวเลข 1900-2100</span>
-            ) : null}
-          </label>
-
-          {/* ปีสิ้นสุด */}
-          <label className="block min-w-0">
-            <span className={clsx(labelClass, alignedLabelCls)}>ปีสิ้นสุด</span>
-            <input
-              className={inputCls}
-              inputMode="numeric"
-              value={manualYearTo}
-              onChange={(e) => setManualYearTo(e.target.value)}
-              placeholder="เช่น 2015"
-            />
-            {hasYearToInput && parsedYearTo === undefined ? (
-              <span className="mt-0.5 block text-[10px] text-rose-700">กรอกปีสิ้นสุดเป็นตัวเลข 1900-2100</span>
-            ) : null}
-          </label>
+          </div>
         </div>
 
-      </div>
+        {/* ── Engine / Year row ── */}
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <div>
+            <div className="mb-1 flex items-center justify-between">
+              <p className="text-[11px] font-semibold text-slate-500">เครื่องยนต์</p>
+              {rows.length > 0 && !editingRowId && (
+                <button type="button" onClick={copyLastRowSpec} className="text-[10px] text-sky-600 hover:underline">↺ ล่าสุด</button>
+              )}
+            </div>
+            <input className={inputCls} value={manualEngineText} onChange={(e) => setManualEngineText(e.target.value)} placeholder="เช่น 2.0, 1KD" />
+          </div>
+          <div>
+            <p className="mb-1 text-[11px] font-semibold text-slate-500">ขับเคลื่อน</p>
+            <input className={inputCls} value={manualDriveType} onChange={(e) => setManualDriveType(e.target.value.toUpperCase())} placeholder="4WD, AWD" />
+          </div>
+          <div>
+            <p className="mb-1 text-[11px] font-semibold text-slate-500">ปีเริ่มต้น</p>
+            <input className={inputCls} inputMode="numeric" value={manualYearFrom} onChange={(e) => setManualYearFrom(e.target.value)} placeholder="เช่น 2005" />
+            {hasYearFromInput && parsedYearFrom === undefined && <p className="mt-0.5 text-[10px] text-rose-600">ปีไม่ถูกต้อง</p>}
+          </div>
+          <div>
+            <p className="mb-1 text-[11px] font-semibold text-slate-500">ปีสิ้นสุด</p>
+            <input className={inputCls} inputMode="numeric" value={manualYearTo} onChange={(e) => setManualYearTo(e.target.value)} placeholder="เช่น 2015" />
+            {hasYearToInput && parsedYearTo === undefined && <p className="mt-0.5 text-[10px] text-rose-600">ปีไม่ถูกต้อง</p>}
+          </div>
+        </div>
 
-      {hasYearRangeError ? (
-        <p className="mt-1 text-[10px] text-rose-700">ปีเริ่มต้องน้อยกว่าหรือเท่าปีสิ้นสุด</p>
-      ) : null}
-
-      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-        <button
-          type="button"
-          disabled={!canAddResolved || isDuplicate}
-          onClick={handleAddOrUpdate}
-          className={clsx(
-            'inline-flex items-center justify-center gap-1.5 rounded-md border px-2 py-1 text-[11px] font-medium transition',
-            canAddResolved && !isDuplicate
-              ? 'border-sky-300 bg-sky-50 text-sky-900 hover:bg-sky-100'
-              : 'cursor-not-allowed border-slate-200 bg-slate-50 text-slate-400',
-          )}
-        >
-          <Plus className="size-3.5" />
-          {editingRowId ? 'บันทึกการแก้ไขชุดนี้' : 'เพิ่มชุดนี้'}
-        </button>
-        {editingRowId ? (
+        {/* ── Action row ── */}
+        <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={resetFormState}
-            className="inline-flex items-center justify-center rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
+            disabled={!canAddResolved || isDuplicate}
+            onClick={handleAddOrUpdate}
+            className={clsx(
+              'inline-flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-[12px] font-semibold transition',
+              canAddResolved && !isDuplicate
+                ? 'bg-sky-500 text-white hover:bg-sky-600 active:scale-95 shadow-sm'
+                : 'cursor-not-allowed bg-slate-100 text-slate-400',
+            )}
           >
-            ยกเลิกแก้ไข
+            <Plus className="size-3.5" />
+            {editingRowId ? 'บันทึกการแก้ไข' : 'เพิ่มรุ่นนี้'}
           </button>
-        ) : null}
-        {/* ── Duplicate warning ── */}
-        {isDuplicate && (
-          <span className="text-[11px] font-semibold text-amber-600">
-            ⚠ มีรุ่นนี้อยู่แล้ว
-          </span>
+          {editingRowId && (
+            <button type="button" onClick={resetFormState} className="rounded-lg border border-slate-200 px-3 py-1.5 text-[12px] font-medium text-slate-600 hover:bg-slate-50">
+              ยกเลิก
+            </button>
+          )}
+          {isDuplicate && <span className="text-[11px] font-semibold text-amber-600">⚠ มีรุ่นนี้อยู่แล้ว</span>}
+          <button
+            type="button"
+            onClick={() => setShowVin((v) => !v)}
+            className={clsx(
+              'ml-auto inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium transition',
+              showVin ? 'border-violet-300 bg-violet-50 text-violet-700' : 'border-slate-200 bg-white text-slate-500 hover:border-violet-200 hover:text-violet-600',
+            )}
+          >
+            <ScanSearch className="size-3.5" />VIN
+          </button>
+        </div>
+
+        {/* ── VIN panel ── */}
+        {showVin && (
+          <div className="flex flex-col gap-2 rounded-xl border border-violet-200 bg-violet-50/60 p-3">
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                maxLength={17}
+                value={vinInput}
+                onChange={(e) => setVinInput(e.target.value.toUpperCase().replace(/[^A-HJ-NPR-Z0-9]/g, ''))}
+                onKeyDown={(e) => { if (e.key === 'Enter' && vinResult?.isValid) applyVinResult() }}
+                placeholder="กรอก VIN 17 หลัก เช่น MHF…"
+                className="flex-1 rounded-lg border border-violet-200 bg-white px-3 py-1.5 font-mono text-[13px] tracking-widest text-slate-800 shadow-sm outline-none focus:border-violet-400 focus:ring-1 focus:ring-violet-100 placeholder:font-sans placeholder:tracking-normal placeholder:text-slate-400"
+                autoFocus
+              />
+              <span className={clsx('shrink-0 text-[11px] font-semibold tabular-nums', vinInput.length === 17 ? 'text-emerald-600' : 'text-slate-400')}>
+                {vinInput.length}/17
+              </span>
+              <button type="button" onClick={() => { setShowVin(false); setVinInput('') }} className="rounded p-1 text-slate-400 hover:text-slate-700">
+                <X className="size-3.5" />
+              </button>
+            </div>
+            {vinResult && (
+              <div className={clsx('rounded-lg border px-3 py-2', vinResult.isValid ? 'border-emerald-200 bg-emerald-50' : 'border-rose-200 bg-rose-50')}>
+                {!vinResult.isValid ? (
+                  <p className="text-[11px] font-semibold text-rose-700">{vinResult.error}</p>
+                ) : (
+                  <div className="flex flex-col gap-1.5">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-mono text-[10px] font-semibold text-slate-400">
+                        {vinResult.vin.slice(0, 3)}<span className="text-slate-300">·</span>{vinResult.vin.slice(3, 8)}<span className="text-slate-300">·</span>
+                        <span className={clsx(vinResult.checkDigit === 'valid' ? 'text-emerald-600' : vinResult.checkDigit === 'invalid' ? 'text-rose-500' : 'text-slate-400')}>{vinResult.vin[8]}</span>
+                        <span className="text-slate-300">·</span>{vinResult.vin.slice(9)}
+                      </span>
+                      <CheckDigitBadge status={vinResult.checkDigit} />
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {vinResult.brand
+                        ? <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[11px] font-bold text-sky-700">{vinResult.brand}</span>
+                        : <span className="text-[11px] text-slate-400">ไม่พบยี่ห้อใน WMI table</span>}
+                      {vinResult.modelYear && (
+                        <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-bold text-indigo-700">
+                          ปี {vinResult.modelYear}{vinResult.modelYearAlt ? <span className="font-normal text-indigo-400"> (หรือ {vinResult.modelYearAlt})</span> : null}
+                        </span>
+                      )}
+                      <button type="button" onClick={() => applyVinResult()} className="ml-auto rounded-lg bg-violet-600 px-3 py-1 text-[11px] font-bold text-white hover:bg-violet-700 active:scale-95">
+                        ใช้ข้อมูลนี้ ↵
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+            {vinHistory.length > 0 && (
+              <div>
+                <p className="mb-1 text-[9px] font-bold uppercase tracking-wide text-slate-400">VIN ล่าสุด</p>
+                <div className="flex flex-col gap-0.5">
+                  {vinHistory.map((h) => (
+                    <button key={h.vin} type="button"
+                      onClick={() => { const r = decodeVin(h.vin); if (r.isValid) applyVinResult(r) }}
+                      className="flex items-center gap-2 rounded-lg px-2 py-1 text-left transition hover:bg-violet-100">
+                      <span className="font-mono text-[11px] text-slate-600">{h.vin}</span>
+                      {h.brand && <span className="rounded bg-sky-100 px-1.5 py-0.5 text-[9px] font-semibold text-sky-700">{h.brand}</span>}
+                      {h.year && <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-[9px] font-semibold text-indigo-600">ปี {h.year}</span>}
+                      <span className="ml-auto text-[9px] text-slate-400">{new Date(h.ts).toLocaleDateString('th-TH', { day: 'numeric', month: 'short' })}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            <p className="text-[10px] text-slate-400">WMI (3 ตัวแรก) = ยี่ห้อ · ตำแหน่งที่ 10 = ปีรถ · ตำแหน่งที่ 9 = check digit</p>
+          </div>
         )}
+
       </div>
 
-      {/* ── Rows list — grouped by brand ── */}
+      {hasYearRangeError && (
+        <p className="mt-1 text-[10px] text-rose-600">ปีเริ่มต้องน้อยกว่าหรือเท่าปีสิ้นสุด</p>
+      )}
+
+      {/* ── Rows list — Brand → Model → spec rows ── */}
       {rows.length > 0 ? (
         <div className="mt-2 overflow-hidden rounded-lg border border-slate-200 bg-white">
-          <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50 px-3 py-1.5">
+          <div className="flex items-center border-b border-slate-100 bg-slate-50 px-3 py-1.5">
             <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
               รุ่นที่ผูกไว้ ({rows.length})
             </span>
           </div>
-          <div className="max-h-64 overflow-y-auto">
-            {groupedRows.map((group) => (
-              <div key={group.key}>
-                {/* Brand group header */}
-                <div className="sticky top-0 flex items-center gap-2 border-b border-slate-100 bg-slate-50/95 px-3 py-1 backdrop-blur-sm">
-                  <span className="text-[11px] font-bold text-slate-700">{group.brandName}</span>
-                  <span className="rounded bg-slate-200 px-1 py-0.5 text-[9px] font-semibold text-slate-500">{group.categoryLabel}</span>
-                  <span className="ml-auto text-[9px] text-slate-400">{group.items.length} รุ่น</span>
+          <div className="max-h-72 overflow-y-auto">
+            {groupedRows.map((brand) => (
+              <div key={brand.key}>
+                {/* ── Brand header ── */}
+                <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-slate-100 bg-slate-100/95 px-3 py-1 backdrop-blur-sm">
+                  <span className="text-[11px] font-extrabold tracking-wide text-slate-700">{brand.brandName}</span>
+                  <span className="rounded bg-slate-300/60 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500">{brand.categoryLabel}</span>
+                  <span className="ml-auto text-[9px] text-slate-400">{brand.models.length} รุ่น</span>
                 </div>
-                {group.items.map((r, idx) => {
-                  const engineDisplay =
-                    r.engineText ||
-                    (r.engineLabel && r.engineLabel !== 'ไม่ระบุเครื่อง/ปี'
-                      ? extractEngineTextFromLabel(r.engineLabel)
-                      : '')
-                  const yearDisplay = (() => {
-                    if (r.yearFrom !== undefined || r.yearTo !== undefined)
-                      return buildYearRangeLabel(r.yearFrom, r.yearTo)
-                    if (r.yearRangeText) return r.yearRangeText
-                    if (r.engineLabel && r.engineLabel !== 'ไม่ระบุเครื่อง/ปี') {
-                      const p = parseYearRangeFromText(r.engineLabel)
-                      if (p.yearFrom !== undefined || p.yearTo !== undefined)
-                        return buildYearRangeLabel(p.yearFrom, p.yearTo)
-                    }
-                    return ''
-                  })()
-                  const specParts: string[] = []
-                  if (engineDisplay) specParts.push(engineDisplay)
-                  if (r.engineCode) specParts.push(`[${r.engineCode}]`)
-                  if (r.driveType) specParts.push(r.driveType)
-                  if (yearDisplay) specParts.push(`ปี ${yearDisplay}`)
-                  if (r.brakePosition === 'front') specParts.push('เบรกหน้า')
-                  else if (r.brakePosition === 'rear') specParts.push('เบรกหลัง')
-                  const isEditing = editingRowId === r.id
-                  return (
-                    <div
-                      key={r.id}
-                      className={clsx(
-                        'flex items-center gap-2 py-2 pl-4 pr-2 transition',
-                        isEditing
-                          ? 'border-l-2 border-sky-400 bg-sky-50'
-                          : idx % 2 === 0
-                            ? 'border-l-2 border-transparent bg-white'
-                            : 'border-l-2 border-transparent bg-slate-50/50',
+
+                {brand.models.map((mg) => (
+                  <div key={mg.modelKey}>
+                    {/* ── Model sub-header ── */}
+                    <div className="flex items-center gap-2 border-b border-slate-50 bg-white px-3 py-1.5">
+                      <span className="text-[12px] font-bold text-slate-800">{mg.modelName}</span>
+                      {mg.items.length > 1 && (
+                        <span className="rounded-full bg-indigo-50 px-1.5 py-0.5 text-[9px] font-semibold text-indigo-500">
+                          {mg.items.length} ชุด
+                        </span>
                       )}
-                    >
-                      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                        <span className="truncate text-[12px] font-semibold text-slate-800">{r.modelName}</span>
-                        {specParts.length > 0 ? (
-                          <span className="truncate text-[11px] text-slate-500">{specParts.join(' · ')}</span>
-                        ) : (
-                          <span className="text-[11px] italic text-slate-400">ไม่ระบุเครื่อง/ปี</span>
-                        )}
-                      </span>
-                      <div className="flex shrink-0 items-center gap-0.5">
-                        <button
-                          type="button"
-                          onClick={() => copyBrandModel(r)}
-                          className="rounded p-1 text-slate-400 hover:bg-emerald-50 hover:text-emerald-700"
-                          title="คัดลอกยี่ห้อ/รุ่น — เพิ่มเครื่องใหม่สำหรับรุ่นนี้"
-                        >
-                          <Copy className="size-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => beginEdit(r)}
-                          className={clsx(
-                            'rounded p-1 transition',
-                            isEditing ? 'bg-sky-100 text-sky-700' : 'text-slate-400 hover:bg-sky-50 hover:text-sky-700',
-                          )}
-                          title="แก้ไข"
-                        >
-                          <Pencil className="size-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onRemove(r.id)}
-                          className="rounded p-1 text-slate-400 hover:bg-rose-50 hover:text-rose-700"
-                        >
-                          <X className="size-3.5" />
-                        </button>
-                      </div>
+                      <button
+                        type="button"
+                        onClick={() => copyBrandModel(mg.items[0])}
+                        className="ml-auto rounded p-1 text-slate-300 hover:bg-emerald-50 hover:text-emerald-600"
+                        title="คัดลอกรุ่นนี้ — เพิ่มเครื่องใหม่"
+                      >
+                        <Copy className="size-3" />
+                      </button>
                     </div>
-                  )
-                })}
+
+                    {/* ── Spec rows ── */}
+                    {mg.items.map((r) => {
+                      const engineDisplay =
+                        r.engineText ||
+                        (r.engineLabel && r.engineLabel !== 'ไม่ระบุเครื่อง/ปี'
+                          ? extractEngineTextFromLabel(r.engineLabel)
+                          : '')
+                      const yearDisplay = (() => {
+                        if (r.yearFrom !== undefined || r.yearTo !== undefined)
+                          return buildYearRangeLabel(r.yearFrom, r.yearTo)
+                        if (r.yearRangeText) return r.yearRangeText
+                        if (r.engineLabel && r.engineLabel !== 'ไม่ระบุเครื่อง/ปี') {
+                          const p = parseYearRangeFromText(r.engineLabel)
+                          if (p.yearFrom !== undefined || p.yearTo !== undefined)
+                            return buildYearRangeLabel(p.yearFrom, p.yearTo)
+                        }
+                        return ''
+                      })()
+                      const parts: string[] = []
+                      if (engineDisplay) parts.push(engineDisplay)
+                      if (r.engineCode) parts.push(`[${r.engineCode}]`)
+                      if (r.driveType) parts.push(r.driveType)
+                      if (r.brakePosition === 'front') parts.push('เบรกหน้า')
+                      else if (r.brakePosition === 'rear') parts.push('เบรกหลัง')
+                      const isEditing = editingRowId === r.id
+                      return (
+                        <div
+                          key={r.id}
+                          className={clsx(
+                            'flex items-center gap-1 border-b border-slate-50 py-1.5 pl-6 pr-2 transition',
+                            isEditing ? 'border-l-2 border-sky-400 bg-sky-50' : 'border-l-2 border-transparent hover:bg-slate-50/60',
+                          )}
+                        >
+                          <span className="flex min-w-0 flex-1 flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                            {(parts.length > 0 || r.chassisCode || r.hp || r.wheels || r.euroStandard || r.engineSize) ? (
+                              <>
+                                {/* Chassis code (or fallback to engineDisplay) */}
+                                {r.chassisCode ? (
+                                  <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-semibold text-slate-700">{r.chassisCode}</span>
+                                ) : engineDisplay ? (
+                                  <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-semibold text-slate-700">{engineDisplay}</span>
+                                ) : null}
+                                {/* Engine size + HP + Euro */}
+                                {r.engineSize ? (
+                                  <span className="rounded bg-violet-50 px-1.5 py-0.5 text-[10px] font-semibold text-violet-700">{r.engineSize}L</span>
+                                ) : null}
+                                {r.hp != null ? (
+                                  <span className="rounded bg-orange-50 px-1.5 py-0.5 text-[10px] font-semibold text-orange-700">{r.hp} HP</span>
+                                ) : null}
+                                {r.euroStandard ? (
+                                  <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">{r.euroStandard}</span>
+                                ) : null}
+                                {/* Wheels */}
+                                {r.wheels ? (
+                                  <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700">{r.wheels}</span>
+                                ) : null}
+                                {r.driveType ? (
+                                  <span className="rounded bg-sky-50 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700">{r.driveType}</span>
+                                ) : null}
+                                {/* Engine code in brackets */}
+                                {r.engineCode ? (
+                                  <span className="text-[10px] font-mono text-slate-400">[{r.engineCode}]</span>
+                                ) : null}
+                                {yearDisplay ? (
+                                  <span className="text-[11px] text-slate-500">ปี {yearDisplay}</span>
+                                ) : null}
+                                {r.brakePosition ? (
+                                  <span className="text-[10px] text-slate-400">{r.brakePosition === 'front' ? 'เบรกหน้า' : 'เบรกหลัง'}</span>
+                                ) : null}
+                              </>
+                            ) : (
+                              <span className="text-[11px] italic text-slate-400">ไม่ระบุเครื่อง/ปี</span>
+                            )}
+                          </span>
+                          <div className="flex shrink-0 items-center gap-0.5">
+                            <button
+                              type="button"
+                              onClick={() => beginEdit(r)}
+                              className={clsx(
+                                'rounded p-1 transition',
+                                isEditing ? 'bg-sky-100 text-sky-700' : 'text-slate-400 hover:bg-sky-50 hover:text-sky-700',
+                              )}
+                              title="แก้ไข"
+                            >
+                              <Pencil className="size-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onRemove(r.id)}
+                              className="rounded p-1 text-slate-400 hover:bg-rose-50 hover:text-rose-700"
+                            >
+                              <X className="size-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                ))}
               </div>
             ))}
           </div>

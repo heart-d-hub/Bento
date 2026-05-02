@@ -2,7 +2,7 @@ import type { Plugin } from 'vite'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
 function getDbUrl(): string {
-  return process.env.DATABASE_URL ?? 'postgresql://postgres:1234@localhost:5432/bento?schema=public'
+  return process.env.DATABASE_URL ?? 'postgresql://postgres:1234@localhost:5432/bento'
 }
 
 function sendJson(res: ServerResponse, data: unknown, status = 200) {

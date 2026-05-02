@@ -35,6 +35,9 @@ import {
   type PhysicalDimensions,
   type ProductMasterDetail,
   type ProductSalesStatus,
+  type QuantityBreakRow,
+  type QuantityBreaksConfig,
+  type QuantityBreaksForUnit,
   type SalesUnit,
   type SellPriceTier,
   type SellTierPercentBasis,
@@ -118,10 +121,17 @@ function normalizeVehicleLine(
   const driveType = f.driveType?.trim() || extractDriveType(f.engineText ?? '') || extractDriveType(f.engineLabel ?? '')
   const engineTextBase = (f.engineText?.trim() || stripDriveType(f.engineLabel ?? '') || '').trim()
   const modelCandidate = (f.modelName ?? '').trim()
-  const modelName =
-    !modelCandidate || modelCandidate === '—' || looksLikeEngineText(modelCandidate)
-      ? (p.carModelLabel && p.carModelLabel !== '—' ? p.carModelLabel : '—')
-      : modelCandidate
+  const chassisCandidate = (f.chassisCode ?? '').trim()
+  // Pick a model name that's NOT just a duplicate of the chassis code
+  let modelName: string
+  if (modelCandidate && modelCandidate !== '—' && !looksLikeEngineText(modelCandidate) && modelCandidate !== chassisCandidate) {
+    modelName = modelCandidate
+  } else {
+    const fallbackLabel = p.carModelLabel && p.carModelLabel !== '—' ? p.carModelLabel : ''
+    // Don't use carModelLabel if it equals chassis (would duplicate)
+    if (fallbackLabel && fallbackLabel !== chassisCandidate) modelName = fallbackLabel
+    else modelName = '—'
+  }
   const brandCandidate = (f.brandName ?? '').trim()
   const brandName =
     !brandCandidate ||
@@ -153,6 +163,14 @@ function normalizeVehicleLine(
     ...(f.yearTo != null ? { yearTo: f.yearTo } : {}),
     ...(driveType ? { driveType } : {}),
     ...(f.engineCode ? { engineCode: f.engineCode } : {}),
+    // Surface structured fields so the picker can display them
+    ...(f.vehicleType ? { vehicleType: f.vehicleType } : {}),
+    ...(f.engineSeries ? { engineSeries: f.engineSeries } : {}),
+    ...(f.chassisCode ? { chassisCode: f.chassisCode } : {}),
+    ...(f.wheels ? { wheels: f.wheels } : {}),
+    ...(f.hp ? { hp: f.hp } : {}),
+    ...(f.euroStandard ? { euroStandard: f.euroStandard } : {}),
+    ...(f.engineSize ? { engineSize: f.engineSize } : {}),
     brakePosition: (f.brakePosition ?? '') as '' | 'front' | 'rear',
   }
 }
@@ -422,6 +440,13 @@ export function AddProductModal({
   const [salesUnitRows, setSalesUnitRows] = useState(() => [
     { id: `u-${Date.now()}`, label: 'ชิ้น', baseUnits: '1', barcode: '' },
   ])
+  /** ราคาขั้นบันได ต่อหน่วย (UI string state) — รวม per-tier override */
+  const [quantityBreakRows, setQuantityBreakRows] = useState<{
+    unitIndex: number
+    defaultRows: { id: string; minQty: string; price: string }[]
+    perTierRows: { [tierIndex: number]: { id: string; minQty: string; price: string }[] }
+    showPerTier: boolean
+  }[]>([])
   const [packaging, setPackaging] = useState('')
   const [storageLocation, setStorageLocation] = useState('')
   const [notes, setNotes] = useState('')
@@ -775,6 +800,7 @@ export function AddProductModal({
         setSalesUnitRows([{ id: `u-${Date.now()}`, label: 'ชิ้น', baseUnits: '1', barcode: '' }])
       }
     }
+    setQuantityBreakRows([])
     setPackaging('')
     setStorageLocation('')
     setNotes('')
@@ -888,6 +914,32 @@ export function AddProductModal({
           baseUnits: i === 0 ? '1' : String(u.baseUnits),
           barcode: p.barcodes?.[i]?.code ?? '',
         })),
+      )
+      // ราคาขั้นบันได — โหลดจากแฟ้มมาสเตอร์
+      const qb = p.quantityBreaks?.perUnit ?? []
+      setQuantityBreakRows(
+        qb.map((u) => {
+          const perTier: { [tier: number]: { id: string; minQty: string; price: string }[] } = {}
+          if (u.perTierBreaks) {
+            for (const [k, rows] of Object.entries(u.perTierBreaks)) {
+              perTier[Number(k)] = (rows ?? []).map((r, i) => ({
+                id: `qbpt-${u.unitIndex}-${k}-${i}-${Date.now()}`,
+                minQty: String(r.minQty),
+                price: String(r.price),
+              }))
+            }
+          }
+          return {
+            unitIndex: u.unitIndex,
+            defaultRows: (u.defaultBreaks ?? []).map((r, i) => ({
+              id: `qb-${u.unitIndex}-${i}-${Date.now()}`,
+              minQty: String(r.minQty),
+              price: String(r.price),
+            })),
+            perTierRows: perTier,
+            showPerTier: Object.keys(perTier).length > 0,
+          }
+        }),
       )
       setPackaging(p.packaging ?? '')
       setStorageLocation(p.storageLocation ?? '')
@@ -1454,6 +1506,34 @@ export function AddProductModal({
         ? Math.max(1, Math.floor(Number(String(piecesPerBoxStr).replace(',', '.')) || 0))
         : undefined
 
+    // Build qty-break config from UI state — drop empty rows / invalid numbers
+    const parsedQtyBreaks: QuantityBreaksConfig | undefined = (() => {
+      const cleanRows = (raws: { minQty: string; price: string }[]): QuantityBreakRow[] =>
+        raws
+          .map((r) => ({
+            minQty: Math.floor(Number(String(r.minQty).replace(',', '.')) || 0),
+            price: Math.round((Number(String(r.price).replace(',', '.')) || 0) * 100) / 100,
+          }))
+          .filter((r) => r.minQty > 0 && r.price > 0)
+          .sort((a, b) => a.minQty - b.minQty)
+      const perUnit: QuantityBreaksForUnit[] = []
+      for (const cfg of quantityBreakRows) {
+        const def = cleanRows(cfg.defaultRows)
+        const perTier: { [t: number]: QuantityBreakRow[] } = {}
+        for (const [k, raws] of Object.entries(cfg.perTierRows)) {
+          const cleaned = cleanRows(raws ?? [])
+          if (cleaned.length > 0) perTier[Number(k)] = cleaned
+        }
+        if (def.length === 0 && Object.keys(perTier).length === 0) continue
+        perUnit.push({
+          unitIndex: cfg.unitIndex,
+          defaultBreaks: def.length > 0 ? def : undefined,
+          perTierBreaks: Object.keys(perTier).length > 0 ? perTier : undefined,
+        })
+      }
+      return perUnit.length > 0 ? { perUnit } : undefined
+    })()
+
     const product: ProductMasterDetail = {
       ...(prev ?? {}),
       id,
@@ -1493,6 +1573,7 @@ export function AddProductModal({
       costEnteredManually: costManualOverride || costPrice > 0 ? true : undefined,
       sellTierPercentBasis: sellTierPercentBasis === 'list_discount' ? 'list_discount' : undefined,
       sellPriceTiers,
+      quantityBreaks: parsedQtyBreaks,
       isGenuine: isGenuine || undefined,
       salesUnits: salesUnitsAligned,
       packaging: packaging.trim() || undefined,
@@ -2189,7 +2270,6 @@ export function AddProductModal({
                           setVehicleRows((prev) => prev.map((r) => (r.id === id ? row : r)))
                         }
                         onRemove={(id) => setVehicleRows((prev) => prev.filter((r) => r.id !== id))}
-                        labelClass={labelClass}
                         sectionClass="border-0 bg-transparent p-0"
                         sectionTitleClass={sectionTitleClass}
                         hideSectionTitle
@@ -2544,23 +2624,37 @@ export function AddProductModal({
                                 maxLength={14}
                               />
                             </td>
-                            {row.prices.map((cell, pi) => (
+                            {row.prices.map((cell, pi) => {
+                              const baseUnitsAt = (idx: number) =>
+                                idx === 0
+                                  ? 1
+                                  : Math.max(
+                                      1,
+                                      Math.round(
+                                        Number(String(salesUnitRows[idx]?.baseUnits ?? '1').replace(',', '.')) || 1,
+                                      ),
+                                    )
+                              return (
                               <td key={`${i}-u${pi}`} className="py-0.5 pr-1">
                                 <input
                                   className={sellPriceCellClass}
                                   value={(() => {
                                     if (cell !== '') return cell
+                                    // ถ้า cell อื่นในแถวเดียวกันถูกตั้งราคาด้วยมือ — derive ราคา cell นี้จาก per-piece × baseUnits
+                                    // ป้องกันบั๊ก "ซื้อลัง แพงกว่าซื้อชิ้น × จำนวน" เมื่อ user override แค่ ชิ้น แต่ลังยังว่าง
+                                    for (let pj = 0; pj < row.prices.length; pj++) {
+                                      if (pj === pi) continue
+                                      const raw = row.prices[pj]
+                                      if (!raw) continue
+                                      const v = parseMoney(raw)
+                                      if (v === undefined || v <= 0) continue
+                                      const perPiece = v / baseUnitsAt(pj)
+                                      const derived = perPiece * baseUnitsAt(pi)
+                                      return formatMoneyInput(derived)
+                                    }
                                     const s = parseSignedTierPercent(row.markup)
                                     if (s === 0) return ''
-                                    const unitMul =
-                                      pi === 0
-                                        ? 1
-                                        : Math.max(
-                                            1,
-                                            Math.round(
-                                              Number(String(salesUnitRows[pi]?.baseUnits ?? '1').replace(',', '.')) || 1,
-                                            ),
-                                          )
+                                    const unitMul = baseUnitsAt(pi)
                                     let autoPrice: number
                                     if (sellTierPercentBasis === 'list_discount') {
                                       const lp = listPPreview
@@ -2600,7 +2694,8 @@ export function AddProductModal({
                                   inputMode="decimal"
                                 />
                               </td>
-                            ))}
+                              )
+                            })}
                           </tr>
                         ))}
                       </tbody>
@@ -2614,6 +2709,218 @@ export function AddProductModal({
                       ปัดเศษใช้กับราคา «ปลีก» หน่วยแรกเท่านั้น — ทำงานเมื่อใส่ ±% และยังไม่ใส่ราคาในช่องบาท; ถ้าใส่ราคาตรง ระบบจะไม่ปัด
                     </span>
                   </p>
+                </div>
+                {/* ราคาขั้นบันไดตามจำนวน — qty break editor */}
+                <div className="mt-2 rounded-md border border-amber-200 bg-amber-50/40 p-2">
+                  <p className={clsx(sectionTitleClass, 'flex items-center gap-1.5')}>
+                    <span aria-hidden>🪜</span>
+                    ราคาขั้นบันได ตามจำนวนซื้อ <span className="text-[10px] font-normal text-slate-500">(ไม่บังคับ)</span>
+                  </p>
+                  <p className="mb-1.5 text-[10px] leading-snug text-slate-500">
+                    เช่น ลัง: 1+ = ฿2,550 · 2+ = ฿2,530 · 3+ = ฿2,515 — ราคาต่อหน่วย ปกติใช้กับทุกระดับลูกค้า
+                  </p>
+                  <div className="space-y-2">
+                    {salesUnitRows.map((unitRow, uIdx) => {
+                      const cfg = quantityBreakRows.find((q) => q.unitIndex === uIdx)
+                      const defaultRows = cfg?.defaultRows ?? []
+                      const showPerTier = cfg?.showPerTier ?? false
+                      const ensureUnit = (mut: (c: typeof quantityBreakRows[number]) => typeof quantityBreakRows[number]) =>
+                        setQuantityBreakRows((prev) => {
+                          const exists = prev.find((q) => q.unitIndex === uIdx)
+                          const base = exists ?? {
+                            unitIndex: uIdx,
+                            defaultRows: [],
+                            perTierRows: {},
+                            showPerTier: false,
+                          }
+                          const next = mut(base)
+                          if (exists) return prev.map((q) => (q.unitIndex === uIdx ? next : q))
+                          return [...prev, next].sort((a, b) => a.unitIndex - b.unitIndex)
+                        })
+                      const addDefault = () =>
+                        ensureUnit((c) => ({
+                          ...c,
+                          defaultRows: [
+                            ...c.defaultRows,
+                            { id: `qb-${uIdx}-${Date.now()}-${Math.random()}`, minQty: '', price: '' },
+                          ],
+                        }))
+                      const updateDefault = (id: string, key: 'minQty' | 'price', val: string) =>
+                        ensureUnit((c) => ({
+                          ...c,
+                          defaultRows: c.defaultRows.map((r) => (r.id === id ? { ...r, [key]: val } : r)),
+                        }))
+                      const removeDefault = (id: string) =>
+                        ensureUnit((c) => ({ ...c, defaultRows: c.defaultRows.filter((r) => r.id !== id) }))
+                      const togglePerTier = () =>
+                        ensureUnit((c) => ({ ...c, showPerTier: !c.showPerTier }))
+                      const addPerTier = (tierIdx: number) =>
+                        ensureUnit((c) => ({
+                          ...c,
+                          perTierRows: {
+                            ...c.perTierRows,
+                            [tierIdx]: [
+                              ...(c.perTierRows[tierIdx] ?? []),
+                              { id: `qbpt-${uIdx}-${tierIdx}-${Date.now()}-${Math.random()}`, minQty: '', price: '' },
+                            ],
+                          },
+                        }))
+                      const updatePerTier = (tierIdx: number, id: string, key: 'minQty' | 'price', val: string) =>
+                        ensureUnit((c) => ({
+                          ...c,
+                          perTierRows: {
+                            ...c.perTierRows,
+                            [tierIdx]: (c.perTierRows[tierIdx] ?? []).map((r) =>
+                              r.id === id ? { ...r, [key]: val } : r,
+                            ),
+                          },
+                        }))
+                      const removePerTier = (tierIdx: number, id: string) =>
+                        ensureUnit((c) => ({
+                          ...c,
+                          perTierRows: {
+                            ...c.perTierRows,
+                            [tierIdx]: (c.perTierRows[tierIdx] ?? []).filter((r) => r.id !== id),
+                          },
+                        }))
+                      const clearPerTier = (tierIdx: number) =>
+                        ensureUnit((c) => {
+                          const next = { ...c.perTierRows }
+                          delete next[tierIdx]
+                          return { ...c, perTierRows: next }
+                        })
+                      return (
+                        <div key={`qbu-${uIdx}`} className="rounded border border-slate-200 bg-white p-2">
+                          <div className="mb-1 flex items-center justify-between">
+                            <span className="text-[11px] font-bold text-slate-700">
+                              หน่วย: {unitRow.label || `หน่วย ${uIdx + 1}`}
+                              {uIdx > 0 && (
+                                <span className="ml-1 text-[10px] font-normal text-slate-500">
+                                  (= {unitRow.baseUnits || 1} {salesUnitRows[0]?.label || 'ฐาน'})
+                                </span>
+                              )}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={addDefault}
+                              className="rounded-md border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-bold text-amber-800 hover:bg-amber-100"
+                            >
+                              + ขั้น
+                            </button>
+                          </div>
+                          {defaultRows.length === 0 ? (
+                            <p className="text-[10px] italic text-slate-400">ยังไม่มีขั้นบันได</p>
+                          ) : (
+                            <div className="space-y-1">
+                              {defaultRows.map((r) => (
+                                <div key={r.id} className="flex items-center gap-1.5">
+                                  <span className="text-[10px] text-slate-500">≥</span>
+                                  <input
+                                    className={clsx(inputClass, 'w-16 text-[11px]')}
+                                    value={r.minQty}
+                                    onChange={(e) => updateDefault(r.id, 'minQty', e.target.value)}
+                                    placeholder="qty"
+                                    inputMode="numeric"
+                                  />
+                                  <span className="text-[10px] text-slate-500">ราคา/หน่วย ฿</span>
+                                  <input
+                                    className={clsx(inputClass, 'w-24 text-[11px]')}
+                                    value={r.price}
+                                    onChange={(e) => updateDefault(r.id, 'price', e.target.value)}
+                                    placeholder="0.00"
+                                    inputMode="decimal"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => removeDefault(r.id)}
+                                    className="rounded p-0.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600"
+                                    aria-label="ลบขั้น"
+                                    title="ลบขั้น"
+                                  >
+                                    ×
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          <button
+                            type="button"
+                            onClick={togglePerTier}
+                            className="mt-1.5 text-[10px] font-bold text-blue-700 hover:underline"
+                          >
+                            {showPerTier ? '▾ ซ่อน override ต่อระดับลูกค้า' : '▸ ตั้งราคาขั้นบันไดต่างกันต่อระดับลูกค้า'}
+                          </button>
+                          {showPerTier && (
+                            <div className="mt-1.5 space-y-1.5 border-t border-slate-100 pt-1.5">
+                              {[0, 1, 2, 3].map((tierIdx) => {
+                                const rows = cfg?.perTierRows[tierIdx] ?? []
+                                return (
+                                  <div key={`pt-${tierIdx}`} className="rounded bg-slate-50 p-1.5">
+                                    <div className="mb-0.5 flex items-center justify-between">
+                                      <span className="text-[10px] font-bold text-slate-700">
+                                        {SELL_PRICE_TIER_LABELS[tierIdx] ?? `tier ${tierIdx + 1}`}
+                                        {rows.length === 0 && (
+                                          <span className="ml-1 text-[9px] font-normal italic text-slate-400">
+                                            (ใช้ค่ากลาง)
+                                          </span>
+                                        )}
+                                      </span>
+                                      <div className="flex items-center gap-1">
+                                        {rows.length > 0 && (
+                                          <button
+                                            type="button"
+                                            onClick={() => clearPerTier(tierIdx)}
+                                            className="text-[9px] text-slate-500 hover:text-slate-800 hover:underline"
+                                          >
+                                            กลับใช้ค่ากลาง
+                                          </button>
+                                        )}
+                                        <button
+                                          type="button"
+                                          onClick={() => addPerTier(tierIdx)}
+                                          className="rounded border border-blue-200 bg-blue-50 px-1.5 py-px text-[9px] font-bold text-blue-700 hover:bg-blue-100"
+                                        >
+                                          + ขั้น
+                                        </button>
+                                      </div>
+                                    </div>
+                                    {rows.map((r) => (
+                                      <div key={r.id} className="mt-0.5 flex items-center gap-1.5">
+                                        <span className="text-[9px] text-slate-500">≥</span>
+                                        <input
+                                          className={clsx(inputClass, 'w-14 text-[10px]')}
+                                          value={r.minQty}
+                                          onChange={(e) => updatePerTier(tierIdx, r.id, 'minQty', e.target.value)}
+                                          placeholder="qty"
+                                          inputMode="numeric"
+                                        />
+                                        <span className="text-[9px] text-slate-500">฿</span>
+                                        <input
+                                          className={clsx(inputClass, 'w-20 text-[10px]')}
+                                          value={r.price}
+                                          onChange={(e) => updatePerTier(tierIdx, r.id, 'price', e.target.value)}
+                                          placeholder="0.00"
+                                          inputMode="decimal"
+                                        />
+                                        <button
+                                          type="button"
+                                          onClick={() => removePerTier(tierIdx, r.id)}
+                                          className="rounded p-0.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600"
+                                          aria-label="ลบขั้น"
+                                        >
+                                          ×
+                                        </button>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
                 </div>
               </div>
             </div>
