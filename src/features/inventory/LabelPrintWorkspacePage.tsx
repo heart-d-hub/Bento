@@ -160,6 +160,7 @@ export function LabelPrintWorkspacePage({ className }: LabelPrintWorkspacePagePr
           carModelText: labelCarModelText(master?.carModelLabel, master?.yearLabel, master?.carModels?.[0]),
           salesUnitText: salesUnit,
           brandText: master?.brand,
+          storageLocation: master?.storageLocation,
           price: r.price ?? master?.sellPrice,
           costPrice,
           priceCipherMoney: buildPriceCipherMoneyForRow(master, {

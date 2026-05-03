@@ -112,6 +112,7 @@ const DESIGNER_CHECKBOX_OPTIONS: DesignerCheckboxOption[] = [
   { field: 'factory', kind: 'text', label: 'เบอร์โรงงาน' },
   { field: 'salesUnit', kind: 'text', label: 'หน่วยขาย' },
   { field: 'brand', kind: 'text', label: 'บริษัท / แบรนด์ชิ้นงาน' },
+  { field: 'binLocation', kind: 'text', label: 'ที่เก็บ (Bin)', hint: 'จาก «ที่เก็บ» ในแฟ้มสินค้า เช่น A-3-15' },
 ]
 
 /** ติ๊ก checkbox: มีองค์ประกอบนี้แล้วหรือยัง (กันซ้ำ) */

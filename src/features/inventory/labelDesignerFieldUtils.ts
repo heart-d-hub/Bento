@@ -27,6 +27,7 @@ export const DESIGNER_SAMPLE_ROW: EnrichedLabelRow = {
   carModelText: `${sampleMaster.carModelLabel}(${sampleMaster.yearLabel})`,
   salesUnitText: normalizeSalesUnits(sampleMaster)[0]?.label ?? 'ชิ้น',
   brandText: sampleMaster.brand,
+  storageLocation: sampleMaster.storageLocation ?? 'A-3-15',
   price: 1250,
   costPrice: 108.75,
   qty: 1,
@@ -88,6 +89,8 @@ export function getDesignerFieldValue(
     }
     case 'brand':
       return row.brandText || '—'
+    case 'binLocation':
+      return row.storageLocation || '—'
     case 'price':
       return row.price != null ? `฿${formatBahtLabel(row.price)}` : '—'
     case 'storeName':
@@ -126,6 +129,8 @@ export function fieldLabelTh(field: LabelDesignerField): string {
       return 'หน่วยขาย'
     case 'brand':
       return 'บริษัท / แบรนด์ชิ้นงาน'
+    case 'binLocation':
+      return 'ที่เก็บ (Bin)'
     case 'price':
       return 'ราคา'
     case 'storeName':

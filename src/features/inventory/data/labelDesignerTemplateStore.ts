@@ -10,6 +10,7 @@ export type LabelDesignerField =
   | 'price'
   | 'storeName'
   | 'priceCipher'
+  | 'binLocation'
 
 export type LabelDesignerElement = {
   id: string
