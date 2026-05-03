@@ -802,7 +802,11 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
     setRcvExtraQuery('')
     setRcvShippingCost('')
     setRcvNotes('')
-    setRcvTransportId('')
+    // Pre-fill transporter from PO.shippingMethod (matched by name)
+    const matchedTransport = selected.shippingMethod
+      ? transportDirectory.find((t) => t.name === selected.shippingMethod)
+      : undefined
+    setRcvTransportId(matchedTransport?.id ?? '')
     setRcvBoxes({})
     setRcvDamagedBoxes({})
     setRcvScanInput('')
@@ -810,7 +814,7 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
     setRcvLineBoxes({})
     setRcvRecipeBoxes({})
     setInlineReceive(true)
-    setPoTab('items')
+    setPoTab('receive')
   }
 
   const handleBarcodeScan = (raw: string) => {
@@ -1063,6 +1067,10 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
 
     setInlineReceive(false)
     setReceiveOpen(false)
+    // Auto-jump filter so user keeps tracking the PO
+    const wasFirstReceive = selected.receiveBatches.length === 0
+    if (autoClose) setFilterStatus('closed')
+    else if (wasFirstReceive) setFilterStatus('receiving')
   }
 
   const undoReceiveBatch = (batchId: string) => {
@@ -1099,12 +1107,14 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
     if (!selected) return
     updateSelected({ ...selected, paidAt: new Date().toISOString() })
     setPoTab('items')
+    setFilterStatus('paid')
   }
 
   const closePo = () => {
     if (!selected || selected.status !== 'ordered') return
     if (!window.confirm('ปิดเอกสาร PO นี้? (ค้างรับจะไม่ถูกติดตามในรายการเปิด)')) return
     updateSelected({ ...selected, status: 'closed', closedAt: new Date().toISOString() })
+    setFilterStatus('closed')
   }
 
   const reopenPo = () => {
@@ -1158,7 +1168,7 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
 
   const [previewOpen, setPreviewOpen] = useState(false)
   const [copyDone, setCopyDone] = useState(false)
-  const [poTab, setPoTab] = useState<'items' | 'supplier' | 'payment'>('items')
+  const [poTab, setPoTab] = useState<'items' | 'supplier' | 'payment' | 'receive'>('items')
 
   const printPo = async (mode: PoOutputMode = 'print') => {
     if (!selected) return
@@ -1806,6 +1816,30 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
                   </div>
                 )}
 
+              {/* Paid → next-step receive banner */}
+              {selected.status === 'ordered'
+                && !!selected.paidAt
+                && selected.receiveBatches.length === 0
+                && poTab !== 'receive'
+                && (
+                  <div className="flex items-center justify-between gap-3 rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-2.5">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <CheckCircle2 className="size-4 shrink-0 text-emerald-600" />
+                      <p className="text-xs font-semibold text-emerald-900">
+                        ชำระเรียบร้อย —{' '}
+                        <span className="font-normal text-emerald-700">ขั้นถัดไป: รับสินค้า</span>
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setPoTab('receive')}
+                      className="shrink-0 rounded-lg border border-emerald-500 bg-emerald-500 px-3 py-1.5 text-xs font-bold text-white hover:bg-emerald-600"
+                    >
+                      ไปรับสินค้า →
+                    </button>
+                  </div>
+                )}
+
               {/* Timeline strip */}
               {(() => {
                 const hasBackorders = selected.lines.some((l) => lineBackorder(l) > 0)
@@ -1900,6 +1934,7 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
                 {([
                   { id: 'items',    label: 'สินค้า',           badge: selected.lines.length },
                   { id: 'payment',  label: 'ชำระ / ใบกำกับ',   badge: (selected.poInvoices ?? []).length || null },
+                  { id: 'receive',  label: 'รับสินค้า',        badge: selected.receiveBatches.length || null },
                   { id: 'supplier', label: 'ซัพพลายเออร์',     badge: null },
                 ] as const).map((t) => (
                   <button
@@ -3361,6 +3396,41 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
                 )}
               </div>
 
+              </>)}
+
+              {/* ── Tab: รับสินค้า ── */}
+              {poTab === 'receive' && (selected.status === 'ordered' || selected.status === 'closed') && (<>
+
+              {/* CTA when form closed but ordered with backorder */}
+              {!inlineReceive && selected.status === 'ordered' && selected.lines.some((l) => lineBackorder(l) > 0) && (
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border-2 border-dashed border-emerald-300 bg-emerald-50/40 px-4 py-3">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Truck className="size-4 shrink-0 text-emerald-600" />
+                    <p className="text-xs font-semibold text-emerald-900">
+                      พร้อมรับสินค้า —{' '}
+                      <span className="font-normal text-emerald-700">กดปุ่มด้านขวาเพื่อเริ่มรับสินค้า</span>
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={openReceive}
+                    disabled={!selected.paidAt}
+                    title={!selected.paidAt ? 'ต้องบันทึกชำระก่อนรับสินค้า' : undefined}
+                    className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white shadow-sm hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <Truck className="size-3.5" /> เริ่มรับสินค้า
+                  </button>
+                </div>
+              )}
+
+              {/* All received message */}
+              {!inlineReceive && selected.status === 'ordered' && !selected.lines.some((l) => lineBackorder(l) > 0) && selected.receiveBatches.length > 0 && (
+                <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3">
+                  <CheckCircle2 className="size-4 shrink-0 text-emerald-600" />
+                  <p className="text-xs font-semibold text-emerald-900">รับสินค้าครบทุกรายการแล้ว</p>
+                </div>
+              )}
+
               {/* ── Inline receive panel ── */}
               {inlineReceive && selected.status === 'ordered' && (
                 <div className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-4 space-y-4">
@@ -3915,7 +3985,7 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
                 </div>
               )}
 
-              {/* ── Receive batch history ── */}
+              {/* ── Receive batch history (in receive tab) ── */}
               {selected.receiveBatches.length > 0 && (
                 <div className="space-y-2">
                   <div className="flex items-center gap-2">
@@ -3963,6 +4033,11 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
                   })}
                 </div>
               )}
+
+              </>)}
+
+              {/* ── Tab: items (ต่อ) — promo groups + notes ── */}
+              {poTab === 'items' && (<>
 
               {/* ── Promo groups ── */}
               {((selected.promoGroups ?? []).length > 0 || selected.status === 'draft' || selected.status === 'ordered') && (

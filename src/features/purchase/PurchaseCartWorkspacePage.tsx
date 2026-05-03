@@ -433,7 +433,7 @@ export function PurchaseCartWorkspacePage({ className, onGoToCatalog, onGoToPurc
     saveItems(items.filter((i) => !selectedIds.has(i.productId)))
     setSelected(new Set())
     setCreatedCount(groups2.size)
-    setTimeout(() => { setCreatedCount(0); onGoToPurchaseOrders?.() }, 2000)
+    setTimeout(() => { setCreatedCount(0); onGoToPurchaseOrders?.() }, 500)
   }
 
   // ── Empty state ───────────────────────────────────────────────────────────
