@@ -14,6 +14,7 @@ import type { PriceCipherSettings } from '@/features/inventory/data/priceCipherC
 import { loadPriceCipherSettings } from '@/features/inventory/data/priceCipherStore'
 import { loadStoreProfile } from '@/features/settings/data/storeProfileStore'
 import {
+  appendLabelPrintQueue,
   LABEL_PRINT_QUEUE_CHANGED_EVENT,
   loadLabelPrintQueue,
   saveLabelPrintQueue,
@@ -40,7 +41,7 @@ import {
   type EnrichedLabelRow,
 } from '@/features/inventory/labelPrintLayout'
 import { isComposite2x4StickerTemplate } from '@/features/inventory/data/labelDesignerDensityPresets'
-import { getProductMasterList, normalizeSalesUnits } from '@/features/inventory/data/productMasterData'
+import { getProductMasterList, normalizeSalesUnits, type ProductMasterDetail } from '@/features/inventory/data/productMasterData'
 import { DESIGNER_SAMPLE_ROW } from '@/features/inventory/labelDesignerFieldUtils'
 import { LabelBarcodeDesignerView } from '@/features/inventory/LabelBarcodeDesignerView'
 import { LabelPriceCipherSettingsView } from '@/features/inventory/LabelPriceCipherSettingsView'
@@ -105,6 +106,7 @@ export function LabelPrintWorkspacePage({ className }: LabelPrintWorkspacePagePr
   const [barcodeSubTab, setBarcodeSubTab] = useState<'queue' | 'designer' | 'price-cipher'>('queue')
   const [rows, setRows] = useState<LabelPrintQueueItem[]>(() => loadLabelPrintQueue())
   const [prefs, setPrefs] = useState(loadLabelPrintUiPrefs)
+  const [addQuery, setAddQuery] = useState('')
 
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [previewOpen, setPreviewOpen] = useState(false)
@@ -306,6 +308,51 @@ export function LabelPrintWorkspacePage({ className }: LabelPrintWorkspacePagePr
   const removeRow = (id: string) => {
     const next = rows.filter((r) => r.id !== id)
     saveLabelPrintQueue(next)
+  }
+
+  // Inline search → add directly to queue
+  const addQueryHits = useMemo(() => {
+    const q = addQuery.trim().toLowerCase()
+    if (q.length < 2) return []
+    const masters = getProductMasterList()
+    const matches: ProductMasterDetail[] = []
+    for (const p of masters) {
+      const sku = p.sku.toLowerCase()
+      const name = p.name.toLowerCase()
+      const oem = (p.oemTags ?? []).join(' ').toLowerCase()
+      const factory = (p.factoryNo ?? '').toLowerCase()
+      const barcode = (p.boxBarcode ?? '').toLowerCase()
+      if (
+        sku.includes(q) ||
+        name.includes(q) ||
+        oem.includes(q) ||
+        factory.includes(q) ||
+        barcode.includes(q)
+      ) {
+        matches.push(p)
+        if (matches.length >= 8) break
+      }
+    }
+    return matches
+  }, [addQuery])
+
+  const handleAddProductToQueue = (p: ProductMasterDetail) => {
+    const barcode = (p.boxBarcode?.trim() || p.sku.trim())
+    if (!barcode) {
+      window.alert('ไม่มีบาร์โค้ดหรือ SKU สำหรับสินค้านี้')
+      return
+    }
+    appendLabelPrintQueue({
+      name: p.name,
+      barcode,
+      sku: p.sku,
+      oemNo: p.oemTags[0],
+      factoryNo: p.factoryNo,
+      price: p.sellPrice,
+      qty: 1,
+      template: 'medium',
+    })
+    setAddQuery('')
   }
 
   return (
@@ -723,7 +770,80 @@ export function LabelPrintWorkspacePage({ className }: LabelPrintWorkspacePagePr
           </div>
         </aside>
 
-        <section className="min-h-0 overflow-auto rounded-2xl border border-slate-200 bg-white">
+        <section className="flex min-h-0 flex-col gap-2 overflow-hidden rounded-2xl border border-slate-200 bg-white">
+          {/* Inline search → add directly */}
+          <div className="relative shrink-0 border-b border-slate-100 bg-slate-50/40 p-2">
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-slate-400" aria-hidden />
+              <input
+                type="text"
+                value={addQuery}
+                onChange={(e) => setAddQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && addQueryHits[0]) {
+                    e.preventDefault()
+                    handleAddProductToQueue(addQueryHits[0])
+                  }
+                  if (e.key === 'Escape') setAddQuery('')
+                }}
+                placeholder="ค้นหาสินค้าเพื่อเพิ่มในคิว — SKU / ชื่อ / OEM / บาร์โค้ด..."
+                className="w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-9 text-xs outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-100"
+              />
+              {addQuery && (
+                <button
+                  type="button"
+                  onClick={() => setAddQuery('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                  aria-label="ล้างการค้นหา"
+                >
+                  <X className="size-3.5" />
+                </button>
+              )}
+            </div>
+            {addQuery.trim().length >= 2 && (
+              <div className="absolute left-2 right-2 top-full z-20 mt-1 max-h-72 overflow-auto rounded-xl border border-slate-200 bg-white shadow-xl">
+                {addQueryHits.length === 0 ? (
+                  <p className="px-3 py-3 text-[11px] text-slate-500">ไม่พบสินค้า — ลองคำอื่น</p>
+                ) : (
+                  <ul className="divide-y divide-slate-100">
+                    {addQueryHits.map((p, i) => (
+                      <li key={p.id}>
+                        <button
+                          type="button"
+                          onClick={() => handleAddProductToQueue(p)}
+                          className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-violet-50"
+                        >
+                          <span className="flex-1 min-w-0">
+                            <span className="block truncate text-[12px] font-semibold text-slate-800">
+                              {p.name}
+                            </span>
+                            <span className="flex items-center gap-2 text-[10px] text-slate-500">
+                              <span className="font-mono">{p.sku}</span>
+                              {p.oemTags?.[0] && (
+                                <span className="rounded bg-amber-50 px-1 text-amber-700">
+                                  OEM {p.oemTags[0]}
+                                </span>
+                              )}
+                              {p.sellPrice != null && (
+                                <span className="text-emerald-700">฿{p.sellPrice.toLocaleString('th-TH')}</span>
+                              )}
+                            </span>
+                          </span>
+                          {i === 0 && (
+                            <kbd className="rounded border border-slate-300 bg-white px-1.5 py-0.5 font-mono text-[9px] text-slate-500">
+                              Enter
+                            </kbd>
+                          )}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-auto">
           <table className="w-full min-w-[48rem] border-collapse text-xs">
             <thead>
               <tr className="sticky top-0 z-10 border-b border-slate-200 bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
@@ -818,6 +938,7 @@ export function LabelPrintWorkspacePage({ className }: LabelPrintWorkspacePagePr
               )}
             </tbody>
           </table>
+          </div>
         </section>
       </div>
       ) : null}

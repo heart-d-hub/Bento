@@ -7,7 +7,6 @@ import {
   newLabelDesignerTemplateEntryId,
   saveLabelDesignerTemplatesState,
   entryToTemplate,
-  type LabelDesignerTemplate,
   type LabelDesignerTemplatesState,
 } from '@/features/inventory/data/labelDesignerTemplateStore'
 import {
