@@ -1,4 +1,5 @@
 import { useVehicleCatalog } from '@/features/vehicle/context/VehicleCatalogContext'
+import { cleanFitmentEngineText } from '@/features/inventory/utils/cleanVehicleFitmentEngineText'
 import { decodeVin, type CheckDigitStatus, type VinDecodeResult } from '@/features/vehicle/utils/vinDecoder'
 import { clsx } from 'clsx'
 import { Copy, Pencil, Plus, ScanSearch, X } from 'lucide-react'
@@ -293,6 +294,29 @@ export function VehicleFitPicker({
   const brandName = selectedBrand?.name ?? selectedModel?.brandName ?? ''
   const modelName = selectedModel?.name ?? ''
   const manualEngineTextTrim = normalizeManualText(manualEngineText)
+
+  // Detect duplicates: engineText that contains chassis/HP/Euro values from other fields
+  const cleanedEngineText = (() => {
+    let t = manualEngineText
+    const hpNum = parseInt(manualHp, 10)
+    if (manualChassisCode.trim()) {
+      // Remove chassis code (case-insensitive) — escape regex special chars
+      const esc = manualChassisCode.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      t = t.replace(new RegExp(`\\b${esc}\\b`, 'gi'), ' ')
+    }
+    if (Number.isFinite(hpNum) && hpNum > 0) {
+      // Remove "NNN HP" or "HP NNN" patterns
+      t = t.replace(new RegExp(`\\b${hpNum}\\s*HP\\b`, 'gi'), ' ')
+      t = t.replace(new RegExp(`\\bHP\\s*${hpNum}\\b`, 'gi'), ' ')
+    }
+    if (manualEuro.trim()) {
+      // Remove "Euro N" patterns
+      t = t.replace(/\bEuro\s*\d+\b/gi, ' ')
+    }
+    // Collapse whitespace + trim trailing dashes/commas
+    return t.replace(/\s+/g, ' ').replace(/^[\s,\-/]+|[\s,\-/]+$/g, '').trim()
+  })()
+  const engineTextNeedsCleanup = cleanedEngineText !== manualEngineText.trim() && manualEngineText.trim().length > 0
   const parsedYearFrom = parseYearInput(manualYearFrom)
   const parsedYearTo = parseYearInput(manualYearTo)
   const hasYearFromInput = manualYearFrom.trim().length > 0
@@ -469,9 +493,8 @@ export function VehicleFitPicker({
     setModelId(row.modelId)
     setModelQuery(row.modelName)
     setBrakePos((row.brakePosition ?? '') as '' | 'front' | 'rear')
-    const engineRaw = row.engineText ?? extractEngineTextFromLabel(row.engineLabel ?? '')
-    const cleanEngine = extractEngineTextFromLabel(engineRaw)
-    setManualEngineText(cleanEngine)
+    // Apply full cleanup: derive from label if engineText empty, then strip duplicates of chassis/HP/Euro
+    setManualEngineText(cleanFitmentEngineText(row))
     setManualEngineCode(row.engineCode ?? '')
     setManualDriveType(
       row.driveType ??
@@ -740,54 +763,104 @@ export function VehicleFitPicker({
           </div>
         </div>
 
-        {/* ── Engine / Year row ── */}
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          <div>
-            <div className="mb-1 flex items-center justify-between">
-              <p className="text-[11px] font-semibold text-slate-500">ความจุเครื่อง</p>
-              {rows.length > 0 && !editingRowId && (
-                <button type="button" onClick={copyLastRowSpec} className="text-[10px] text-sky-600 hover:underline">↺ ล่าสุด</button>
-              )}
+        {/* ── Section: 🚗 ตัวถัง + รุ่นย่อย ── */}
+        <div className="rounded-lg border border-slate-200 bg-slate-50/40 px-3 py-2.5">
+          <p className="mb-1.5 flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-slate-500">
+            🚗 ตัวรถเฉพาะรุ่น
+          </p>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <p className="mb-1 text-[11px] font-semibold text-slate-500" title="รหัสตัวถัง / chassis code — เช่น GUN125, AE86, JZS155 (ตัวระบุ generation)">
+                รหัสตัวถัง
+              </p>
+              <input className={inputCls} value={manualChassisCode} onChange={(e) => setManualChassisCode(e.target.value.toUpperCase())} placeholder="เช่น GUN125, AE86, JZS155" />
             </div>
-            <input className={inputCls} value={manualEngineText} onChange={(e) => setManualEngineText(e.target.value)} placeholder="เช่น 2.0, 2.5" />
-          </div>
-          <div>
-            <p className="mb-1 text-[11px] font-semibold text-slate-500">รหัสเครื่อง</p>
-            <input className={inputCls} value={manualEngineCode} onChange={(e) => setManualEngineCode(e.target.value.toUpperCase())} placeholder="เช่น 1KD-FTV, 2GR-FE" />
-          </div>
-          <div>
-            <p className="mb-1 text-[11px] font-semibold text-slate-500">ปีเริ่มต้น</p>
-            <input className={inputCls} inputMode="numeric" value={manualYearFrom} onChange={(e) => setManualYearFrom(e.target.value)} placeholder="เช่น 2005" />
-            {hasYearFromInput && parsedYearFrom === undefined && <p className="mt-0.5 text-[10px] text-rose-600">ปีไม่ถูกต้อง</p>}
-          </div>
-          <div>
-            <p className="mb-1 text-[11px] font-semibold text-slate-500">ปีสิ้นสุด</p>
-            <input className={inputCls} inputMode="numeric" value={manualYearTo} onChange={(e) => setManualYearTo(e.target.value)} placeholder="เช่น 2015" />
-            {hasYearToInput && parsedYearTo === undefined && <p className="mt-0.5 text-[10px] text-rose-600">ปีไม่ถูกต้อง</p>}
+            <div>
+              <p className="mb-1 text-[11px] font-semibold text-slate-500" title="รุ่นย่อย / trim / grade — เช่น e:HEV, Vigo, Cedia, Pro">
+                รุ่นย่อย / Trim
+              </p>
+              <input className={inputCls} value={manualTrim} onChange={(e) => setManualTrim(e.target.value)} placeholder="เช่น e:HEV, Vigo, Cedia" />
+            </div>
           </div>
         </div>
 
-        {/* ── Chassis / Trim / Drive·Wheels / HP / Euro row ── */}
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-          <div>
-            <p className="mb-1 text-[11px] font-semibold text-slate-500">รหัสตัวถัง</p>
-            <input className={inputCls} value={manualChassisCode} onChange={(e) => setManualChassisCode(e.target.value.toUpperCase())} placeholder="เช่น GUN125, AE86" />
+        {/* ── Section: ⚙ เครื่อง ── */}
+        <div className="rounded-lg border border-slate-200 bg-slate-50/40 px-3 py-2.5">
+          <div className="mb-1.5 flex items-center justify-between">
+            <p className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-slate-500">
+              ⚙ เครื่อง
+            </p>
+            {rows.length > 0 && !editingRowId && (
+              <button type="button" onClick={copyLastRowSpec} className="text-[10px] text-sky-600 hover:underline">↺ ใช้สเปกล่าสุด</button>
+            )}
           </div>
-          <div>
-            <p className="mb-1 text-[11px] font-semibold text-slate-500">รุ่นย่อย / Trim</p>
-            <input className={inputCls} value={manualTrim} onChange={(e) => setManualTrim(e.target.value)} placeholder="เช่น e:HEV, Vigo, Cedia" />
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <div>
+              <div className="mb-1 flex items-center justify-between gap-1">
+                <p className="text-[11px] font-semibold text-slate-500" title="ขนาดเครื่อง / displacement — ลิตรหรือ cc (ไม่ใช่รหัสเครื่อง!)">
+                  ขนาด (L/cc)
+                </p>
+                {engineTextNeedsCleanup && (
+                  <button
+                    type="button"
+                    onClick={() => setManualEngineText(cleanedEngineText)}
+                    className="rounded bg-amber-100 px-1.5 py-0.5 text-[9px] font-bold text-amber-700 hover:bg-amber-200"
+                    title={`พบข้อมูลซ้ำกับฟิลด์อื่น — คลิกเพื่อทำความสะอาด\n\nก่อน:  ${manualEngineText}\nหลัง:  ${cleanedEngineText || '(ว่าง)'}`}
+                  >
+                    🧹 ทำความสะอาด
+                  </button>
+                )}
+              </div>
+              <input className={inputCls} value={manualEngineText} onChange={(e) => setManualEngineText(e.target.value)} placeholder="เช่น 1.5, 2.5L, 2500cc" />
+              {engineTextNeedsCleanup && (
+                <p className="mt-0.5 text-[10px] text-amber-600">
+                  ⚠ ซ้ำกับฟิลด์อื่น — กดปุ่มด้านบนเพื่อทำความสะอาด
+                </p>
+              )}
+            </div>
+            <div>
+              <p className="mb-1 text-[11px] font-semibold text-slate-500" title="รหัสรุ่นเครื่อง — เช่น 1KD-FTV, 2GR-FE (ตัวระบุชนิดเครื่อง)">
+                รหัสเครื่อง
+              </p>
+              <input className={inputCls} value={manualEngineCode} onChange={(e) => setManualEngineCode(e.target.value.toUpperCase())} placeholder="เช่น 1KD-FTV, 2GR-FE" />
+            </div>
+            <div>
+              <p className="mb-1 text-[11px] font-semibold text-slate-500" title="กำลังเครื่อง (HP) — ใส่ตัวเลขอย่างเดียว">
+                แรงม้า (HP)
+              </p>
+              <input className={inputCls} inputMode="numeric" value={manualHp} onChange={(e) => setManualHp(e.target.value.replace(/[^\d]/g, ''))} placeholder="เช่น 215, 360" />
+            </div>
+            <div>
+              <p className="mb-1 text-[11px] font-semibold text-slate-500" title="มาตรฐานไอเสีย — มีผลกับชิ้นส่วน emission control">
+                มาตรฐาน Euro
+              </p>
+              <input className={inputCls} value={manualEuro} onChange={(e) => setManualEuro(e.target.value)} placeholder="เช่น Euro 3, Euro 5" />
+            </div>
           </div>
-          <div>
-            <p className="mb-1 text-[11px] font-semibold text-slate-500">ขับเคลื่อน / ล้อ</p>
-            <input className={inputCls} value={manualDriveType} onChange={(e) => setManualDriveType(e.target.value.toUpperCase())} placeholder="เช่น 4WD, 10WD" />
-          </div>
-          <div>
-            <p className="mb-1 text-[11px] font-semibold text-slate-500">แรงม้า (HP)</p>
-            <input className={inputCls} inputMode="numeric" value={manualHp} onChange={(e) => setManualHp(e.target.value.replace(/[^\d]/g, ''))} placeholder="เช่น 215, 360" />
-          </div>
-          <div>
-            <p className="mb-1 text-[11px] font-semibold text-slate-500">มาตรฐาน Euro</p>
-            <input className={inputCls} value={manualEuro} onChange={(e) => setManualEuro(e.target.value)} placeholder="เช่น Euro 3, Euro 5" />
+        </div>
+
+        {/* ── Section: 📅 ปี + ขับเคลื่อน ── */}
+        <div className="rounded-lg border border-slate-200 bg-slate-50/40 px-3 py-2.5">
+          <p className="mb-1.5 flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-slate-500">
+            📅 ช่วงปี + ขับเคลื่อน
+          </p>
+          <div className="grid grid-cols-3 gap-2">
+            <div>
+              <p className="mb-1 text-[11px] font-semibold text-slate-500" title="ปีเริ่มผลิต/จำหน่าย">ปีเริ่มต้น</p>
+              <input className={inputCls} inputMode="numeric" value={manualYearFrom} onChange={(e) => setManualYearFrom(e.target.value)} placeholder="เช่น 2005" />
+              {hasYearFromInput && parsedYearFrom === undefined && <p className="mt-0.5 text-[10px] text-rose-600">ปีไม่ถูกต้อง</p>}
+            </div>
+            <div>
+              <p className="mb-1 text-[11px] font-semibold text-slate-500" title="ปีสิ้นสุดผลิต — ใส่ปีปัจจุบันถ้ายังผลิตอยู่">ปีสิ้นสุด</p>
+              <input className={inputCls} inputMode="numeric" value={manualYearTo} onChange={(e) => setManualYearTo(e.target.value)} placeholder="เช่น 2015" />
+              {hasYearToInput && parsedYearTo === undefined && <p className="mt-0.5 text-[10px] text-rose-600">ปีไม่ถูกต้อง</p>}
+            </div>
+            <div>
+              <p className="mb-1 text-[11px] font-semibold text-slate-500" title="ระบบขับเคลื่อน / จำนวนล้อ — เช่น 2WD, 4WD, 6WD, AWD">
+                ขับเคลื่อน / ล้อ
+              </p>
+              <input className={inputCls} value={manualDriveType} onChange={(e) => setManualDriveType(e.target.value.toUpperCase())} placeholder="เช่น 4WD, 10WD" />
+            </div>
           </div>
         </div>
 
