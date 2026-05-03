@@ -341,6 +341,15 @@ function SupplierMasterForm({ mode, initialProfile, onClose, onSaved }: Supplier
   }, [])
 
   useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open, onClose])
+
+  useEffect(() => {
     if (mode === 'create') {
       setName('')
       setTaxId('')
