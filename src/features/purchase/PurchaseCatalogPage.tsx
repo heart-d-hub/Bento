@@ -26,6 +26,7 @@ import {
   type MainCategory,
 } from '@/features/inventory/data/inventoryCategories'
 import { AddProductModal } from '@/features/inventory/components/AddProductModal'
+import { SearchableFilterSelect } from '@/features/inventory/components/SearchableFilterSelect'
 import { PRODUCT_PROMO_CHANGED_EVENT } from '@/features/purchase/data/poMovingAverage'
 import {
   applyWarehouseThresholds,
@@ -825,13 +826,36 @@ function ProductCard({
           <p className="mt-1.5 text-[9px] text-slate-300">ยังไม่มีข้อมูลผู้ขาย</p>
         )}
 
-        <p className="mt-1.5 text-sm font-black text-slate-900">
-          {price > 0 ? (
-            `฿${price.toLocaleString('th-TH')}`
-          ) : (
-            <span className="text-xs font-normal text-slate-300">ยังไม่มีราคา</span>
-          )}
-        </p>
+        <div className="mt-1.5 flex items-center gap-2">
+          <p className="text-sm font-black text-slate-900">
+            {price > 0 ? (
+              `฿${price.toLocaleString('th-TH')}`
+            ) : (
+              <span className="text-xs font-normal text-slate-300">ยังไม่มีราคา</span>
+            )}
+          </p>
+          {(() => {
+            if (price <= 0) return null
+            const cost = getLatestUnitCostForPo(product)
+            if (cost <= 0) return null
+            const marginPct = ((price - cost) / cost) * 100
+            const margin = Math.round(marginPct)
+            return (
+              <span
+                className={clsx(
+                  'inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-black tabular-nums',
+                  margin >= 30 ? 'bg-emerald-100 text-emerald-700'
+                  : margin >= 10 ? 'bg-amber-100 text-amber-700'
+                  : margin >= 0 ? 'bg-slate-100 text-slate-600'
+                  : 'bg-rose-100 text-rose-700',
+                )}
+                title={`ทุน ฿${cost.toLocaleString('th-TH')} → ขาย ฿${price.toLocaleString('th-TH')} = กำไร ฿${(price - cost).toLocaleString('th-TH', { maximumFractionDigits: 0 })}`}
+              >
+                {margin >= 0 ? '+' : ''}{margin}%
+              </span>
+            )
+          })()}
+        </div>
         <div className="mt-0.5 flex flex-wrap gap-1">
           {buyScheme && buyScheme.freeQty > 0 && (
             <span className="inline-flex items-center rounded-full bg-amber-100 px-1.5 py-0.5 text-[9px] font-bold text-amber-800">
@@ -2705,18 +2729,18 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
           )}
         </div>
 
-        {/* Toggle buttons — sit between search and cart */}
-        <div className="flex shrink-0 items-center gap-1.5">
-          <div className="h-4 w-px shrink-0 bg-slate-200" />
+        {/* Cluster 1: Alerts (red/orange) */}
+        <div className="flex shrink-0 items-center gap-1 rounded-lg border border-slate-200 bg-white p-0.5 shadow-sm">
           <button
             type="button"
             onClick={() => setLowStockMode(true)}
             className={clsx(
-              'flex shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition',
+              'flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold transition',
               lowStockCount > 0
-                ? 'border-rose-300 bg-rose-50 text-rose-700 hover:bg-rose-100'
-                : 'border-slate-200 bg-white text-slate-500 hover:border-rose-300 hover:text-rose-600',
+                ? 'bg-rose-100 text-rose-700 hover:bg-rose-200'
+                : 'text-slate-500 hover:bg-rose-50 hover:text-rose-600',
             )}
+            title="สินค้าใกล้หมด"
           >
             <TriangleAlert className="size-3.5" />
             ใกล้หมด
@@ -2727,37 +2751,43 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
           <button
             type="button"
             onClick={() => setSlowMoverMode(true)}
-            className="flex shrink-0 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-500 transition hover:border-indigo-300 hover:text-indigo-600"
+            className="flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold text-slate-500 transition hover:bg-indigo-50 hover:text-indigo-600"
             title="สินค้าขายช้า / นอนสต็อก"
           >
             <Clock className="size-3.5" />
             ขายช้า
           </button>
+        </div>
+
+        {/* Cluster 2: View filters (gray/blue) */}
+        <div className="flex shrink-0 items-center gap-1 rounded-lg border border-slate-200 bg-white p-0.5 shadow-sm">
           <button
             type="button"
             onClick={() => setShowInStoreOnly((v) => !v)}
             className={clsx(
-              'flex shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition',
+              'flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold transition',
               showInStoreOnly
-                ? 'border-indigo-300 bg-indigo-50 text-indigo-700'
-                : 'border-slate-200 bg-white text-slate-500 hover:border-indigo-300 hover:text-indigo-600',
+                ? 'bg-indigo-100 text-indigo-700'
+                : 'text-slate-500 hover:bg-indigo-50 hover:text-indigo-600',
             )}
+            title="กรองเฉพาะของในร้าน (มี stockMode)"
           >
             <Store className="size-3.5" />
-            เฉพาะในร้าน
+            ในร้าน
           </button>
           <button
             type="button"
             onClick={() => setShowFavOnly((v) => !v)}
             className={clsx(
-              'flex shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition',
+              'flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold transition',
               showFavOnly
-                ? 'border-amber-300 bg-amber-50 text-amber-700'
-                : 'border-slate-200 bg-white text-slate-500 hover:border-amber-300 hover:text-amber-600',
+                ? 'bg-amber-100 text-amber-700'
+                : 'text-slate-500 hover:bg-amber-50 hover:text-amber-600',
             )}
+            title="กรองเฉพาะรายการโปรด"
           >
             <Star className={clsx('size-3.5', showFavOnly && 'fill-amber-400 text-amber-400')} />
-            รายการโปรด
+            โปรด
             {favs.size > 0 && (
               <span className={clsx('rounded-full px-1.5 text-[10px] font-black', showFavOnly ? 'bg-amber-200 text-amber-800' : 'bg-slate-100 text-slate-500')}>{favs.size}</span>
             )}
@@ -2766,38 +2796,41 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
             type="button"
             onClick={() => setVendorPromoModalOpen(true)}
             className={clsx(
-              'flex shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition',
+              'flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold transition',
               vendorPromos.filter((vp) => vp.enabled).length > 0
-                ? 'border-blue-300 bg-blue-50 text-blue-700 hover:bg-blue-100'
-                : 'border-slate-200 bg-white text-slate-500 hover:border-blue-300 hover:text-blue-600',
+                ? 'bg-blue-100 text-blue-700 hover:bg-blue-200'
+                : 'text-slate-500 hover:bg-blue-50 hover:text-blue-600',
             )}
+            title="จัดการโปรโมชั่นจากผู้ขาย"
           >
             <Percent className="size-3.5" />
-            โปรผู้ขาย
+            โปรซัพ
             {vendorPromos.filter((vp) => vp.enabled).length > 0 && (
               <span className="rounded-full bg-blue-200 px-1.5 text-[10px] font-black text-blue-800">
                 {vendorPromos.filter((vp) => vp.enabled).length}
               </span>
             )}
           </button>
-          <div className="flex items-center rounded-lg border border-slate-200 bg-white p-0.5">
-            <button
-              type="button"
-              onClick={() => { setViewMode('grid'); saveViewMode('grid') }}
-              className={clsx('rounded-md p-1 transition', viewMode === 'grid' ? 'bg-slate-200 text-slate-800' : 'text-slate-400 hover:text-slate-600')}
-              title="มุมมองกริด"
-            >
-              <LayoutGrid className="size-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={() => { setViewMode('list'); saveViewMode('list') }}
-              className={clsx('rounded-md p-1 transition', viewMode === 'list' ? 'bg-slate-200 text-slate-800' : 'text-slate-400 hover:text-slate-600')}
-              title="มุมมองรายการ"
-            >
-              <LayoutList className="size-3.5" />
-            </button>
-          </div>
+        </div>
+
+        {/* Cluster 3: View toggle (gray) */}
+        <div className="flex items-center rounded-lg border border-slate-200 bg-white p-0.5 shadow-sm">
+          <button
+            type="button"
+            onClick={() => { setViewMode('grid'); saveViewMode('grid') }}
+            className={clsx('rounded-md p-1 transition', viewMode === 'grid' ? 'bg-slate-200 text-slate-800' : 'text-slate-400 hover:text-slate-600')}
+            title="มุมมองกริด"
+          >
+            <LayoutGrid className="size-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => { setViewMode('list'); saveViewMode('list') }}
+            className={clsx('rounded-md p-1 transition', viewMode === 'list' ? 'bg-slate-200 text-slate-800' : 'text-slate-400 hover:text-slate-600')}
+            title="มุมมองรายการ"
+          >
+            <LayoutList className="size-3.5" />
+          </button>
         </div>
 
         {/* Cart — pinned right */}
@@ -2845,107 +2878,76 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
         {/* Divider */}
         <div className="mx-2 h-4 w-px shrink-0 bg-slate-200" />
 
-        {/* Group 2: Vehicle filters */}
-        <div className="flex items-center gap-1">
-          <Car className="size-3.5 shrink-0 text-slate-400" aria-hidden />
-          <select
-            value={filterCarBrand}
-            onChange={(e) => {
-              setFilterCarBrand(e.target.value)
-              setFilterCarModel('ทั้งหมด')
-              setFilterEngine('ทั้งหมด')
-              setFilterDrive('ทั้งหมด')
-              setFilterYear('ทั้งหมด')
-            }}
-            className={clsx(
-              'rounded-lg border py-1.5 pl-2.5 pr-6 text-xs font-semibold outline-none transition',
-              filterCarBrand !== 'ทั้งหมด'
-                ? 'border-sky-300 bg-sky-50 text-sky-800 focus:border-sky-400'
-                : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 focus:border-sky-300',
-            )}
-          >
-            <option value="ทั้งหมด">ยี่ห้อรถ</option>
-            {carFilterOptions.carBrands.map((b) => (
-              <option key={b} value={b}>{b}</option>
-            ))}
-          </select>
-          <select
-            value={filterCarModel}
-            onChange={(e) => {
-              setFilterCarModel(e.target.value)
-              setFilterEngine('ทั้งหมด')
-              setFilterDrive('ทั้งหมด')
-              setFilterYear('ทั้งหมด')
-            }}
-            className={clsx(
-              'rounded-lg border py-1.5 pl-2.5 pr-6 text-xs font-semibold outline-none transition',
-              filterCarModel !== 'ทั้งหมด'
-                ? 'border-sky-300 bg-sky-100 text-sky-900 focus:border-sky-400'
-                : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 focus:border-sky-300',
-            )}
-          >
-            <option value="ทั้งหมด">รุ่นรถ</option>
-            {carFilterOptions.models.map((m) => (
-              <option key={m} value={m}>{m}</option>
-            ))}
-          </select>
-          <select
-            value={filterEngine}
-            onChange={(e) => {
-              setFilterEngine(e.target.value)
-              setFilterDrive('ทั้งหมด')
-              setFilterYear('ทั้งหมด')
-            }}
-            className={clsx(
-              'rounded-lg border py-1.5 pl-2.5 pr-6 text-xs font-semibold outline-none transition',
-              filterEngine !== 'ทั้งหมด'
-                ? 'border-sky-300 bg-sky-50 text-sky-800 focus:border-sky-400'
-                : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 focus:border-sky-300',
-            )}
-          >
-            <option value="ทั้งหมด">เครื่องยนต์</option>
-            {carFilterOptions.engines.map((en) => (
-              <option key={en} value={en}>{en}</option>
-            ))}
-          </select>
-          <select
-            value={filterDrive}
-            onChange={(e) => {
-              setFilterDrive(e.target.value)
-              setFilterYear('ทั้งหมด')
-            }}
-            className={clsx(
-              'rounded-lg border py-1.5 pl-2.5 pr-6 text-xs font-semibold outline-none transition',
-              filterDrive !== 'ทั้งหมด'
-                ? 'border-sky-300 bg-sky-50 text-sky-800 focus:border-sky-400'
-                : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 focus:border-sky-300',
-            )}
-          >
-            <option value="ทั้งหมด">ขับเคลื่อน / ล้อ</option>
-            {carFilterOptions.driveTypes.map((d) => (
-              <option key={d} value={d}>{d}</option>
-            ))}
-          </select>
-          <select
-            value={filterYear}
-            onChange={(e) => setFilterYear(e.target.value)}
-            className={clsx(
-              'rounded-lg border py-1.5 pl-2.5 pr-6 text-xs font-semibold outline-none transition',
-              filterYear !== 'ทั้งหมด'
-                ? 'border-sky-300 bg-sky-50 text-sky-800 focus:border-sky-400'
-                : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 focus:border-sky-300',
-            )}
-          >
-            <option value="ทั้งหมด">รุ่นปี</option>
-            {carFilterOptions.years.map((y) => (
-              <option key={y} value={y}>{y}</option>
-            ))}
-          </select>
+        {/* Group 2: Vehicle filters — same pattern as product folder (SearchableFilterSelect inline) */}
+        <div className="flex items-end gap-1.5">
+          <Car className="mb-1.5 size-3.5 shrink-0 text-slate-400" aria-hidden />
+          <label className="block min-w-0">
+            <span className="mb-0.5 block text-[10px] text-slate-500">ยี่ห้อรถ</span>
+            <SearchableFilterSelect
+              value={filterCarBrand}
+              options={carFilterOptions.carBrands}
+              allValue="ทั้งหมด"
+              onChange={(v) => {
+                setFilterCarBrand(v)
+                setFilterCarModel('ทั้งหมด'); setFilterEngine('ทั้งหมด'); setFilterDrive('ทั้งหมด'); setFilterYear('ทั้งหมด')
+              }}
+              ariaLabel="ยี่ห้อรถ"
+            />
+          </label>
+          <label className="block min-w-0">
+            <span className="mb-0.5 block text-[10px] text-slate-500">รุ่นรถ</span>
+            <SearchableFilterSelect
+              value={filterCarModel}
+              options={carFilterOptions.models}
+              allValue="ทั้งหมด"
+              onChange={(v) => {
+                setFilterCarModel(v)
+                setFilterEngine('ทั้งหมด'); setFilterDrive('ทั้งหมด'); setFilterYear('ทั้งหมด')
+              }}
+              ariaLabel="รุ่นรถ"
+            />
+          </label>
+          <label className="block min-w-0">
+            <span className="mb-0.5 block text-[10px] text-slate-500">เครื่องยนต์</span>
+            <SearchableFilterSelect
+              value={filterEngine}
+              options={carFilterOptions.engines}
+              allValue="ทั้งหมด"
+              onChange={(v) => {
+                setFilterEngine(v)
+                setFilterDrive('ทั้งหมด'); setFilterYear('ทั้งหมด')
+              }}
+              ariaLabel="เครื่องยนต์"
+            />
+          </label>
+          <label className="block min-w-0">
+            <span className="mb-0.5 block text-[10px] text-slate-500">ขับเคลื่อน / ล้อ</span>
+            <SearchableFilterSelect
+              value={filterDrive}
+              options={carFilterOptions.driveTypes}
+              allValue="ทั้งหมด"
+              onChange={(v) => {
+                setFilterDrive(v)
+                setFilterYear('ทั้งหมด')
+              }}
+              ariaLabel="ขับเคลื่อน / ล้อ"
+            />
+          </label>
+          <label className="block min-w-0">
+            <span className="mb-0.5 block text-[10px] text-slate-500">รุ่นปี</span>
+            <SearchableFilterSelect
+              value={filterYear}
+              options={carFilterOptions.years}
+              allValue="ทั้งหมด"
+              onChange={setFilterYear}
+              ariaLabel="รุ่นปี"
+            />
+          </label>
           {(filterCarBrand !== 'ทั้งหมด' || filterCarModel !== 'ทั้งหมด' || filterYear !== 'ทั้งหมด' || filterEngine !== 'ทั้งหมด' || filterDrive !== 'ทั้งหมด') && (
             <button
               type="button"
               onClick={() => { setFilterCarBrand('ทั้งหมด'); setFilterCarModel('ทั้งหมด'); setFilterYear('ทั้งหมด'); setFilterEngine('ทั้งหมด'); setFilterDrive('ทั้งหมด') }}
-              className="rounded-full p-1 text-sky-400 hover:bg-sky-50 hover:text-sky-700"
+              className="mb-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-sky-200 bg-sky-50 text-sky-600 hover:bg-sky-100"
               title="ล้างตัวกรองรุ่นรถ"
             >
               <X className="size-3.5" />
@@ -3362,19 +3364,29 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
           )}
         </div>
 
-        {/* Cart sidebar */}
-        {cartOpen && (
-          <CartSidebar
-            items={cartItems}
-            productSupplierMap={productSupplierMap}
-            supplierProfileMap={supplierProfileMap}
-            onUpdate={updateCartItem}
-            onRemove={removeFromCart}
-            onGoToCart={() => { setCartOpen(false); onGoToPurchaseCart?.() }}
-            onClose={() => setCartOpen(false)}
-          />
-        )}
       </div>
+
+      {/* Cart drawer (slide-in from right) */}
+      {cartOpen && (
+        <>
+          <div
+            className="absolute inset-0 z-30 bg-slate-900/30 backdrop-blur-[2px] transition-opacity"
+            onClick={() => setCartOpen(false)}
+            aria-label="ปิดตะกร้า"
+          />
+          <div className="absolute right-0 top-0 z-40 flex h-full max-w-[92vw] shadow-2xl">
+            <CartSidebar
+              items={cartItems}
+              productSupplierMap={productSupplierMap}
+              supplierProfileMap={supplierProfileMap}
+              onUpdate={updateCartItem}
+              onRemove={removeFromCart}
+              onGoToCart={() => { setCartOpen(false); onGoToPurchaseCart?.() }}
+              onClose={() => setCartOpen(false)}
+            />
+          </div>
+        </>
+      )}
 
 
       {/* ── Price compare modal ── */}
