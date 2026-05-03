@@ -48,9 +48,11 @@ import { ReceiptDesignerView } from '@/features/inventory/ReceiptDesignerView'
 import { TaxInvoiceFormDesignerView } from '@/features/inventory/TaxInvoiceFormDesignerView'
 import { useWorkspaceTabs } from '@/features/main/context/WorkspaceTabsContext'
 import {
+  ArrowRight,
   Barcode,
   KeyRound,
   LayoutTemplate,
+  Package,
   Printer,
   Search,
   Trash2,
@@ -99,7 +101,7 @@ type PrintJob = {
 
 export function LabelPrintWorkspacePage({ className }: LabelPrintWorkspacePageProps) {
   const prefsRef = useRef<HTMLDivElement | null>(null)
-  const { labelPrintTopSection, setLabelPrintTopSection } = useWorkspaceTabs()
+  const { labelPrintTopSection, setLabelPrintTopSection, openTab, setBranchStockPanel } = useWorkspaceTabs()
   const [barcodeSubTab, setBarcodeSubTab] = useState<'queue' | 'designer' | 'price-cipher'>('queue')
   const [rows, setRows] = useState<LabelPrintQueueItem[]>(() => loadLabelPrintQueue())
   const [prefs, setPrefs] = useState(loadLabelPrintUiPrefs)
@@ -736,8 +738,53 @@ export function LabelPrintWorkspacePage({ className }: LabelPrintWorkspacePagePr
             <tbody>
               {rows.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-3 py-10 text-center text-slate-500">
-                    ยังไม่มีคิวพิมพ์
+                  <td colSpan={6} className="px-6 py-12">
+                    <div className="mx-auto flex max-w-xl flex-col items-center gap-4 text-center">
+                      <div className="flex size-16 items-center justify-center rounded-2xl bg-violet-50 ring-1 ring-violet-100">
+                        <Package className="size-8 text-violet-500" strokeWidth={1.5} />
+                      </div>
+                      <div className="space-y-1">
+                        <h3 className="text-base font-bold text-slate-800">ยังไม่มีคิวพิมพ์</h3>
+                        <p className="text-xs text-slate-500">เลือกสินค้าจากแฟ้ม แล้วส่งเข้าคิวเพื่อพิมพ์ป้าย</p>
+                      </div>
+
+                      <ol className="mt-1 grid w-full grid-cols-3 gap-2 text-left">
+                        {[
+                          { n: 1, t: 'ไปแฟ้มสินค้า', d: 'เปิดรายการสินค้าทั้งหมด' },
+                          { n: 2, t: 'เลือกสินค้า', d: 'ติ๊กแถวที่ต้องการพิมพ์' },
+                          { n: 3, t: 'กด F8', d: 'ส่งเข้าคิวพิมพ์ที่นี่' },
+                        ].map((s) => (
+                          <li
+                            key={s.n}
+                            className="flex flex-col gap-1 rounded-xl border border-slate-200 bg-slate-50/50 p-3"
+                          >
+                            <span className="flex size-6 items-center justify-center rounded-full bg-violet-600 text-[11px] font-bold text-white">
+                              {s.n}
+                            </span>
+                            <span className="text-[12px] font-bold text-slate-700">{s.t}</span>
+                            <span className="text-[10px] text-slate-500">{s.d}</span>
+                          </li>
+                        ))}
+                      </ol>
+
+                      <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            openTab('branch-stock', 'แฟ้มสินค้า')
+                            setBranchStockPanel('product-file')
+                          }}
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 px-4 py-2 text-xs font-bold text-white shadow-sm hover:bg-violet-700"
+                        >
+                          <Package className="size-3.5" />
+                          ไปแฟ้มสินค้า
+                          <ArrowRight className="size-3.5" />
+                        </button>
+                        <span className="text-[11px] text-slate-400">
+                          หรือกด <kbd className="rounded border border-slate-300 bg-white px-1.5 py-0.5 font-mono text-[10px] font-semibold text-slate-700">F8</kbd> ในแฟ้มสินค้า
+                        </span>
+                      </div>
+                    </div>
                   </td>
                 </tr>
               ) : (
