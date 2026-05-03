@@ -2180,6 +2180,31 @@ export function ProductDataFileView() {
     return { brands, carBrands, models, engines, driveTypes, years, trims }
   }, [fromNav, filterInStoreOnly, filterCarBrand, filterCarModel, filterEngine, filterDrive, hasSearched, q, searchIndex])
 
+  // Smart filter suggestion from search query — when q matches a known carBrand/model, suggest applying it
+  const searchSuggestion = useMemo<
+    { type: 'carBrand' | 'carModel'; value: string; label: string } | null
+  >(() => {
+    if (!hasSearched || !q.trim()) return null
+    const qNorm = normalizeSearchText(q).replace(/[\s\-_./()]+/g, '')
+    if (qNorm.length < 2) return null
+    const matchesOption = (opt: string) => {
+      if (opt === FILTER_ALL) return false
+      const optNorm = normalizeSearchText(opt).replace(/[\s\-_./()]+/g, '')
+      if (!optNorm) return false
+      return optNorm === qNorm || optNorm.includes(qNorm) || qNorm.includes(optNorm)
+    }
+    // Prefer carBrand match (more specific)
+    const matchedBrand = filterOptions.carBrands.find(matchesOption)
+    if (matchedBrand && filterCarBrand === FILTER_ALL) {
+      return { type: 'carBrand', value: matchedBrand, label: 'ยี่ห้อรถ' }
+    }
+    const matchedModel = filterOptions.models.find(matchesOption)
+    if (matchedModel && filterCarModel === FILTER_ALL) {
+      return { type: 'carModel', value: matchedModel, label: 'รุ่นรถ' }
+    }
+    return null
+  }, [hasSearched, q, filterOptions.carBrands, filterOptions.models, filterCarBrand, filterCarModel])
+
   const hasOrphans = useMemo(() => {
     const names = new Set(categoryTree.map((m) => norm(m.name)))
     return activeProducts.some((p) => !names.has(norm(p.category)))
@@ -2842,13 +2867,18 @@ export function ProductDataFileView() {
             />
           </label>
           <label className="block min-w-0">
-            <span className="mb-0.5 block text-[11px] text-slate-500">เครื่องยนต์</span>
+            <span
+              className="mb-0.5 block text-[11px] text-slate-500"
+              title="ตรงกับ engineLabel — รวมรหัสเครื่อง / ขนาด / Trim / HP / Euro / ขับเคลื่อน เข้าด้วยกัน"
+            >
+              เครื่องยนต์ <span className="text-slate-400">+ variant</span>
+            </span>
             <SearchableFilterSelect
               value={filterEngine}
               options={filterOptions.engines}
               allValue={FILTER_ALL}
               onChange={(v) => { setFilterEngine(v); setFilterDrive(FILTER_ALL); setFilterYear(FILTER_ALL) }}
-              ariaLabel="เครื่องยนต์"
+              ariaLabel="เครื่องยนต์ + variant"
             />
           </label>
           <label className="block min-w-0">
@@ -3307,7 +3337,31 @@ export function ProductDataFileView() {
                 ? 'ไม่มีสินค้าที่มีมิติในระบบในรายการนี้ — ลองเปลี่ยนหมวดหรือตัวกรอง'
                 : 'ไม่พบสินค้าตามหมวดหมู่ คำค้นหา หรือตัวกรอง'}
           </div>
-        ) : catalogViewMode === 'list' ? (
+        ) : (
+          <>
+          {searchSuggestion && (
+            <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs">
+              <span className="text-base" aria-hidden>💡</span>
+              <span className="text-slate-700">
+                พบ <span className="font-mono font-bold text-slate-900">"{q.trim()}"</span> ตรงกับ {searchSuggestion.label}:
+                <span className="ml-1 font-bold text-amber-700">{searchSuggestion.value}</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  if (searchSuggestion.type === 'carBrand') {
+                    setFilterCarBrand(searchSuggestion.value)
+                  } else {
+                    setFilterCarModel(searchSuggestion.value)
+                  }
+                }}
+                className="ml-auto inline-flex items-center gap-1 rounded-lg bg-amber-600 px-2.5 py-1 text-[11px] font-bold text-white shadow-sm hover:bg-amber-700"
+              >
+                ✓ Apply Filter
+              </button>
+            </div>
+          )}
+          {catalogViewMode === 'list' ? (
               <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white shadow-sm pos-compact:rounded-xl">
                 <table className="w-full min-w-[600px] table-fixed border-collapse text-left text-sm pos-narrow:min-w-[540px] xl:min-w-[680px]">
                   <thead>
@@ -3437,6 +3491,8 @@ export function ProductDataFileView() {
                   </div>
                 ) : null}
               </div>
+        )}
+          </>
         )}
 
         {ctx ? (

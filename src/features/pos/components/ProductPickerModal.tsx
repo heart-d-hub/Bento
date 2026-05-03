@@ -1013,8 +1013,8 @@ export function ProductPickerModal({
                 options={engineOptions}
                 allValue={FILTER_ALL}
                 onChange={(v) => { setEngine(v); setDrive(FILTER_ALL); setYear(FILTER_ALL) }}
-                ariaLabel="เครื่องยนต์"
-                placeholder="เครื่องยนต์"
+                ariaLabel="เครื่องยนต์ + variant (รวม trim/HP/Euro/ขับเคลื่อน)"
+                placeholder="เครื่องยนต์ + variant"
               />
               <SearchableFilterSelect
                 value={drive}

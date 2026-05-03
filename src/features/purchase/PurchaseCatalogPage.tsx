@@ -2908,7 +2908,12 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
             />
           </label>
           <label className="block min-w-0">
-            <span className="mb-0.5 block text-[10px] text-slate-500">เครื่องยนต์</span>
+            <span
+              className="mb-0.5 block text-[10px] text-slate-500"
+              title="ตรงกับ engineLabel — รวมรหัสเครื่อง / ขนาด / Trim / HP / Euro / ขับเคลื่อน เข้าด้วยกัน"
+            >
+              เครื่องยนต์ <span className="text-slate-400">+ variant</span>
+            </span>
             <SearchableFilterSelect
               value={filterEngine}
               options={carFilterOptions.engines}
@@ -2917,7 +2922,7 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
                 setFilterEngine(v)
                 setFilterDrive('ทั้งหมด'); setFilterYear('ทั้งหมด')
               }}
-              ariaLabel="เครื่องยนต์"
+              ariaLabel="เครื่องยนต์ + variant"
             />
           </label>
           <label className="block min-w-0">
