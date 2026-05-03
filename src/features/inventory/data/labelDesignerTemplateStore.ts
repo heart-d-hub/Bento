@@ -63,6 +63,7 @@ const VALID_FIELDS: LabelDesignerField[] = [
   'price',
   'storeName',
   'priceCipher',
+  'binLocation',
 ]
 
 function normalizeField(f: unknown): LabelDesignerField {

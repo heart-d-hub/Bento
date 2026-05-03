@@ -7,6 +7,7 @@ import {
   newLabelDesignerTemplateEntryId,
   saveLabelDesignerTemplatesState,
   entryToTemplate,
+  type LabelDesignerTemplate,
   type LabelDesignerTemplatesState,
 } from '@/features/inventory/data/labelDesignerTemplateStore'
 import {
@@ -27,7 +28,8 @@ import {
   PRICE_CIPHER_SETTINGS_CHANGED_EVENT,
 } from '@/features/inventory/data/priceCipherStore'
 import { loadStoreProfile, STORE_PROFILE_CHANGED_EVENT } from '@/features/settings/data/storeProfileStore'
-import { CopyPlus, Plus, RotateCcw, Save, Store, Trash2 } from 'lucide-react'
+import { QUICK_START_TEMPLATES, type QuickStartTemplate } from '@/features/inventory/data/labelDesignerQuickStarts'
+import { CopyPlus, Plus, RotateCcw, Save, Sparkles, Store, Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 type LabelBarcodeDesignerViewProps = {
@@ -100,6 +102,62 @@ type DesignerCheckboxOption = {
   hint?: string
 }
 
+function fieldPreviewLabel(field: LabelDesignerField, kind: 'text' | 'barcode' | 'qrcode'): string {
+  if (kind === 'barcode') return '||||'
+  if (kind === 'qrcode') return '◼'
+  switch (field) {
+    case 'oem': return 'OEM'
+    case 'price': return '฿'
+    case 'name': return 'ชื่อ'
+    case 'sku': return 'SKU'
+    case 'binLocation': return 'BIN'
+    case 'brand': return 'แบรนด์'
+    case 'storeName': return 'ร้าน'
+    case 'carModel': return 'รถ'
+    case 'factory': return 'F#'
+    case 'salesUnit': return 'หน่วย'
+    case 'priceCipher': return 'รหัส'
+    case 'barcode': return 'BC'
+    default: return ''
+  }
+}
+
+function QuickStartPreview({ template }: { template: LabelDesignerTemplate }) {
+  const w = 92
+  const h = Math.round((w * template.heightMm) / template.widthMm)
+  return (
+    <div
+      className="relative shrink-0 overflow-hidden rounded border border-slate-300 bg-slate-50"
+      style={{ width: w, height: h }}
+      aria-hidden
+    >
+      {template.elements.map((el) => {
+        const isScan = el.kind === 'barcode' || el.kind === 'qrcode'
+        return (
+          <div
+            key={el.id}
+            className={clsx(
+              'absolute flex items-center justify-center overflow-hidden rounded-[1px] text-[7px] font-bold leading-none',
+              isScan ? 'bg-slate-800 text-slate-100' : 'bg-white text-slate-500 ring-1 ring-slate-200',
+              el.field === 'price' && !isScan && 'bg-emerald-50 text-emerald-700 ring-emerald-200',
+              el.field === 'oem' && !isScan && 'bg-amber-50 text-amber-700 ring-amber-200',
+              el.field === 'binLocation' && !isScan && 'bg-violet-50 text-violet-700 ring-violet-200',
+            )}
+            style={{
+              left: `${el.x}%`,
+              top: `${el.y}%`,
+              width: `${el.w}%`,
+              height: `${el.h}%`,
+            }}
+          >
+            {fieldPreviewLabel(el.field, el.kind)}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 const DESIGNER_CHECKBOX_OPTIONS: DesignerCheckboxOption[] = [
   { field: 'barcode', kind: 'barcode', label: 'บาร์โค้ด + รหัสสินค้า (SKU)', hint: 'ข้อมูลจากแฟ้มสินค้า' },
   { field: 'barcode', kind: 'qrcode', label: 'QR code', hint: 'รหัสเดียวกับบาร์โค้ด/SKU' },
@@ -142,6 +200,7 @@ export function LabelBarcodeDesignerView({ className, previewRow }: LabelBarcode
   const [lib, setLib] = useState<LabelDesignerTemplatesState>(() => loadLabelDesignerTemplatesState())
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [zoom, setZoom] = useState(1.6)
+  const [quickStartOpen, setQuickStartOpen] = useState(false)
   const [storeNamePreview, setStoreNamePreview] = useState(() => loadStoreProfile().storeName)
   const [cipherSettings, setCipherSettings] = useState(() => loadPriceCipherSettings())
   const canvasRef = useRef<HTMLDivElement | null>(null)
@@ -345,6 +404,17 @@ export function LabelBarcodeDesignerView({ className, previewRow }: LabelBarcode
     setSelectedId(null)
   }
 
+  const addQuickStartTemplate = (qs: QuickStartTemplate) => {
+    const id = newLabelDesignerTemplateEntryId()
+    const base = qs.build()
+    mergeLib((prev) => ({
+      activeId: id,
+      templates: [{ id, ...base }, ...prev.templates],
+    }))
+    setSelectedId(null)
+    setQuickStartOpen(false)
+  }
+
   const duplicateActiveTemplate = () => {
     if (!activeEntry) return
     const id = newLabelDesignerTemplateEntryId()
@@ -472,6 +542,60 @@ export function LabelBarcodeDesignerView({ className, previewRow }: LabelBarcode
               placeholder="ตั้งชื่อให้จำง่าย"
             />
           </label>
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setQuickStartOpen((v) => !v)}
+              className="inline-flex items-center gap-1 rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-[11px] font-semibold text-amber-800 hover:bg-amber-100"
+              title="เริ่มจากแม่แบบสำเร็จรูป — ลากวางมาให้แล้ว"
+            >
+              <Sparkles className="size-3.5" />
+              เริ่มจากแม่แบบ
+            </button>
+            {quickStartOpen && (
+              <>
+                <div
+                  className="fixed inset-0 z-30"
+                  onClick={() => setQuickStartOpen(false)}
+                  aria-hidden
+                />
+                <div className="absolute left-0 top-full z-40 mt-1 w-[28rem] rounded-xl border border-slate-200 bg-white p-3 shadow-2xl">
+                  <div className="mb-2 flex items-center gap-1.5 px-1">
+                    <Sparkles className="size-3.5 text-amber-500" />
+                    <p className="text-[11px] font-bold uppercase tracking-wide text-slate-700">
+                      เริ่มจากแม่แบบสำเร็จรูป
+                    </p>
+                    <span className="ml-auto text-[10px] text-slate-400">เลือกแล้วปรับแต่งต่อได้</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {QUICK_START_TEMPLATES.map((qs) => {
+                      const previewTpl = qs.build()
+                      return (
+                        <button
+                          key={qs.id}
+                          type="button"
+                          onClick={() => addQuickStartTemplate(qs)}
+                          className="group flex items-center gap-2 rounded-lg border border-slate-200 bg-white p-2 text-left transition hover:border-amber-300 hover:bg-amber-50/40 hover:shadow-sm"
+                        >
+                          <QuickStartPreview template={previewTpl} />
+                          <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                            <span className="flex items-center gap-1">
+                              <span className="text-sm leading-none">{qs.emoji}</span>
+                              <span className="truncate text-[11px] font-bold text-slate-800">{qs.name}</span>
+                            </span>
+                            <span className="text-[9.5px] leading-tight text-slate-500">{qs.description}</span>
+                            <span className="mt-0.5 text-[9px] font-mono text-slate-400">
+                              {previewTpl.widthMm}×{previewTpl.heightMm}mm
+                            </span>
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
           <button
             type="button"
             onClick={addNewTemplate}
