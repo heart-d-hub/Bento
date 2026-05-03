@@ -203,6 +203,7 @@ export function LabelBarcodeDesignerView({ className, previewRow }: LabelBarcode
   const [quickStartOpen, setQuickStartOpen] = useState(false)
   const [historyPast, setHistoryPast] = useState<LabelDesignerTemplatesState[]>([])
   const [historyFuture, setHistoryFuture] = useState<LabelDesignerTemplatesState[]>([])
+  const [snapGuides, setSnapGuides] = useState<{ x: number[]; y: number[] }>({ x: [], y: [] })
   const [storeNamePreview, setStoreNamePreview] = useState(() => loadStoreProfile().storeName)
   const [cipherSettings, setCipherSettings] = useState(() => loadPriceCipherSettings())
   const canvasRef = useRef<HTMLDivElement | null>(null)
@@ -424,8 +425,68 @@ export function LabelBarcodeDesignerView({ className, previewRow }: LabelBarcode
       const rect = canvasRef.current.getBoundingClientRect()
       const dx = ((e.clientX - d.startClientX) / rect.width) * 100
       const dy = ((e.clientY - d.startClientY) / rect.height) * 100
-      const nx = clamp(d.origX + dx, 0, 100 - d.w)
-      const ny = clamp(d.origY + dy, 0, 100 - d.h)
+      let nx = clamp(d.origX + dx, 0, 100 - d.w)
+      let ny = clamp(d.origY + dy, 0, 100 - d.h)
+
+      const guides: { x: number[]; y: number[] } = { x: [], y: [] }
+      const altKey = e.altKey // hold Alt = free move (no snap)
+      const tpl = libRef.current.templates.find((t) => t.id === libRef.current.activeId)
+
+      if (!altKey && tpl) {
+        // 1) Snap to 1mm grid
+        const stepX = 100 / tpl.widthMm
+        const stepY = 100 / tpl.heightMm
+        nx = Math.round(nx / stepX) * stepX
+        ny = Math.round(ny / stepY) * stepY
+
+        // 2) Smart guides — snap to other elements' edges/centers + canvas edges/center
+        const others = tpl.elements.filter((el) => el.id !== d.id)
+        const xTargets = [0, 50, 100, ...others.flatMap((el) => [el.x, el.x + el.w, el.x + el.w / 2])]
+        const yTargets = [0, 50, 100, ...others.flatMap((el) => [el.y, el.y + el.h, el.y + el.h / 2])]
+        const SNAP_THRESH = 1.5 // % of canvas
+
+        // X: try left edge / right edge / center of dragged element
+        const xCands = [
+          { offset: 0, edge: nx },
+          { offset: d.w, edge: nx + d.w },
+          { offset: d.w / 2, edge: nx + d.w / 2 },
+        ]
+        let bestX: { delta: number; snapNx: number; guide: number } | null = null
+        for (const c of xCands) {
+          for (const t of xTargets) {
+            const delta = Math.abs(c.edge - t)
+            if (delta < SNAP_THRESH && (!bestX || delta < bestX.delta)) {
+              bestX = { delta, snapNx: t - c.offset, guide: t }
+            }
+          }
+        }
+        if (bestX) {
+          nx = clamp(bestX.snapNx, 0, 100 - d.w)
+          guides.x.push(bestX.guide)
+        }
+
+        // Y: same approach
+        const yCands = [
+          { offset: 0, edge: ny },
+          { offset: d.h, edge: ny + d.h },
+          { offset: d.h / 2, edge: ny + d.h / 2 },
+        ]
+        let bestY: { delta: number; snapNy: number; guide: number } | null = null
+        for (const c of yCands) {
+          for (const t of yTargets) {
+            const delta = Math.abs(c.edge - t)
+            if (delta < SNAP_THRESH && (!bestY || delta < bestY.delta)) {
+              bestY = { delta, snapNy: t - c.offset, guide: t }
+            }
+          }
+        }
+        if (bestY) {
+          ny = clamp(bestY.snapNy, 0, 100 - d.h)
+          guides.y.push(bestY.guide)
+        }
+      }
+
+      setSnapGuides(guides)
       setLib((prev) => ({
         ...prev,
         templates: prev.templates.map((t) =>
@@ -441,6 +502,7 @@ export function LabelBarcodeDesignerView({ className, previewRow }: LabelBarcode
     const up = () => {
       if (!dragRef.current) return
       dragRef.current = null
+      setSnapGuides({ x: [], y: [] })
       setLib((prev) => saveLabelDesignerTemplatesState(prev))
     }
     window.addEventListener('pointermove', move)
@@ -849,11 +911,29 @@ export function LabelBarcodeDesignerView({ className, previewRow }: LabelBarcode
                   interactive
                   onPointerDownElement={onPointerDownElement}
                 />
+                {/* Alignment snap guides — visible only during drag */}
+                {snapGuides.x.map((g, i) => (
+                  <div
+                    key={`gx-${i}`}
+                    className="pointer-events-none absolute top-0 bottom-0 w-px bg-pink-500/80"
+                    style={{ left: `${g}%` }}
+                    aria-hidden
+                  />
+                ))}
+                {snapGuides.y.map((g, i) => (
+                  <div
+                    key={`gy-${i}`}
+                    className="pointer-events-none absolute left-0 right-0 h-px bg-pink-500/80"
+                    style={{ top: `${g}%` }}
+                    aria-hidden
+                  />
+                ))}
               </div>
             </div>
           </div>
           <p className="mx-auto mt-3 max-w-xl text-center text-[10px] text-slate-500">
             ขนาดกรอบ {template.widthMm}×{template.heightMm} มม. — ลากที่กรอบองค์ประกอบเพื่อจัดตำแหน่ง
+            <span className="ml-2 text-slate-400">· กด Alt ค้างขณะลาก = ลากอิสระ (ไม่ snap)</span>
           </p>
         </div>
 
