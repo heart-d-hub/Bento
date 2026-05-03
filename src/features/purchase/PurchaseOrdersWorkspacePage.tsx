@@ -3,7 +3,7 @@ import { masterSearchExtrasForSku, getProductMasterById, getProductMasterBySku, 
 import type { InventoryProduct } from '@/features/inventory/data/mockInventory'
 import { loadVendorPromotions, saveVendorPromotions } from '@/features/promotions/data/vendorPromotionsStore'
 import type { VendorPromotion } from '@/features/promotions/data/promotionTypes'
-import { findMatchingVendorPromos, findBestVendorPromoTier } from '@/features/promotions/evaluateVendorPromo'
+import { findBestVendorPromoTier, findActiveVendorPromos, findNextVendorPromoTier } from '@/features/promotions/evaluateVendorPromo'
 import {
   loadPurchaseOrders,
   savePurchaseOrders,
@@ -641,15 +641,35 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
     const unit = getLatestUnitCostForPo(p)
     const master = getProductMasterBySku(p.sku)
     const ppb = master?.piecesPerBox
+    // Auto-apply supplier's default discount for this brand
+    const supplier = suppliers.find((s) => s.id === selected.supplierId)
+    const brand = master?.brand ?? p.brand ?? ''
+    const defaultDiscount = supplier?.defaultDiscountByBrand?.find(
+      (d) => d.brand.trim().toLowerCase() === brand.trim().toLowerCase(),
+    )
+    const orderedQty = ppb ?? 1
+    let listPrice: number | undefined = undefined
+    let discountChain: string | undefined = undefined
+    let unitCostOrder = unit
+    if (defaultDiscount && defaultDiscount.discountChain) {
+      const list = (master?.supplierListPrice ?? 0) > 0 ? master!.supplierListPrice! : unit
+      if (list > 0) {
+        listPrice = list
+        discountChain = defaultDiscount.discountChain
+        unitCostOrder = calcEffectiveCost(listPrice, discountChain, undefined, undefined, orderedQty, unit)
+      }
+    }
     const line: PurchaseOrderLine = {
       lineId: newLineId(),
       productId: p.id,
       sku: p.sku,
       name: p.name,
-      orderedQty: ppb ?? 1,
+      orderedQty,
       ...(ppb ? { orderBoxCount: 1 } : {}),
-      unitCostOrder: unit,
+      unitCostOrder,
       receivedQtyTotal: 0,
+      ...(listPrice !== undefined ? { listPrice } : {}),
+      ...(discountChain ? { discountChain } : {}),
     }
     updateSelected({ ...selected, lines: [...selected.lines, line] })
     setProductQuery('')
@@ -2199,18 +2219,6 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
                                 </select>
                               </label>
                               <label className="flex flex-col gap-0.5 text-[10px] font-semibold text-slate-600">
-                                สั่งขั้นต่ำ (ชิ้น)
-                                <input type="number" min={1} step={1} value={vendorPromoDraft.tiers[0]?.minQty ?? 1}
-                                  onChange={(e) => setVendorPromoDraft((d) => d && { ...d, tiers: d.tiers.map((t, i) => i === 0 ? { ...t, minQty: Math.max(1, Math.floor(Number(e.target.value) || 1)) } : t) })}
-                                  className="w-20 rounded border border-slate-200 bg-white px-2 py-1 text-right text-xs outline-none focus:border-blue-400" />
-                              </label>
-                              <label className="flex flex-col gap-0.5 text-[10px] font-semibold text-slate-600">
-                                ลดเพิ่ม %
-                                <input type="number" min={0.1} max={100} step={0.5} value={vendorPromoDraft.tiers[0]?.extraDiscountPct ?? 0}
-                                  onChange={(e) => setVendorPromoDraft((d) => d && { ...d, tiers: d.tiers.map((t, i) => i === 0 ? { ...t, extraDiscountPct: Math.min(100, Math.max(0, Number(e.target.value) || 0)) } : t) })}
-                                  className="w-16 rounded border border-slate-200 bg-white px-2 py-1 text-right text-xs outline-none focus:border-blue-400" />
-                              </label>
-                              <label className="flex flex-col gap-0.5 text-[10px] font-semibold text-slate-600">
                                 เริ่ม
                                 <input type="date" value={vendorPromoDraft.startDate}
                                   onChange={(e) => setVendorPromoDraft((d) => d && { ...d, startDate: e.target.value })}
@@ -2223,6 +2231,106 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
                                   className="rounded border border-slate-200 bg-white px-2 py-1 text-xs outline-none focus:border-blue-400" />
                               </label>
                             </div>
+
+                            {/* Tier list — supports both single-tier (2+1) and multi-tier (50→20, 100→5) */}
+                            <div className="mt-3 rounded-md border border-blue-200/60 bg-blue-50/30 p-2">
+                              <div className="mb-1.5 flex items-center justify-between">
+                                <p className="text-[10px] font-bold text-blue-800">ขั้นส่วนลด / ของแถม</p>
+                                <span className="text-[9px] text-slate-400">
+                                  {vendorPromoDraft.tiers.length === 1 ? 'ใส่ขั้นเดียว = โปรไม่มี step' : `${vendorPromoDraft.tiers.length} ขั้น`}
+                                </span>
+                              </div>
+                              <div className="overflow-x-auto">
+                                <table className="w-full text-[10px]">
+                                  <thead>
+                                    <tr className="text-slate-500">
+                                      <th className="px-1.5 py-0.5 text-left font-semibold">ขั้น</th>
+                                      <th className="px-1.5 py-0.5 text-right font-semibold">สั่งขั้นต่ำ</th>
+                                      <th className="px-1.5 py-0.5 text-right font-semibold">ลดเพิ่ม %</th>
+                                      <th className="px-1.5 py-0.5 text-right font-semibold">แถม (ชิ้น)</th>
+                                      <th className="w-6" />
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {vendorPromoDraft.tiers.map((t, i) => (
+                                      <tr key={i} className="border-t border-blue-100">
+                                        <td className="px-1.5 py-1 text-slate-500 font-mono">{i + 1}</td>
+                                        <td className="px-1.5 py-1 text-right">
+                                          <input
+                                            type="number"
+                                            min={1}
+                                            step={1}
+                                            value={t.minQty}
+                                            onChange={(e) => setVendorPromoDraft((d) => d && {
+                                              ...d,
+                                              tiers: d.tiers.map((tt, idx) => idx === i ? { ...tt, minQty: Math.max(1, Math.floor(Number(e.target.value) || 1)) } : tt),
+                                            })}
+                                            className="w-20 rounded border border-slate-200 bg-white px-1.5 py-0.5 text-right tabular-nums outline-none focus:border-blue-400"
+                                          />
+                                        </td>
+                                        <td className="px-1.5 py-1 text-right">
+                                          <input
+                                            type="number"
+                                            min={0}
+                                            max={100}
+                                            step={0.5}
+                                            value={t.extraDiscountPct}
+                                            onChange={(e) => setVendorPromoDraft((d) => d && {
+                                              ...d,
+                                              tiers: d.tiers.map((tt, idx) => idx === i ? { ...tt, extraDiscountPct: Math.min(100, Math.max(0, Number(e.target.value) || 0)) } : tt),
+                                            })}
+                                            className="w-16 rounded border border-slate-200 bg-white px-1.5 py-0.5 text-right tabular-nums outline-none focus:border-blue-400"
+                                          />
+                                        </td>
+                                        <td className="px-1.5 py-1 text-right">
+                                          <input
+                                            type="number"
+                                            min={0}
+                                            step={1}
+                                            value={t.freeQty}
+                                            onChange={(e) => setVendorPromoDraft((d) => d && {
+                                              ...d,
+                                              tiers: d.tiers.map((tt, idx) => idx === i ? { ...tt, freeQty: Math.max(0, Math.floor(Number(e.target.value) || 0)) } : tt),
+                                            })}
+                                            className="w-16 rounded border border-slate-200 bg-white px-1.5 py-0.5 text-right tabular-nums outline-none focus:border-blue-400"
+                                          />
+                                        </td>
+                                        <td className="px-1 py-1 text-center">
+                                          {vendorPromoDraft.tiers.length > 1 && (
+                                            <button
+                                              type="button"
+                                              onClick={() => setVendorPromoDraft((d) => d && {
+                                                ...d,
+                                                tiers: d.tiers.filter((_, idx) => idx !== i),
+                                              })}
+                                              className="rounded p-0.5 text-rose-400 hover:bg-rose-50 hover:text-rose-600"
+                                              title="ลบขั้นนี้"
+                                            >
+                                              <X className="size-3" />
+                                            </button>
+                                          )}
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => setVendorPromoDraft((d) => {
+                                  if (!d) return d
+                                  const last = d.tiers[d.tiers.length - 1]
+                                  return {
+                                    ...d,
+                                    tiers: [...d.tiers, { minQty: (last?.minQty ?? 0) + 50, extraDiscountPct: 0, freeQty: 0 }],
+                                  }
+                                })}
+                                className="mt-1.5 inline-flex items-center gap-1 rounded border border-blue-300 bg-white px-2 py-0.5 text-[10px] font-semibold text-blue-700 hover:bg-blue-50"
+                              >
+                                <Plus className="size-3" /> เพิ่มขั้น
+                              </button>
+                            </div>
+
                             <div className="mt-2 flex items-center gap-1.5">
                               <label className="flex cursor-pointer items-center gap-1.5 text-[10px] font-medium text-slate-700">
                                 <input type="checkbox" checked={vendorPromoDraft.enabled}
@@ -2235,7 +2343,10 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
                                 className="rounded border border-slate-200 bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-600 hover:bg-slate-50">
                                 ยกเลิก
                               </button>
-                              <button type="button" onClick={() => savePromo(vendorPromoDraft)}
+                              <button type="button" onClick={() => {
+                                const sorted = { ...vendorPromoDraft, tiers: [...vendorPromoDraft.tiers].sort((a, b) => a.minQty - b.minQty) }
+                                savePromo(sorted)
+                              }}
                                 className="rounded border border-blue-500/30 bg-blue-600 px-2.5 py-1 text-[10px] font-bold text-white hover:bg-blue-700">
                                 บันทึก
                               </button>
@@ -2568,6 +2679,95 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
                   </span>
                 </div>
 
+                {(() => {
+                  if (!selected.lines.length) return null
+                  type Suggestion = {
+                    line: typeof selected.lines[number]
+                    vp: typeof vendorPromos[number]
+                    gap: number
+                    next: ReturnType<typeof findNextVendorPromoTier>
+                  }
+                  const suggestions: Suggestion[] = []
+                  const reachedSet = new Set<string>()
+                  const allActiveSet = new Set<string>()
+                  for (const l of selected.lines) {
+                    const master = getProductMasterById(l.productId)
+                    const promos = findActiveVendorPromos(
+                      vendorPromos,
+                      l.productId,
+                      selected.supplierId,
+                      master?.brand ?? '',
+                      master?.category ?? '',
+                    )
+                    for (const vp of promos) {
+                      allActiveSet.add(vp.id)
+                      const best = findBestVendorPromoTier(vp, l.orderedQty)
+                      if (best) reachedSet.add(vp.id)
+                      const next = findNextVendorPromoTier(vp, l.orderedQty)
+                      if (!next) continue
+                      const gap = next.minQty - l.orderedQty
+                      if (gap <= 0 || gap > Math.max(5, l.orderedQty)) continue
+                      suggestions.push({ line: l, vp, gap, next })
+                    }
+                  }
+                  if (allActiveSet.size === 0) return null
+                  const reached = reachedSet.size
+                  const total = allActiveSet.size
+                  return (
+                    <div className="mb-3 rounded-lg border border-amber-200 bg-gradient-to-r from-amber-50/60 to-blue-50/40 px-3 py-2">
+                      <div className="mb-1.5 flex items-center justify-between gap-2">
+                        <p className="flex items-center gap-1 text-[11px] font-bold uppercase tracking-wide text-amber-700">
+                          🏷 โปรซัพ — {reached}/{total} ใช้แล้ว
+                        </p>
+                        {suggestions.length > 0 && (
+                          <span className="rounded-full bg-amber-600 px-2 py-0.5 text-[9px] font-bold text-white">
+                            {suggestions.length} คำแนะนำ
+                          </span>
+                        )}
+                      </div>
+                      {suggestions.length > 0 ? (
+                        <div className="flex flex-col gap-1">
+                          {suggestions.slice(0, 8).map((s, idx) => (
+                            <div key={`${s.line.lineId}-${s.vp.id}-${idx}`} className="flex flex-wrap items-center gap-2 text-[11px]">
+                              <span className="font-mono font-semibold text-slate-600">{s.line.sku}</span>
+                              <span className="text-slate-700">+{s.gap} ชิ้น</span>
+                              <span className="text-slate-400">→</span>
+                              <span className="font-semibold text-amber-700">
+                                {s.next!.extraDiscountPct > 0 ? `-${s.next!.extraDiscountPct}%` : ''}
+                                {s.next!.freeQty > 0 ? ` แถม ${s.next!.freeQty}` : ''}
+                              </span>
+                              <span className="truncate text-[9px] text-slate-400" title={s.vp.name}>({s.vp.name})</span>
+                              {selected.status === 'draft' && (
+                                <button
+                                  type="button"
+                                  className="ml-auto shrink-0 rounded-md bg-amber-600 px-2 py-0.5 text-[9px] font-bold text-white hover:bg-amber-700"
+                                  onClick={() => {
+                                    const newQty = s.next!.minQty
+                                    const cost = calcEffectiveCost(s.line.listPrice, s.line.discountChain, s.line.bonusPaidQty, s.line.bonusFreeQty, newQty, s.line.unitCostOrder, s.line.bonusPct)
+                                    patchLine(s.line.lineId, { orderedQty: newQty, ...((s.line.listPrice ?? 0) > 0 ? { unitCostOrder: cost } : {}) })
+                                  }}
+                                  title={`ปรับ ${s.line.sku} เป็น ${s.next!.minQty} ชิ้น`}
+                                >
+                                  ปรับเป็น {s.next!.minQty}
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                          {suggestions.length > 8 && (
+                            <p className="mt-0.5 text-[9px] text-slate-400">…และอีก {suggestions.length - 8} รายการ</p>
+                          )}
+                        </div>
+                      ) : (
+                        <p className="text-[10px] text-slate-500">
+                          {reached === total
+                            ? '✓ ใช้โปรซัพครบแล้วทุกรายการ'
+                            : 'รายการที่กรอกอยู่ยังไม่อยู่ในระยะที่แนะนำเพิ่ม — ดูโปรในแต่ละบรรทัด'}
+                        </p>
+                      )}
+                    </div>
+                  )
+                })()}
+
                 <h3 className="mb-2 flex items-center gap-1 text-xs font-bold uppercase text-slate-500">
                   <FileEdit className="size-3.5" aria-hidden />
                   รายการสินค้า
@@ -2725,55 +2925,75 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
                                   </td>
                                 )}
                                 <td className="px-2 py-2 text-center">
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      const opening = !expandedPromo.has(l.lineId)
-                                      togglePromo(l.lineId)
-                                      if (opening && !hasPromo(l)) {
-                                        const master = getProductMasterById(l.productId)
-                                        if (master) {
-                                          const sp = master.supplierListPrice ?? 0
-                                          const dc = master.poLastDiscountChain
-                                          const bp = master.poLastBonusPaid
-                                          const bf = master.poLastBonusFree
-                                          const bpct = master.poLastBonusPct
-                                          const patch: Record<string, unknown> = {}
-                                          if (sp > 0) patch.listPrice = sp
-                                          if (dc) patch.discountChain = dc
-                                          if (bpct && bpct > 0) {
-                                            patch.bonusPct = bpct
-                                          } else {
-                                            if (bp) patch.bonusPaidQty = bp
-                                            if (bf) patch.bonusFreeQty = bf
+                                  {(() => {
+                                    const masterForBadge = getProductMasterById(l.productId)
+                                    const availablePromos = findActiveVendorPromos(
+                                      vendorPromos,
+                                      l.productId,
+                                      selected.supplierId,
+                                      masterForBadge?.brand ?? '',
+                                      masterForBadge?.category ?? '',
+                                    )
+                                    const hasAvailable = availablePromos.length > 0
+                                    return (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const opening = !expandedPromo.has(l.lineId)
+                                          togglePromo(l.lineId)
+                                          if (opening && !hasPromo(l)) {
+                                            const master = getProductMasterById(l.productId)
+                                            if (master) {
+                                              const sp = master.supplierListPrice ?? 0
+                                              const dc = master.poLastDiscountChain
+                                              const bp = master.poLastBonusPaid
+                                              const bf = master.poLastBonusFree
+                                              const bpct = master.poLastBonusPct
+                                              const patch: Record<string, unknown> = {}
+                                              if (sp > 0) patch.listPrice = sp
+                                              if (dc) patch.discountChain = dc
+                                              if (bpct && bpct > 0) {
+                                                patch.bonusPct = bpct
+                                              } else {
+                                                if (bp) patch.bonusPaidQty = bp
+                                                if (bf) patch.bonusFreeQty = bf
+                                              }
+                                              if (Object.keys(patch).length > 0) {
+                                                const cost = calcEffectiveCost(
+                                                  (patch.listPrice as number | undefined) ?? l.listPrice,
+                                                  (patch.discountChain as string | undefined) ?? l.discountChain,
+                                                  (patch.bonusPaidQty as number | undefined) ?? l.bonusPaidQty,
+                                                  (patch.bonusFreeQty as number | undefined) ?? l.bonusFreeQty,
+                                                  l.orderedQty,
+                                                  l.unitCostOrder,
+                                                  (patch.bonusPct as number | undefined) ?? l.bonusPct,
+                                                )
+                                                patchLine(l.lineId, { ...patch, unitCostOrder: cost })
+                                              }
+                                            }
                                           }
-                                          if (Object.keys(patch).length > 0) {
-                                            const cost = calcEffectiveCost(
-                                              (patch.listPrice as number | undefined) ?? l.listPrice,
-                                              (patch.discountChain as string | undefined) ?? l.discountChain,
-                                              (patch.bonusPaidQty as number | undefined) ?? l.bonusPaidQty,
-                                              (patch.bonusFreeQty as number | undefined) ?? l.bonusFreeQty,
-                                              l.orderedQty,
-                                              l.unitCostOrder,
-                                              (patch.bonusPct as number | undefined) ?? l.bonusPct,
-                                            )
-                                            patchLine(l.lineId, { ...patch, unitCostOrder: cost })
-                                          }
-                                        }
-                                      }
-                                    }}
-                                    title="โปรโมชั่น / สินค้าแถม"
-                                    className={clsx(
-                                      'inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 text-[10px] font-bold transition',
-                                      promoActive
-                                        ? 'bg-violet-100 text-violet-700 hover:bg-violet-200'
-                                        : 'bg-slate-100 text-slate-500 hover:bg-violet-50 hover:text-violet-600',
-                                    )}
-                                  >
-                                    <Tag className="size-2.5" />
-                                    โปร
-                                    <ChevronDown className={clsx('size-2.5 transition-transform', promoOpen && 'rotate-180')} />
-                                  </button>
+                                        }}
+                                        title={hasAvailable ? `มีโปรซัพ ${availablePromos.length} รายการ — กดดู` : 'โปรโมชั่น / สินค้าแถม'}
+                                        className={clsx(
+                                          'relative inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 text-[10px] font-bold transition',
+                                          promoActive
+                                            ? 'bg-violet-100 text-violet-700 hover:bg-violet-200'
+                                            : hasAvailable
+                                              ? 'bg-blue-100 text-blue-700 hover:bg-blue-200 ring-1 ring-blue-300'
+                                              : 'bg-slate-100 text-slate-500 hover:bg-violet-50 hover:text-violet-600',
+                                        )}
+                                      >
+                                        <Tag className="size-2.5" />
+                                        โปร
+                                        {hasAvailable && !promoActive && (
+                                          <span className="ml-0.5 rounded-full bg-blue-600 px-1 text-[8px] font-black text-white">
+                                            {availablePromos.length}
+                                          </span>
+                                        )}
+                                        <ChevronDown className={clsx('size-2.5 transition-transform', promoOpen && 'rotate-180')} />
+                                      </button>
+                                    )
+                                  })()}
                                 </td>
                                 {selected.status === 'draft' && (
                                   <td className="px-2 py-2">
@@ -2793,26 +3013,60 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
                                   <td colSpan={selected.status === 'draft' ? 9 : 8} className="px-4 py-3">
                                     <p className="mb-2 text-[10px] font-bold uppercase tracking-wide text-violet-500">คำนวณต้นทุนจากราคาตั้ง → ส่วนลด → VAT</p>
                                     {(() => {
-                                      const matches = findMatchingVendorPromos(vendorPromos, l.productId, selected.supplierId, l.orderedQty)
-                                      if (matches.length === 0) return null
+                                      const masterForPromo = getProductMasterById(l.productId)
+                                      const allActive = findActiveVendorPromos(
+                                        vendorPromos,
+                                        l.productId,
+                                        selected.supplierId,
+                                        masterForPromo?.brand ?? '',
+                                        masterForPromo?.category ?? '',
+                                      )
+                                      if (allActive.length === 0) return null
                                       return (
                                         <div className="mb-2 flex flex-wrap gap-1.5">
-                                          {matches.map((vp) => {
+                                          {allActive.map((vp) => {
                                             const bestTier = findBestVendorPromoTier(vp, l.orderedQty)
+                                            const nextTier = findNextVendorPromoTier(vp, l.orderedQty)
                                             const discPct = bestTier?.extraDiscountPct ?? 0
                                             const freeQty = bestTier?.freeQty ?? 0
                                             const alreadyApplied = discPct > 0 && (l.discountChain ?? '').split('+').includes(String(discPct))
+                                            const reached = bestTier !== null
+                                            const gap = nextTier ? Math.max(0, nextTier.minQty - l.orderedQty) : 0
                                             return (
                                               <div
                                                 key={vp.id}
-                                                className="flex items-center gap-1.5 rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-[10px] font-semibold text-blue-800"
+                                                className={clsx(
+                                                  'flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-semibold',
+                                                  reached
+                                                    ? 'border-blue-200 bg-blue-50 text-blue-800'
+                                                    : 'border-amber-200 bg-amber-50 text-amber-800',
+                                                )}
                                               >
                                                 <span>
                                                   {vp.name}
-                                                  {discPct > 0 && ` +${discPct}%`}
-                                                  {freeQty > 0 && ` แถม ${freeQty} ชิ้น`}
+                                                  {reached && discPct > 0 && ` +${discPct}%`}
+                                                  {reached && freeQty > 0 && ` แถม ${freeQty} ชิ้น`}
                                                 </span>
-                                                {discPct > 0 && !alreadyApplied && (
+                                                {!reached && nextTier && (
+                                                  <span className="text-[9px] text-amber-700">
+                                                    💡 อีก {gap} ชิ้น →{nextTier.extraDiscountPct > 0 ? ` -${nextTier.extraDiscountPct}%` : ''}{nextTier.freeQty > 0 ? ` แถม ${nextTier.freeQty}` : ''}
+                                                  </span>
+                                                )}
+                                                {!reached && nextTier && selected.status === 'draft' && (
+                                                  <button
+                                                    type="button"
+                                                    className="rounded-md bg-amber-600 px-1.5 py-0.5 text-[9px] font-bold text-white hover:bg-amber-700"
+                                                    onClick={() => {
+                                                      const newQty = nextTier.minQty
+                                                      const cost = calcEffectiveCost(l.listPrice, l.discountChain, l.bonusPaidQty, l.bonusFreeQty, newQty, l.unitCostOrder, l.bonusPct)
+                                                      patchLine(l.lineId, { orderedQty: newQty, ...((l.listPrice ?? 0) > 0 ? { unitCostOrder: cost } : {}) })
+                                                    }}
+                                                    title={`ปรับจำนวนเป็น ${nextTier.minQty} เพื่อรับโปร`}
+                                                  >
+                                                    +{gap}
+                                                  </button>
+                                                )}
+                                                {reached && discPct > 0 && !alreadyApplied && (
                                                   <button
                                                     type="button"
                                                     className="rounded-md bg-blue-600 px-1.5 py-0.5 text-[9px] font-bold text-white hover:bg-blue-700"
@@ -2826,7 +3080,7 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
                                                     ใช้โปร
                                                   </button>
                                                 )}
-                                                {alreadyApplied && (
+                                                {reached && alreadyApplied && (
                                                   <span className="text-[9px] text-blue-500">✓ ใช้แล้ว</span>
                                                 )}
                                               </div>
@@ -2975,21 +3229,60 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
                                         </p>
                                       </div>
 
-                                      {/* Clear promo */}
-                                      <button
-                                        type="button"
-                                        onClick={() =>
-                                          patchLine(l.lineId, {
-                                            listPrice: undefined,
-                                            discountChain: undefined,
-                                            bonusPaidQty: undefined,
-                                            bonusFreeQty: undefined,
-                                          })
-                                        }
-                                        className="mt-5 text-[10px] text-slate-400 hover:text-rose-500"
-                                      >
-                                        ล้างโปร
-                                      </button>
+                                      {/* Action strip: save as vendor promo + clear */}
+                                      <div className="mt-5 flex flex-col items-stretch gap-1">
+                                        {hasPromo(l) && selected.status === 'draft' && (
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              const today = new Date().toISOString().slice(0, 10)
+                                              const endDate = new Date(Date.now() + 90 * 86400000).toISOString().slice(0, 10)
+                                              const firstPct = l.discountChain ? (parseChain(l.discountChain)[0] ?? 0) : 0
+                                              const minQty = Math.max(1, Math.floor(l.bonusPaidQty ?? 1))
+                                              const freeQty = Math.max(0, Math.floor(l.bonusFreeQty ?? 0))
+                                              const supName = selected.supplierName || 'ซัพ'
+                                              const chainLabel = l.discountChain ? ` ${l.discountChain}%` : ''
+                                              const bonusLabel = freeQty > 0 ? ` ซื้อ${minQty}แถม${freeQty}` : ''
+                                              setVendorPromoDraft({
+                                                id: `vp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                                                name: `${supName} — ${l.sku}${chainLabel}${bonusLabel}`,
+                                                enabled: true,
+                                                startDate: today,
+                                                endDate,
+                                                productId: l.productId,
+                                                brand: '',
+                                                category: '',
+                                                supplierId: selected.supplierId,
+                                                tiers: [{
+                                                  minQty,
+                                                  extraDiscountPct: firstPct,
+                                                  freeQty,
+                                                }],
+                                              })
+                                              setVendorPromoOpen(true)
+                                              window.scrollTo({ top: 0, behavior: 'smooth' })
+                                            }}
+                                            className="inline-flex items-center justify-center gap-1 rounded-md border border-blue-300 bg-blue-50 px-2 py-1 text-[10px] font-bold text-blue-700 hover:bg-blue-100"
+                                            title="บันทึกโปรนี้เป็น Vendor Promotion ถาวร — กรอกชื่อ/วันที่ในแผงด้านบน"
+                                          >
+                                            💾 บันทึกเป็นโปรซัพ
+                                          </button>
+                                        )}
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            patchLine(l.lineId, {
+                                              listPrice: undefined,
+                                              discountChain: undefined,
+                                              bonusPaidQty: undefined,
+                                              bonusFreeQty: undefined,
+                                            })
+                                          }
+                                          className="text-[10px] text-slate-400 hover:text-rose-500"
+                                        >
+                                          ล้างโปร
+                                        </button>
+                                      </div>
                                     </div>
                                   </td>
                                 </tr>

@@ -7,6 +7,7 @@ import {
   type SupplierProfile,
   type SupplierBankAccount,
   type EarlyPayDiscount,
+  type DefaultDiscountByBrand,
 } from '@/features/purchase/data/supplierDirectoryStore'
 import {
   getSupplierCatalog,
@@ -327,6 +328,7 @@ function SupplierMasterForm({ mode, initialProfile, onClose, onSaved }: Supplier
   const [catalogRows, setCatalogRows] = useState<CatalogRowDraft[]>([])
   const [bankAccounts, setBankAccounts] = useState<SupplierBankAccount[]>([])
   const [earlyPayDiscounts, setEarlyPayDiscounts] = useState<EarlyPayDiscount[]>([])
+  const [defaultDiscountByBrand, setDefaultDiscountByBrand] = useState<DefaultDiscountByBrand[]>([])
   const [priceListVatMode, setPriceListVatMode] = useState<'vat_included' | 'vat_excluded' | 'no_vat'>('vat_excluded')
   const [transportNames, setTransportNames] = useState<string[]>(() =>
     loadTransportDirectory().map((c) => c.name),
@@ -373,6 +375,7 @@ function SupplierMasterForm({ mode, initialProfile, onClose, onSaved }: Supplier
     setBrands(p.brandsSold ?? [])
     setBankAccounts(p.bankAccounts ?? [])
     setEarlyPayDiscounts(p.earlyPayDiscounts ?? [])
+    setDefaultDiscountByBrand(p.defaultDiscountByBrand ?? [])
     setPriceListVatMode(p.priceListVatMode ?? 'vat_excluded')
     const c = getSupplierCreditTerms(p.id)
     setCreditTermDays(Math.min(99, Math.max(0, c.creditDays)))
@@ -463,6 +466,7 @@ function SupplierMasterForm({ mode, initialProfile, onClose, onSaved }: Supplier
         acceptsTransfer: flags.acceptsTransfer,
         bankAccounts: cleanedBankAccounts.length ? cleanedBankAccounts : undefined,
         earlyPayDiscounts: earlyPayDiscounts.length ? earlyPayDiscounts : undefined,
+        defaultDiscountByBrand: defaultDiscountByBrand.length ? defaultDiscountByBrand : undefined,
         regularProductCount: catalogItems.length,
         priceListVatMode,
       })
@@ -488,6 +492,7 @@ function SupplierMasterForm({ mode, initialProfile, onClose, onSaved }: Supplier
       acceptsTransfer: flags.acceptsTransfer,
       bankAccounts: cleanedBankAccounts.length ? cleanedBankAccounts : undefined,
       earlyPayDiscounts: earlyPayDiscounts.length ? earlyPayDiscounts : undefined,
+      defaultDiscountByBrand: defaultDiscountByBrand.length ? defaultDiscountByBrand : undefined,
       regularProductCount: catalogItems.length,
       priceListVatMode,
     }
@@ -830,6 +835,91 @@ function SupplierMasterForm({ mode, initialProfile, onClose, onSaved }: Supplier
                     <button
                       type="button"
                       onClick={() => setEarlyPayDiscounts((prev) => prev.filter((_, i) => i !== idx))}
+                      className="ml-auto rounded-lg p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600"
+                    >
+                      <Trash2 className="size-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* ─── Default Discount By Brand ──────────────────────────── */}
+          <div className="rounded-xl border border-violet-200 bg-violet-50/30 p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-violet-800">
+                  ส่วนลดประจำตามแบรนด์
+                </p>
+                <p className="mt-0.5 text-[10px] text-slate-500">
+                  ลด chain ที่ซัพให้กับทุกสินค้าของแบรนด์นี้ — auto pre-fill ตอนเพิ่มสินค้าลง PO
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDefaultDiscountByBrand((prev) => [...prev, { brand: brands[0] ?? '', discountChain: '' }])}
+                className="inline-flex items-center gap-1 rounded-lg bg-violet-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-violet-700"
+              >
+                <Plus className="size-3" aria-hidden />
+                เพิ่มแบรนด์
+              </button>
+            </div>
+            {defaultDiscountByBrand.length === 0 ? (
+              <p className="py-2 text-center text-xs text-slate-400">
+                {brands.length === 0
+                  ? 'ใส่แบรนด์ในช่อง «แบรนด์ที่จำหน่าย» ก่อน แล้วค่อยตั้งส่วนลด'
+                  : 'ยังไม่มี — กด «เพิ่มแบรนด์» เพื่อตั้งส่วนลดประจำ'}
+              </p>
+            ) : (
+              <div className="space-y-1.5">
+                {defaultDiscountByBrand.map((d, idx) => (
+                  <div key={idx} className="flex items-center gap-2">
+                    <span className="shrink-0 text-xs text-slate-600">แบรนด์</span>
+                    {brands.length > 0 ? (
+                      <select
+                        value={d.brand}
+                        onChange={(e) =>
+                          setDefaultDiscountByBrand((prev) =>
+                            prev.map((x, i) => (i === idx ? { ...x, brand: e.target.value } : x)),
+                          )
+                        }
+                        className="min-w-[8rem] rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs outline-none focus:border-violet-400"
+                      >
+                        {!brands.includes(d.brand) && <option value={d.brand}>{d.brand || '— เลือก —'}</option>}
+                        {brands.map((b) => (
+                          <option key={b} value={b}>{b}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        type="text"
+                        value={d.brand}
+                        onChange={(e) =>
+                          setDefaultDiscountByBrand((prev) =>
+                            prev.map((x, i) => (i === idx ? { ...x, brand: e.target.value } : x)),
+                          )
+                        }
+                        placeholder="ชื่อแบรนด์"
+                        className="min-w-[8rem] rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs outline-none focus:border-violet-400"
+                      />
+                    )}
+                    <span className="shrink-0 text-xs text-slate-600">ลด</span>
+                    <input
+                      type="text"
+                      value={d.discountChain}
+                      onChange={(e) =>
+                        setDefaultDiscountByBrand((prev) =>
+                          prev.map((x, i) => (i === idx ? { ...x, discountChain: e.target.value } : x)),
+                        )
+                      }
+                      placeholder="เช่น 45+12"
+                      className="w-24 rounded-lg border border-slate-200 bg-white px-2 py-1 text-center text-sm font-mono outline-none focus:border-violet-400"
+                    />
+                    <span className="shrink-0 text-xs text-slate-600">%</span>
+                    <button
+                      type="button"
+                      onClick={() => setDefaultDiscountByBrand((prev) => prev.filter((_, i) => i !== idx))}
                       className="ml-auto rounded-lg p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600"
                     >
                       <Trash2 className="size-3.5" />

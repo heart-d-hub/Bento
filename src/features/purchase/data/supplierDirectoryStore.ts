@@ -19,6 +19,12 @@ export type EarlyPayDiscount = {
   discountPct: number
 }
 
+/** ส่วนลดประจำตามแบรนด์ — ลดทุกสินค้าของแบรนด์นี้จากซัพ (chain เช่น "45+12") */
+export type DefaultDiscountByBrand = {
+  brand: string
+  discountChain: string
+}
+
 export type SupplierProfile = {
   id: string
   /** รหัสย่อผู้จำหน่าย */
@@ -50,6 +56,8 @@ export type SupplierProfile = {
   priceListVatMode?: 'vat_included' | 'vat_excluded' | 'no_vat'
   /** ส่วนลดจ่ายก่อนกำหนด — เรียงตาม withinDays น้อยสุดก่อน */
   earlyPayDiscounts?: EarlyPayDiscount[]
+  /** ส่วนลดประจำตามแบรนด์ — auto-apply ตอนเพิ่มสินค้าลง PO */
+  defaultDiscountByBrand?: DefaultDiscountByBrand[]
 }
 
 function newSupplierId(): string {
@@ -183,6 +191,20 @@ function normalizeProfile(v: unknown): SupplierProfile | null {
       .filter((x): x is EarlyPayDiscount => x !== null)
     return list.length ? list : undefined
   })()
+  const defaultDiscountByBrand: DefaultDiscountByBrand[] | undefined = (() => {
+    if (!Array.isArray(o.defaultDiscountByBrand)) return undefined
+    const list = (o.defaultDiscountByBrand as unknown[])
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null
+        const d = item as Record<string, unknown>
+        const brand = typeof d.brand === 'string' ? d.brand.trim() : ''
+        const chain = typeof d.discountChain === 'string' ? d.discountChain.trim() : ''
+        if (!brand || !chain) return null
+        return { brand, discountChain: chain }
+      })
+      .filter((x): x is DefaultDiscountByBrand => x !== null)
+    return list.length ? list : undefined
+  })()
   return {
     id,
     supplierCode,
@@ -202,6 +224,7 @@ function normalizeProfile(v: unknown): SupplierProfile | null {
     regularProductCount: rpc,
     priceListVatMode,
     earlyPayDiscounts,
+    defaultDiscountByBrand,
   }
 }
 
@@ -294,6 +317,11 @@ export function createSupplierProfile(partial: Omit<SupplierProfile, 'id'> & { i
         : undefined,
     priceListVatMode: partial.priceListVatMode,
     earlyPayDiscounts: partial.earlyPayDiscounts?.length ? partial.earlyPayDiscounts : undefined,
+    defaultDiscountByBrand: partial.defaultDiscountByBrand?.length
+      ? partial.defaultDiscountByBrand
+          .map((d) => ({ brand: d.brand.trim(), discountChain: d.discountChain.trim() }))
+          .filter((d) => d.brand && d.discountChain)
+      : undefined,
   }
   upsertSupplierProfile(profile)
   return profile

@@ -1,8 +1,7 @@
 import { getStoredBranch } from '@/features/auth/authSession'
 import { BRANCHES } from '@/features/auth/branches'
 import { getLatestUnitCostForPo } from '@/features/purchase/data/poMovingAverage'
-import { loadPurchaseOrders, upsertPurchaseOrder } from '@/features/purchase/data/poStore'
-import type { PurchaseOrder, PurchaseOrderLine } from '@/features/purchase/data/poTypes'
+import { loadPurchaseOrders } from '@/features/purchase/data/poStore'
 import { loadSupplierDirectory } from '@/features/purchase/data/supplierDirectoryStore'
 import {
   buildProductSupplierMap,
@@ -16,8 +15,11 @@ import {
   setWarehouseMinMax,
   INVENTORY_THRESHOLDS_CHANGED_EVENT,
 } from '@/features/inventory/data/inventoryStockThresholds'
-import { receiveQtyToBranchStock } from '@/features/purchase/data/poStockReceive'
 import { loadRecentSales } from '@/features/pos/data/posSalesHistory'
+import { loadVendorPromotions } from '@/features/promotions/data/vendorPromotionsStore'
+import { findActiveVendorPromos, findBestVendorPromoTier, findNextVendorPromoTier } from '@/features/promotions/evaluateVendorPromo'
+import { PROMOTIONS_CHANGED_EVENT } from '@/features/promotions/data/promotionsStore'
+import type { VendorPromotion } from '@/features/promotions/data/promotionTypes'
 import { clsx } from 'clsx'
 import {
   AlertTriangle,
@@ -32,7 +34,6 @@ import {
   List,
   PackagePlus,
   Search,
-  ShoppingBag,
   ShoppingCart,
   Sparkles,
   Star,
@@ -40,164 +41,11 @@ import {
   UserX,
 } from 'lucide-react'
 import { addToCatalogCart } from '@/features/purchase/data/catalogCartStore'
+import { ProductImage } from '@/features/inventory/components/ProductImage'
 import { useEffect, useMemo, useState } from 'react'
-
-/* ── Self-purchase log ─────────────────────────────────────────────── */
-const SELF_BUY_LOG_KEY = 'bento.purchase.selfBuy.v1'
-
-type SelfPurchaseLog = {
-  id: string
-  at: string
-  productId: string
-  sku: string
-  name: string
-  qty: number
-  unitCost: number
-  note: string
-}
-
-function saveSelfPurchaseLog(entry: SelfPurchaseLog) {
-  try {
-    const raw = localStorage.getItem(SELF_BUY_LOG_KEY)
-    const list: SelfPurchaseLog[] = raw ? (JSON.parse(raw) as SelfPurchaseLog[]) : []
-    list.unshift(entry)
-    localStorage.setItem(SELF_BUY_LOG_KEY, JSON.stringify(list.slice(0, 500)))
-  } catch { /* ignore */ }
-}
-
-/* ── Self-purchase modal ───────────────────────────────────────────── */
-type SelfBuyTarget = {
-  productId: string
-  sku: string
-  name: string
-  suggestQty: number
-  latestCost: number
-}
-
-function SelfBuyModal({
-  target,
-  onClose,
-  onDone,
-}: {
-  target: SelfBuyTarget
-  onClose: () => void
-  onDone: () => void
-}) {
-  const [qty, setQty] = useState(String(target.suggestQty || 1))
-  const [cost, setCost] = useState(String(target.latestCost || ''))
-  const [note, setNote] = useState('')
-  const [saving, setSaving] = useState(false)
-
-  const handleConfirm = () => {
-    const q = Math.max(1, Math.floor(Number(qty) || 1))
-    const c = Math.max(0, Number(cost) || 0)
-    setSaving(true)
-    try {
-      receiveQtyToBranchStock(target.productId, q)
-      saveSelfPurchaseLog({
-        id: `sb-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        at: new Date().toISOString(),
-        productId: target.productId,
-        sku: target.sku,
-        name: target.name,
-        qty: q,
-        unitCost: c,
-        note: note.trim(),
-      })
-      onDone()
-    } catch (e) {
-      alert(`เกิดข้อผิดพลาด: ${e instanceof Error ? e.message : String(e)}`)
-      setSaving(false)
-    }
-  }
-
-  return (
-    <div className="fixed inset-0 z-[400] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
-      <div className="w-full max-w-sm overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
-        <div className="flex items-center gap-3 border-b border-slate-100 bg-slate-50 px-5 py-4">
-          <span className="flex size-9 items-center justify-center rounded-xl bg-emerald-100 text-emerald-700">
-            <ShoppingBag className="size-4" aria-hidden />
-          </span>
-          <div className="min-w-0">
-            <p className="text-sm font-bold text-slate-900">ซื้อเอง / รับเข้าสต็อกทันที</p>
-            <p className="truncate text-xs text-slate-500">{target.sku} — {target.name}</p>
-          </div>
-        </div>
-
-        <div className="space-y-4 px-5 py-4">
-          <div className="grid grid-cols-2 gap-3">
-            <label className="block">
-              <span className="mb-1 block text-xs font-semibold text-slate-600">จำนวนที่ซื้อ</span>
-              <input
-                type="number"
-                min={1}
-                step={1}
-                value={qty}
-                onChange={(e) => setQty(e.target.value)}
-                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-right font-mono outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200"
-                autoFocus
-              />
-            </label>
-            <label className="block">
-              <span className="mb-1 block text-xs font-semibold text-slate-600">ต้นทุน/หน่วย (฿)</span>
-              <input
-                type="number"
-                min={0}
-                step={0.01}
-                value={cost}
-                onChange={(e) => setCost(e.target.value)}
-                placeholder="0.00"
-                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-right font-mono outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200"
-              />
-            </label>
-          </div>
-
-          {Number(qty) > 0 && Number(cost) > 0 && (
-            <div className="rounded-lg bg-emerald-50 px-3 py-2 text-center">
-              <span className="text-xs text-emerald-700">รวมจ่าย </span>
-              <span className="text-sm font-black text-emerald-800">
-                ฿{(Math.floor(Number(qty) || 0) * (Number(cost) || 0)).toLocaleString('th-TH', { minimumFractionDigits: 2 })}
-              </span>
-            </div>
-          )}
-
-          <label className="block">
-            <span className="mb-1 block text-xs font-semibold text-slate-600">หมายเหตุ (ไม่บังคับ)</span>
-            <input
-              type="text"
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              placeholder="เช่น ตลาดสด, เงินสด, ร้าน ABC"
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200"
-            />
-          </label>
-        </div>
-
-        <div className="flex gap-2 border-t border-slate-100 px-5 py-3">
-          <button
-            type="button"
-            onClick={onClose}
-            className="flex-1 rounded-lg border border-slate-200 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50"
-          >
-            ยกเลิก
-          </button>
-          <button
-            type="button"
-            onClick={handleConfirm}
-            disabled={saving || !(Number(qty) >= 1)}
-            className="flex-[2] rounded-lg bg-emerald-600 py-2 text-sm font-bold text-white shadow-sm hover:bg-emerald-700 disabled:opacity-60"
-          >
-            {saving ? 'กำลังบันทึก…' : `ยืนยัน รับเข้า ${Math.max(1, Math.floor(Number(qty) || 1))} ชิ้น`}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
 
 type LowStockWorkspacePageProps = {
   className?: string
-  onOpenPurchaseCart?: () => void
   onGoToCatalog?: () => void
   onBack?: () => void
 }
@@ -315,14 +163,6 @@ function saveSupplierLeadTimeById(map: SupplierLeadTimeMap): void {
   }
 }
 
-function newLineId(): string {
-  return `ln-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
-}
-
-function newPoId(): string {
-  return `po-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-}
-
 function resolveSuggestedQty(shortQty: number, moq: number): number {
   const base = Math.max(1, Math.ceil(shortQty))
   const lot = Math.max(1, Math.floor(moq))
@@ -401,9 +241,8 @@ function SortHeaderButton({
   )
 }
 
-export function LowStockWorkspacePage({ className, onOpenPurchaseCart, onGoToCatalog, onBack }: LowStockWorkspacePageProps) {
+export function LowStockWorkspacePage({ className, onGoToCatalog, onBack }: LowStockWorkspacePageProps) {
   const [lowStockSearch, setLowStockSearch] = useState(() => loadViewPrefs().search ?? '')
-  const [selfBuyTarget, setSelfBuyTarget] = useState<SelfBuyTarget | null>(null)
   const [rowSuppliers, setRowSuppliers] = useState<RowSupplierMap>({})
   const [defaultSupplierByProduct, setDefaultSupplierByProduct] = useState<DefaultSupplierMap>(
     () => loadDefaultSupplierByProduct(),
@@ -434,6 +273,12 @@ export function LowStockWorkspacePage({ className, onOpenPurchaseCart, onGoToCat
     return () => window.removeEventListener(SUPPLIER_CATALOG_CHANGED_EVENT, handler)
   }, [])
   const orders = useMemo(() => loadPurchaseOrders(), [tick])
+  const [vendorPromos, setVendorPromos] = useState<VendorPromotion[]>(() => loadVendorPromotions())
+  useEffect(() => {
+    const handler = () => setVendorPromos(loadVendorPromotions())
+    window.addEventListener(PROMOTIONS_CHANGED_EVENT, handler)
+    return () => window.removeEventListener(PROMOTIONS_CHANGED_EVENT, handler)
+  }, [])
 
   // Sales velocity: avg qty/day per product over last 30 days of sales history
   const salesVelocity = useMemo(() => {
@@ -469,18 +314,22 @@ export function LowStockWorkspacePage({ className, onOpenPurchaseCart, onGoToCat
 
     return products.map((item) => {
       const master = masterBySku.get(item.sku)
-      const b1Id = BRANCHES[0]?.id
-      const b2Id = BRANCHES[1]?.id
-      const b1 = master?.crossBranch?.find((r) => r.branchId === b1Id)?.stock ?? item.stock
-      const b2 = master?.crossBranch?.find((r) => r.branchId === b2Id)?.stock ?? 0
+      // Build dynamic per-branch stock list (excluding current branch) — scales to N branches
+      const otherBranchStocks = BRANCHES
+        .filter((b) => b.id !== branchId)
+        .map((b) => ({
+          branchId: b.id,
+          name: b.name,
+          stock: master?.crossBranch?.find((r) => r.branchId === b.id)?.stock ?? 0,
+        }))
       return {
         ...item,
         currentStock: item.stock,
-        branches: { b1, b2 },
+        otherBranchStocks,
         sellPrice: master?.sellPrice ?? 0,
       }
     })
-  }, [tick])
+  }, [tick, branchId])
 
   const pendingByProductSupplier = useMemo(() => {
     const map: Record<string, number> = {}
@@ -495,24 +344,6 @@ export function LowStockWorkspacePage({ className, onOpenPurchaseCart, onGoToCat
     }
     return map
   }, [orders, branchId])
-
-  const draftOrdersBySupplier = useMemo(() => {
-    const out = new Map<string, PurchaseOrder>()
-    for (const po of orders) {
-      if (po.branchId !== branchId || po.status !== 'draft') continue
-      if (!out.has(po.supplierId)) out.set(po.supplierId, po)
-    }
-    return out
-  }, [orders, branchId])
-
-  const getCartStatus = (productId: string): string | null => {
-    for (const po of draftOrdersBySupplier.values()) {
-      if (po.lines.some((ln) => ln.productId === productId)) {
-        return `${po.supplierName} (${po.poNo})`
-      }
-    }
-    return null
-  }
 
   const resolveSupplierId = (productId: string): string => {
     if (rowSuppliers[productId]) return rowSuppliers[productId]
@@ -578,16 +409,22 @@ export function LowStockWorkspacePage({ className, onOpenPurchaseCart, onGoToCat
 
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [urgencyFilter, setUrgencyFilter] = useState<UrgencyFilter>(() => loadViewPrefs().urgency ?? 'all')
+  const [viewModeManuallySet, setViewModeManuallySet] = useState<boolean>(() => loadViewPrefs().view !== undefined)
 
   useEffect(() => {
     saveViewPrefs({
       search: lowStockSearch,
       urgency: urgencyFilter,
-      view: viewMode,
+      view: viewModeManuallySet ? viewMode : undefined,
       sortKey: sortKey ?? undefined,
       sortDir,
     })
-  }, [lowStockSearch, urgencyFilter, viewMode, sortKey, sortDir])
+  }, [lowStockSearch, urgencyFilter, viewMode, viewModeManuallySet, sortKey, sortDir])
+
+  const setViewModeUser = (mode: ViewMode) => {
+    setViewMode(mode)
+    setViewModeManuallySet(true)
+  }
 
   const suggestMinStockForItem = (item: (typeof stockItems)[number]) => {
     const vel = salesVelocity.get(item.id) ?? 0
@@ -652,138 +489,37 @@ export function LowStockWorkspacePage({ className, onOpenPurchaseCart, onGoToCat
     }
   }
 
-  const addSelectedToPO = () => {
+  const computeSuggestQtyFor = (item: (typeof stockItems)[number]): number => {
+    const supplierId = resolveSupplierId(item.id)
+    const pendingStock = resolvePendingStock(item.id, supplierId)
+    const effectiveMin = computeEffectiveMin(item, supplierId)
+    const shortQty = effectiveMin - (item.currentStock + pendingStock)
+    return (item.maxStock ?? 0) > 0
+      ? (item.maxStock as number)
+      : resolveSuggestedQty(shortQty, resolveMoq(supplierId))
+  }
+
+  const addSelectedToCart = () => {
     const selected = filteredLowStockProducts.filter((p) => selectedIds.has(p.id))
     let addedCount = 0
-    let missingSupplierCount = 0
-    let skippedInCart = 0
     for (const item of selected) {
       const supplierId = resolveSupplierId(item.id)
-      if (!supplierId) { missingSupplierCount += 1; continue }
-      const pendingStock = resolvePendingStock(item.id, supplierId)
-      const effectiveMin = computeEffectiveMin(item, supplierId)
-      const shortQty = effectiveMin - (item.currentStock + pendingStock)
-      const suggestQty = (item.maxStock ?? 0) > 0
-        ? (item.maxStock as number)
-        : resolveSuggestedQty(shortQty, resolveMoq(supplierId))
-      const result = upsertDraftPoLine(item, supplierId, suggestQty)
-      if (result.added) addedCount += 1
-      else if (result.reason === 'อยู่ในตะกร้าแล้ว') skippedInCart += 1
+      const supplierName = supplierId ? (suppliers.find((s) => s.id === supplierId)?.name) : undefined
+      addToCatalogCart({
+        productId: item.id,
+        sku: item.sku,
+        name: item.name,
+        qty: computeSuggestQtyFor(item),
+        unitCost: getLatestUnitCostForPo(item),
+        supplierId: supplierId || undefined,
+        supplierName,
+      })
+      addedCount += 1
     }
-    setTick((n) => n + 1)
     setSelectedIds(new Set())
-    const skipText = [
-      missingSupplierCount > 0 ? `ยังไม่เลือกซัพ ${missingSupplierCount}` : '',
-      skippedInCart > 0 ? `อยู่ในตะกร้าแล้ว ${skippedInCart}` : '',
-    ].filter(Boolean).join(' · ')
-    showNotice(
-      addedCount > 0 ? 'success' : 'warn',
-      `เพิ่มลงตะกร้า ${addedCount} รายการ${skipText ? ` (ข้าม: ${skipText})` : ''}`,
-    )
+    showNotice(addedCount > 0 ? 'success' : 'warn', `เพิ่มลงตะกร้า ${addedCount} รายการ`)
   }
 
-  const upsertDraftPoLine = (
-    product: (typeof stockItems)[number],
-    supplierId: string,
-    suggestQty: number,
-  ): { added: boolean; reason?: string } => {
-    const supplier = suppliers.find((s) => s.id === supplierId)
-    if (!supplier) return { added: false, reason: 'ไม่พบผู้จัดจำหน่ายที่เลือก' }
-    if (getCartStatus(product.id)) return { added: false, reason: 'อยู่ในตะกร้าแล้ว' }
-
-    const line: PurchaseOrderLine = {
-      lineId: newLineId(),
-      productId: product.id,
-      sku: product.sku,
-      name: product.name,
-      orderedQty: suggestQty,
-      unitCostOrder: getLatestUnitCostForPo(product),
-      receivedQtyTotal: 0,
-    }
-
-    const existed = draftOrdersBySupplier.get(supplierId)
-    if (!existed) {
-      const created: PurchaseOrder = {
-        id: newPoId(),
-        poNo: `DR-${Date.now().toString(36).toUpperCase()}`,
-        branchId,
-        supplierId: supplier.id,
-        supplierName: supplier.name,
-        status: 'draft',
-        createdAt: new Date().toISOString(),
-        lines: [line],
-        receiveBatches: [],
-        vatRatePercent: 7,
-        billDiscountBaht: 0,
-        paymentMode: 'unpaid',
-      }
-      upsertPurchaseOrder(created)
-      return { added: true }
-    }
-
-    const next: PurchaseOrder = {
-      ...existed,
-      lines: [...existed.lines, line],
-    }
-    upsertPurchaseOrder(next)
-    return { added: true }
-  }
-
-  const addToPO = (product: (typeof stockItems)[number]) => {
-    const supplierId = resolveSupplierId(product.id)
-    if (!supplierId) {
-      showNotice('warn', `เลือกซัพพลายเออร์สำหรับ ${product.sku} ก่อน`)
-      return
-    }
-    const pendingStock = resolvePendingStock(product.id, supplierId)
-    const effectiveMin = computeEffectiveMin(product, supplierId)
-    const shortQty = effectiveMin - (product.currentStock + pendingStock)
-    const suggestQty = (product.maxStock ?? 0) > 0
-      ? (product.maxStock as number)
-      : resolveSuggestedQty(shortQty, resolveMoq(supplierId))
-    const result = upsertDraftPoLine(product, supplierId, suggestQty)
-    if (!result.added && result.reason) {
-      showNotice('warn', result.reason)
-      return
-    }
-    setTick((n) => n + 1)
-    showNotice('success', `เพิ่ม ${product.sku} ลงตะกร้าแล้ว`)
-  }
-
-  const addAllToPO = (subset?: (typeof stockItems)) => {
-    const items = subset ?? filteredLowStockProducts
-    let addedCount = 0
-    let missingSupplierCount = 0
-    let skippedInCart = 0
-    for (const item of items) {
-      const supplierId = resolveSupplierId(item.id)
-      if (!supplierId) {
-        missingSupplierCount += 1
-        continue
-      }
-      const pendingStock = resolvePendingStock(item.id, supplierId)
-      const effectiveMin = computeEffectiveMin(item, supplierId)
-      const shortQty = effectiveMin - (item.currentStock + pendingStock)
-      const suggestQty = (item.maxStock ?? 0) > 0
-        ? (item.maxStock as number)
-        : resolveSuggestedQty(shortQty, resolveMoq(supplierId))
-      const result = upsertDraftPoLine(item, supplierId, suggestQty)
-      if (result.added) addedCount += 1
-      else if (result.reason === 'อยู่ในตะกร้าแล้ว') skippedInCart += 1
-    }
-    setTick((n) => n + 1)
-    const skipText = [
-      missingSupplierCount > 0 ? `ยังไม่เลือกซัพ ${missingSupplierCount}` : '',
-      skippedInCart > 0 ? `อยู่ในตะกร้าแล้ว ${skippedInCart}` : '',
-    ].filter(Boolean).join(' · ')
-    showNotice(
-      addedCount > 0 ? 'success' : 'warn',
-      `เพิ่มลงตะกร้า ${addedCount} รายการ${skipText ? ` (ข้าม: ${skipText})` : ''}`,
-    )
-  }
-
-  const b0 = BRANCHES[0]
-  const b1 = BRANCHES[1]
 
   const outOfStock = filteredLowStockProducts.filter((p) => p.currentStock <= 0)
   const critical = filteredLowStockProducts.filter((p) => p.currentStock > 0 && p.currentStock < p.minStock / 2)
@@ -847,6 +583,29 @@ export function LowStockWorkspacePage({ className, onOpenPurchaseCart, onGoToCat
       setSortDir('asc')
     }
   }
+
+  // Auto-default view: if ≥3 suppliers, group by supplier; else flat. Only when user hasn't manually chosen.
+  const uniqueSupplierCount = useMemo(() => {
+    const set = new Set<string>()
+    for (const item of displayProducts) {
+      const sid = resolveSupplierId(item.id)
+      if (sid) set.add(sid)
+    }
+    return set.size
+  }, [displayProducts, rowSuppliers, defaultSupplierByProduct])
+
+  useEffect(() => {
+    if (viewModeManuallySet) return
+    const desired: ViewMode = uniqueSupplierCount >= 3 ? 'group' : 'flat'
+    if (desired !== viewMode) setViewMode(desired)
+  }, [uniqueSupplierCount, viewModeManuallySet, viewMode])
+
+  // Reset urgency filter when there's nothing to show — prevents stale 'missing'/etc filter on empty list
+  useEffect(() => {
+    if (lowStockProducts.length === 0 && urgencyFilter !== 'all') {
+      setUrgencyFilter('all')
+    }
+  }, [lowStockProducts.length, urgencyFilter])
 
   const supplierGroups = useMemo(() => {
     if (viewMode !== 'group') return []
@@ -912,7 +671,6 @@ export function LowStockWorkspacePage({ className, onOpenPurchaseCart, onGoToCat
 
   const renderItemRow = (item: (typeof stockItems)[number]) => {
     const supplierId = resolveSupplierId(item.id)
-    const cartStatus = getCartStatus(item.id)
     const pendingStock = resolvePendingStock(item.id, supplierId)
     const moq = resolveMoq(supplierId)
     const leadTime = resolveLeadTime(supplierId)
@@ -947,7 +705,8 @@ export function LowStockWorkspacePage({ className, onOpenPurchaseCart, onGoToCat
         </td>
 
         <td className="max-w-0 px-3 py-2.5">
-          <div className="flex items-start gap-1.5">
+          <div className="flex items-start gap-2">
+            <ProductImage sku={item.sku} size="xs" fallbackLetter={item.brand?.[0]} objectFit="cover" />
             <p className="min-w-0 flex-1 truncate text-xs font-semibold text-slate-800" title={item.name}>{item.name}</p>
             {netShort > 0 && (
               <span className={clsx(
@@ -980,15 +739,30 @@ export function LowStockWorkspacePage({ className, onOpenPurchaseCart, onGoToCat
         </td>
 
         <td className="px-2 py-2.5 text-right">
-          <span className={clsx('tabular-nums font-bold text-xs', isOut ? 'text-rose-600' : isCritical ? 'text-amber-600' : 'text-slate-700')}>
-            {item.currentStock}
-          </span>
+          <div
+            className="flex items-center justify-end gap-1"
+            title={item.otherBranchStocks.length > 0
+              ? `สต็อกสาขาอื่น:\n${item.otherBranchStocks.map((b) => `· ${b.name}: ${b.stock}`).join('\n')}`
+              : undefined}
+          >
+            <span className={clsx('tabular-nums font-bold text-xs', isOut ? 'text-rose-600' : isCritical ? 'text-amber-600' : 'text-slate-700')}>
+              {item.currentStock}
+            </span>
+            {item.otherBranchStocks.some((b) => b.stock > 0) && (
+              <span className="cursor-help text-[9px] text-slate-400" title={`สต็อกสาขาอื่น:\n${item.otherBranchStocks.map((b) => `· ${b.name}: ${b.stock}`).join('\n')}`}>
+                ⓘ
+              </span>
+            )}
+          </div>
           {pendingStock > 0 && (
             <p className="text-[9px] tabular-nums text-emerald-600 font-semibold">+{pendingStock} รอ</p>
           )}
+          {item.otherBranchStocks.some((b) => b.stock > 0) && (
+            <p className="text-[9px] tabular-nums text-slate-400">
+              อื่น {item.otherBranchStocks.reduce((s, b) => s + b.stock, 0)}
+            </p>
+          )}
         </td>
-        <td className="px-2 py-2.5 text-right tabular-nums text-slate-500 text-xs">{item.branches.b1}</td>
-        <td className="px-2 py-2.5 text-right tabular-nums text-slate-500 text-xs">{item.branches.b2}</td>
 
         <td className="px-2 py-2.5 text-right">
           <div className="flex items-center justify-end gap-1">
@@ -1042,10 +816,9 @@ export function LowStockWorkspacePage({ className, onOpenPurchaseCart, onGoToCat
             <select
               value={supplierId}
               onChange={(e) => setRowSuppliers((cur) => ({ ...cur, [item.id]: e.target.value }))}
-              disabled={Boolean(cartStatus)}
-              className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white py-1 pl-1.5 pr-1 text-[10px] outline-none focus:border-amber-400 disabled:bg-slate-100"
+              className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white py-1 pl-1.5 pr-1 text-[10px] outline-none focus:border-amber-400"
             >
-              <option value="">— เลือก —</option>
+              <option value="">— ซัพ —</option>
               {(() => {
                 const linked = productSupplierMap.get(item.id) ?? []
                 const list = linked.length > 0
@@ -1111,46 +884,238 @@ export function LowStockWorkspacePage({ className, onOpenPurchaseCart, onGoToCat
               ขาย ฿{(suggestQty * (item.sellPrice ?? 0)).toLocaleString('th-TH', { maximumFractionDigits: 0 })}
             </p>
           )}
+          {(() => {
+            if (!supplierId) return null
+            const activePromos = findActiveVendorPromos(
+              vendorPromos,
+              item.id,
+              supplierId,
+              item.brand ?? '',
+              item.category ?? '',
+            )
+            if (activePromos.length === 0) return null
+            const vp = activePromos[0]!
+            const best = findBestVendorPromoTier(vp, suggestQty)
+            const next = findNextVendorPromoTier(vp, suggestQty)
+            if (best) {
+              return (
+                <p className="mt-0.5 text-[9px] font-semibold text-blue-600" title={vp.name}>
+                  ✓ โปร{best.extraDiscountPct > 0 ? ` -${best.extraDiscountPct}%` : ''}{best.freeQty > 0 ? ` แถม ${best.freeQty}` : ''}
+                </p>
+              )
+            }
+            if (next) {
+              const gap = next.minQty - suggestQty
+              return (
+                <p className="mt-0.5 text-[9px] font-semibold text-amber-600" title={vp.name}>
+                  💡 +{gap} →{next.extraDiscountPct > 0 ? ` -${next.extraDiscountPct}%` : ''}{next.freeQty > 0 ? ` แถม ${next.freeQty}` : ''}
+                </p>
+              )
+            }
+            return null
+          })()}
         </td>
 
-        <td className="px-2 py-2.5">
-          <div className="flex items-center justify-center gap-1">
-            <button type="button" onClick={() => addToPO(item)} disabled={Boolean(cartStatus)}
-              className={clsx(
-                'inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-semibold transition',
-                cartStatus
-                  ? 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed'
-                  : 'border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100',
-              )}
-              title={cartStatus ?? 'เพิ่มลงตะกร้า PO'}>
-              <PackagePlus className="size-3" />
-              {cartStatus ? 'PO✓' : 'PO'}
-            </button>
-            <button type="button"
-              onClick={() => setSelfBuyTarget({ productId: item.id, sku: item.sku, name: item.name, suggestQty, latestCost: getLatestUnitCostForPo(item) })}
-              className="inline-flex items-center gap-1 rounded-lg border border-emerald-200 bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-emerald-800 transition hover:bg-emerald-100"
-              title="ซื้อเอง/รับเข้าสต็อกทันที">
-              <ShoppingBag className="size-3" />เอง
-            </button>
-            <button type="button"
-              onClick={() => {
-                addToCatalogCart({ productId: item.id, sku: item.sku, name: item.name, qty: suggestQty, unitCost: getLatestUnitCostForPo(item) })
-                onGoToCatalog?.()
-              }}
-              className="inline-flex items-center gap-1 rounded-lg border border-indigo-200 bg-indigo-50 px-2 py-1 text-[10px] font-semibold text-indigo-800 transition hover:bg-indigo-100"
-              title="เพิ่มลงตะกร้าสั่งซื้อจากแค็ตตาล็อก">
-              <ShoppingCart className="size-3" />
-            </button>
-          </div>
-        </td>
       </tr>
     )
   }
 
+  const renderItemCard = (item: (typeof stockItems)[number]) => {
+    const supplierId = resolveSupplierId(item.id)
+    const pendingStock = resolvePendingStock(item.id, supplierId)
+    const moq = resolveMoq(supplierId)
+    const leadTime = resolveLeadTime(supplierId)
+    const effectiveMin = computeEffectiveMin(item, supplierId)
+    const shortQty = effectiveMin - (item.currentStock + pendingStock)
+    const suggestQty = (item.maxStock ?? 0) > 0
+      ? (item.maxStock as number)
+      : resolveSuggestedQty(shortQty, moq)
+    const vel = salesVelocity.get(item.id) ?? 0
+    const daysLeft = vel > 0 ? Math.floor(item.currentStock / vel) : null
+    const isOut = item.currentStock <= 0
+    const isCritical = !isOut && item.currentStock < item.minStock / 2
+    const cost = getLatestUnitCostForPo(item)
+    const checked = selectedIds.has(item.id)
+    const otherTotal = item.otherBranchStocks.reduce((s, b) => s + b.stock, 0)
+    const activePromos = supplierId
+      ? findActiveVendorPromos(vendorPromos, item.id, supplierId, item.brand ?? '', item.category ?? '')
+      : []
+    const vp = activePromos[0]
+    const best = vp ? findBestVendorPromoTier(vp, suggestQty) : null
+    const next = vp ? findNextVendorPromoTier(vp, suggestQty) : null
+
+    return (
+      <div key={item.id} className={clsx(
+        'rounded-xl border bg-white px-3 py-2.5 shadow-sm transition',
+        isOut ? 'border-rose-200 bg-rose-50/30'
+          : isCritical ? 'border-amber-200 bg-amber-50/20'
+          : 'border-slate-200',
+        checked && 'ring-2 ring-amber-400',
+      )}>
+        {/* Row 1: checkbox + image + status + name + qty/cost summary */}
+        <div className="flex items-center gap-2">
+          <input type="checkbox" checked={checked} onChange={() => toggleSelect(item.id)}
+            className="size-3.5 cursor-pointer rounded accent-amber-500" />
+          <ProductImage sku={item.sku} size="sm" fallbackLetter={item.brand?.[0]} objectFit="cover" />
+          {isOut ? (
+            <span className="shrink-0 rounded-full bg-rose-100 px-1.5 py-0.5 text-[9px] font-black text-rose-700">หมด</span>
+          ) : isCritical ? (
+            <span className="shrink-0 rounded-full bg-amber-100 px-1.5 py-0.5 text-[9px] font-black text-amber-700">วิกฤต</span>
+          ) : (
+            <span className="shrink-0 rounded-full bg-yellow-100 px-1.5 py-0.5 text-[9px] font-black text-yellow-700">ใกล้หมด</span>
+          )}
+          <div className="min-w-0 flex-1">
+            <h3 className="truncate text-sm font-bold text-slate-900">{item.name}</h3>
+            <p className="truncate font-mono text-[10px] text-slate-400">{item.sku}{item.brand && ` · ${item.brand}`}</p>
+          </div>
+          <span className="ml-auto shrink-0 rounded-md bg-amber-50 px-2 py-0.5 text-[11px] font-bold text-amber-700">
+            สั่ง {suggestQty}
+            {cost > 0 && <span className="ml-1 text-[10px] font-semibold text-slate-500">฿{(suggestQty * cost).toLocaleString('th-TH', { maximumFractionDigits: 0 })}</span>}
+          </span>
+        </div>
+
+        {/* Row 2: stats + supplier + MOQ/LT all inline */}
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11px] text-slate-600">
+          <span>
+            <span className="text-slate-400">สต็อก </span>
+            <strong className={clsx('tabular-nums', isOut ? 'text-rose-600' : isCritical ? 'text-amber-600' : 'text-slate-800')}>{item.currentStock}</strong>
+            {pendingStock > 0 && <span className="ml-0.5 text-emerald-600 font-semibold">+{pendingStock} รอ</span>}
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="text-slate-400">ขั้นต่ำ</span>
+            <input
+              type="number"
+              min={0}
+              step={1}
+              value={item.minStock}
+              onChange={(e) => {
+                const n = Math.max(0, Math.floor(Number(e.target.value) || 0))
+                setWarehouseMinMax(item.id, n, (item.maxStock ?? 0) > 0 ? (item.maxStock as number) : null)
+              }}
+              className="w-12 rounded border border-slate-200 bg-white px-1 py-0.5 text-right text-[11px] tabular-nums font-semibold outline-none focus:border-amber-400"
+            />
+            {vel > 0 && (
+              <button type="button" onClick={() => suggestMinStockForItem(item)}
+                title={`แนะนำ ${Math.max(1, Math.ceil(vel * 7))}`}
+                className="text-slate-300 hover:text-amber-500">
+                <Sparkles className="size-3" />
+              </button>
+            )}
+            {effectiveMin > item.minStock && <span className="text-[9px] text-slate-400">(ROP {effectiveMin})</span>}
+          </span>
+          <span>
+            <span className="text-slate-400">เหลือ </span>
+            {daysLeft !== null ? (
+              <strong className={clsx('tabular-nums',
+                daysLeft <= 3 ? 'text-rose-600'
+                : daysLeft <= 7 ? 'text-amber-600'
+                : 'text-slate-700')}>
+                {daysLeft}ว
+              </strong>
+            ) : <span className="text-slate-300">—</span>}
+            {vel > 0 && <span className="ml-0.5 text-[9px] text-slate-400">({vel < 1 ? vel.toFixed(1) : Math.round(vel)}/วัน)</span>}
+          </span>
+          {otherTotal > 0 && (
+            <span className="text-slate-400" title={item.otherBranchStocks.map((b) => `${b.name}: ${b.stock}`).join('\n')}>
+              ⓘ สาขาอื่น {otherTotal}
+            </span>
+          )}
+
+          <span className="mx-1 h-4 w-px bg-slate-200" />
+
+          <span className="flex items-center gap-1">
+            <select
+              value={supplierId}
+              onChange={(e) => setRowSuppliers((cur) => ({ ...cur, [item.id]: e.target.value }))}
+              className="w-40 max-w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs outline-none focus:border-amber-400"
+              title={supplierId ? (suppliers.find((s) => s.id === supplierId)?.name ?? '') : 'เลือกซัพพลายเออร์'}
+            >
+              <option value="">— ซัพ —</option>
+              {(() => {
+                const linked = productSupplierMap.get(item.id) ?? []
+                const list = linked.length > 0
+                  ? linked.map((v) => suppliers.find((s) => s.id === v.supplierId)).filter(Boolean)
+                  : suppliers
+                return list.map((s) => <option key={s!.id} value={s!.id}>{s!.name}</option>)
+              })()}
+            </select>
+            <button type="button" disabled={!supplierId}
+              onClick={() => {
+                const next = { ...defaultSupplierByProduct, [item.id]: supplierId }
+                setDefaultSupplierByProduct(next); saveDefaultSupplierByProduct(next)
+              }}
+              className={clsx('shrink-0 rounded-lg border p-1 transition',
+                defaultSupplierByProduct[item.id] === supplierId
+                  ? 'border-amber-300 bg-amber-50 text-amber-600'
+                  : 'border-slate-200 bg-white text-slate-400 hover:text-amber-500')}
+              title="ตั้งเป็นค่าเริ่มต้น">
+              <Star className="size-3" />
+            </button>
+          </span>
+
+          <span className="flex items-center gap-1">
+            <span className="text-slate-400">MOQ</span>
+            <input type="number" min={1} step={1} disabled={!supplierId} value={moq}
+              onChange={(e) => {
+                if (!supplierId) return
+                const n = Math.max(1, Math.floor(Number(e.target.value) || 1))
+                const upd = { ...supplierMoqById, [supplierId]: n }
+                setSupplierMoqById(upd); saveSupplierMoqById(upd)
+              }}
+              className="w-12 rounded border border-slate-200 bg-white px-1 py-0.5 text-center text-[11px] tabular-nums outline-none focus:border-amber-400 disabled:bg-slate-100" />
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="text-slate-400">LT</span>
+            <input type="number" min={0} step={1} disabled={!supplierId} value={leadTime}
+              onChange={(e) => {
+                if (!supplierId) return
+                const n = Math.max(0, Math.floor(Number(e.target.value) || 0))
+                const upd = { ...supplierLeadTimeById, [supplierId]: n }
+                setSupplierLeadTimeById(upd); saveSupplierLeadTimeById(upd)
+              }}
+              className="w-12 rounded border border-slate-200 bg-white px-1 py-0.5 text-center text-[11px] tabular-nums outline-none focus:border-amber-400 disabled:bg-slate-100" />
+          </span>
+
+          {vp && (best || next) && (
+            <span className="ml-auto text-[10px] font-semibold" title={vp.name}>
+              {best ? (
+                <span className="text-blue-600">
+                  ✓ โปร{best.extraDiscountPct > 0 && ` -${best.extraDiscountPct}%`}{best.freeQty > 0 && ` แถม ${best.freeQty}`}
+                </span>
+              ) : next && (
+                <span className="text-amber-600">
+                  💡 +{next.minQty - suggestQty} →{next.extraDiscountPct > 0 && ` -${next.extraDiscountPct}%`}{next.freeQty > 0 && ` แถม ${next.freeQty}`}
+                </span>
+              )}
+            </span>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  const isEmpty = lowStockProducts.length === 0
+  const useCardLayout = displayProducts.length > 0 && displayProducts.length <= 3
+  const totalEstCostAll = useMemo(() => {
+    let cost = 0
+    for (const item of displayProducts) {
+      const supplierId = resolveSupplierId(item.id)
+      const pendingStock = resolvePendingStock(item.id, supplierId)
+      const moq = resolveMoq(supplierId)
+      const effectiveMin = computeEffectiveMin(item, supplierId)
+      const shortQty = effectiveMin - (item.currentStock + pendingStock)
+      const q = (item.maxStock ?? 0) > 0
+        ? (item.maxStock as number)
+        : resolveSuggestedQty(shortQty, moq)
+      cost += q * getLatestUnitCostForPo(item)
+    }
+    return cost
+  }, [displayProducts, rowSuppliers, defaultSupplierByProduct, supplierMoqById, supplierLeadTimeById, pendingByProductSupplier, salesVelocity])
+
   return (
     <div className={clsx('relative flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-slate-50', className)}>
 
-      {/* ── Header ── */}
+      {/* ── Header (minimal when empty, full when populated) ── */}
       <div className="shrink-0 border-b border-slate-200 bg-white px-4 pb-3 pt-3">
 
         {/* Top row: title + actions */}
@@ -1158,139 +1123,174 @@ export function LowStockWorkspacePage({ className, onOpenPurchaseCart, onGoToCat
           <div className="flex items-center gap-2">
             {onBack && (
               <button type="button" onClick={onBack}
-                className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold text-slate-500 hover:bg-slate-50">
-                <ArrowLeft className="size-3.5" /> กลับ
+                className="flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 shadow-sm transition hover:border-slate-400 hover:bg-slate-100"
+                title="กลับไปหน้าแฟ้มสินค้า">
+                <ArrowLeft className="size-3.5" /> กลับไปแฟ้มสินค้า
               </button>
             )}
             <div>
               <h1 className="text-sm font-bold text-slate-900 leading-tight">สินค้าใกล้หมด</h1>
-              <p className="text-[10px] text-slate-400 leading-tight">สต็อก + รอรับ &lt; ขั้นต่ำ</p>
+              <p className="text-[10px] text-slate-400 leading-tight">
+                {isEmpty ? 'ระบบจะแจ้งเมื่อสต็อก + รอรับ < ขั้นต่ำ' : `${lowStockProducts.length} รายการต้องสั่ง`}
+              </p>
             </div>
           </div>
 
-          <div className="ml-auto flex flex-wrap items-center gap-2">
-            <div className="inline-flex overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
-              <button type="button" onClick={() => setViewMode('flat')}
-                className={clsx(
-                  'flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold transition',
-                  viewMode === 'flat' ? 'bg-slate-100 text-slate-800' : 'text-slate-500 hover:bg-slate-50',
-                )}
-                title="ตารางแบบเรียงรายการ">
-                <List className="size-3.5" />Flat
-              </button>
-              <button type="button" onClick={() => setViewMode('group')}
-                className={clsx(
-                  'flex items-center gap-1 border-l border-slate-200 px-2.5 py-1.5 text-xs font-semibold transition',
-                  viewMode === 'group' ? 'bg-slate-100 text-slate-800' : 'text-slate-500 hover:bg-slate-50',
-                )}
-                title="จัดกลุ่มตามซัพพลายเออร์">
-                <Layers className="size-3.5" />ตามซัพ
-              </button>
-            </div>
-            <button type="button" onClick={suggestAllMinStock}
-              className="flex items-center gap-1.5 rounded-xl border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-700 shadow-sm hover:bg-amber-100"
-              title="คำนวณขั้นต่ำจากยอดขาย 7 วัน">
-              <Sparkles className="size-3.5" />แนะนำขั้นต่ำ
-            </button>
-            <button type="button" onClick={suggestMoqForAllSuppliers}
-              className="flex items-center gap-1.5 rounded-xl border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-700 shadow-sm hover:bg-amber-100"
-              title="คำนวณ MOQ จากประวัติสั่งซื้อ (ทุกซัพในรายการ)">
-              <Sparkles className="size-3.5" />แนะนำ MOQ
-            </button>
-            {onOpenPurchaseCart && (
-              <button type="button" onClick={onOpenPurchaseCart}
-                className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 shadow-sm hover:bg-slate-50">
-                <ShoppingCart className="size-3.5" />ตะกร้า
-              </button>
-            )}
-            {someSelected ? (
-              <button type="button" onClick={addSelectedToPO}
-                className="flex items-center gap-1.5 rounded-xl bg-amber-500 px-3 py-1.5 text-xs font-bold text-white shadow-sm hover:bg-amber-600">
-                <PackagePlus className="size-3.5" />เพิ่มที่เลือก ({selectedIds.size}) ลงตะกร้า
-              </button>
-            ) : (
-              <button type="button" onClick={() => addAllToPO()}
-                className="flex items-center gap-1.5 rounded-xl bg-amber-500 px-3 py-1.5 text-xs font-bold text-white shadow-sm hover:bg-amber-600">
-                <PackagePlus className="size-3.5" />เพิ่มทั้งหมดลงตะกร้า
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* KPI stat cards — click to filter */}
-        <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
-          {([
-            { key: 'out', label: 'หมดสต็อก', count: outOfStock.length, icon: TrendingDown, border: 'border-rose-200', bg: 'bg-rose-50', activeBg: 'bg-rose-100', iconBg: 'bg-rose-100', iconColor: 'text-rose-600', label1Color: 'text-rose-500', numColor: 'text-rose-700', activeBorder: 'border-rose-400 ring-2 ring-rose-200' },
-            { key: 'critical', label: 'วิกฤต', count: critical.length, icon: AlertTriangle, border: 'border-amber-200', bg: 'bg-amber-50', activeBg: 'bg-amber-100', iconBg: 'bg-amber-100', iconColor: 'text-amber-600', label1Color: 'text-amber-500', numColor: 'text-amber-700', activeBorder: 'border-amber-400 ring-2 ring-amber-200' },
-            { key: 'warning', label: 'ใกล้หมด', count: warning.length, icon: CheckCircle2, border: 'border-yellow-200', bg: 'bg-yellow-50', activeBg: 'bg-yellow-100', iconBg: 'bg-yellow-100', iconColor: 'text-yellow-600', label1Color: 'text-yellow-600', numColor: 'text-yellow-700', activeBorder: 'border-yellow-400 ring-2 ring-yellow-200' },
-            { key: 'missing', label: 'ขาดซัพ', count: missingSupplier.length, icon: UserX, border: 'border-slate-200', bg: 'bg-slate-50', activeBg: 'bg-slate-100', iconBg: 'bg-slate-100', iconColor: 'text-slate-600', label1Color: 'text-slate-500', numColor: 'text-slate-700', activeBorder: 'border-slate-400 ring-2 ring-slate-200' },
-          ] as const).map(({ key, label, count, icon: Icon, border, bg, activeBg, iconBg, iconColor, label1Color, numColor, activeBorder }) => (
-            <button
-              key={key}
-              type="button"
-              onClick={() => setUrgencyFilter((f) => f === key ? 'all' : key)}
-              className={clsx(
-                'flex items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition hover:opacity-90 active:scale-[0.98]',
-                urgencyFilter === key ? `${activeBorder} ${activeBg}` : `${border} ${bg}`,
-              )}
-            >
-              <span className={clsx('flex size-8 shrink-0 items-center justify-center rounded-lg', iconBg)}>
-                <Icon className={clsx('size-4', iconColor)} />
-              </span>
-              <div className="min-w-0">
-                <p className={clsx('text-[9px] font-bold uppercase tracking-wide', label1Color)}>{label}</p>
-                <p className={clsx('text-xl font-black leading-none tabular-nums', numColor)}>{count}</p>
+          {!isEmpty && (
+            <div className="ml-auto flex flex-wrap items-center gap-2">
+              <div className="inline-flex overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+                <button type="button" onClick={() => setViewModeUser('flat')}
+                  className={clsx(
+                    'flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold transition',
+                    viewMode === 'flat' ? 'bg-slate-100 text-slate-800' : 'text-slate-500 hover:bg-slate-50',
+                  )}
+                  title="ตารางแบบเรียงรายการ">
+                  <List className="size-3.5" />Flat
+                </button>
+                <button type="button" onClick={() => setViewModeUser('group')}
+                  className={clsx(
+                    'flex items-center gap-1 border-l border-slate-200 px-2.5 py-1.5 text-xs font-semibold transition',
+                    viewMode === 'group' ? 'bg-slate-100 text-slate-800' : 'text-slate-500 hover:bg-slate-50',
+                  )}
+                  title="จัดกลุ่มตามซัพพลายเออร์">
+                  <Layers className="size-3.5" />ตามซัพ
+                </button>
               </div>
-              {urgencyFilter === key && (
-                <span className={clsx('ml-auto shrink-0 rounded-full px-1.5 py-0.5 text-[8px] font-black uppercase', activeBg, numColor)}>
-                  กรอง
+              <details className="relative">
+                <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded-xl border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-700 shadow-sm hover:bg-amber-100">
+                  <Sparkles className="size-3.5" />แนะนำอัตโนมัติ
+                  <ChevronDown className="size-3" />
+                </summary>
+                <div className="absolute right-0 z-20 mt-1 min-w-[14rem] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-lg">
+                  <button type="button" onClick={(e) => { suggestAllMinStock(); (e.currentTarget.closest('details') as HTMLDetailsElement | null)?.removeAttribute('open') }}
+                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-slate-700 hover:bg-amber-50">
+                    <Sparkles className="size-3.5 shrink-0 text-amber-500" />
+                    <span className="flex-1">
+                      <span className="block font-semibold">ขั้นต่ำ</span>
+                      <span className="block text-[10px] text-slate-400">จากยอดขาย 7 วัน</span>
+                    </span>
+                  </button>
+                  <button type="button" onClick={(e) => { suggestMoqForAllSuppliers(); (e.currentTarget.closest('details') as HTMLDetailsElement | null)?.removeAttribute('open') }}
+                    className="flex w-full items-center gap-2 border-t border-slate-100 px-3 py-2 text-left text-xs text-slate-700 hover:bg-amber-50">
+                    <Sparkles className="size-3.5 shrink-0 text-amber-500" />
+                    <span className="flex-1">
+                      <span className="block font-semibold">MOQ</span>
+                      <span className="block text-[10px] text-slate-400">จากประวัติสั่งซื้อ (ทุกซัพ)</span>
+                    </span>
+                  </button>
+                </div>
+              </details>
+              <button
+                type="button"
+                onClick={addSelectedToCart}
+                disabled={!someSelected}
+                className={clsx(
+                  'flex items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-bold shadow-sm transition',
+                  someSelected
+                    ? 'bg-amber-500 text-white hover:bg-amber-600'
+                    : 'bg-slate-100 text-slate-400 cursor-not-allowed',
+                )}
+              >
+                <ShoppingCart className="size-4" />
+                <span>
+                  ใส่ตะกร้า
+                  {someSelected && ` · ${selectedIds.size} รายการ`}
                 </span>
-              )}
-            </button>
-          ))}
-        </div>
-
-        {/* Search + filter info */}
-        <div className="mt-2.5 flex items-center gap-2">
-          <div className="relative flex-1 max-w-sm">
-            <Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-slate-400" />
-            <input type="search" value={lowStockSearch} onChange={(e) => setLowStockSearch(e.target.value)}
-              placeholder="ค้นหา SKU / ชื่อสินค้า…"
-              className="w-full rounded-xl border border-slate-200 bg-white py-1.5 pl-9 pr-3 text-xs outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-100" />
-          </div>
-          {urgencyFilter !== 'all' && (
-            <button type="button" onClick={() => setUrgencyFilter('all')}
-              className="flex items-center gap-1 rounded-xl border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-slate-500 hover:bg-slate-50">
-              ✕ ล้างตัวกรอง
-            </button>
+              </button>
+            </div>
           )}
         </div>
+
+        {/* KPI strip — compact, only when populated */}
+        {!isEmpty && (
+          <div className="mt-3 flex flex-wrap items-center gap-1.5">
+            {([
+              { key: 'out', label: 'หมด', count: outOfStock.length, dot: 'bg-rose-500', activeBg: 'bg-rose-100', activeText: 'text-rose-700', activeBorder: 'border-rose-400' },
+              { key: 'critical', label: 'วิกฤต', count: critical.length, dot: 'bg-amber-500', activeBg: 'bg-amber-100', activeText: 'text-amber-700', activeBorder: 'border-amber-400' },
+              { key: 'warning', label: 'ใกล้หมด', count: warning.length, dot: 'bg-yellow-400', activeBg: 'bg-yellow-100', activeText: 'text-yellow-700', activeBorder: 'border-yellow-400' },
+              { key: 'missing', label: 'ขาดซัพ', count: missingSupplier.length, dot: 'bg-slate-400', activeBg: 'bg-slate-100', activeText: 'text-slate-700', activeBorder: 'border-slate-400' },
+            ] as const).map(({ key, label, count, dot, activeBg, activeText, activeBorder }) => {
+              const active = urgencyFilter === key
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setUrgencyFilter((f) => f === key ? 'all' : key)}
+                  className={clsx(
+                    'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold transition active:scale-95',
+                    active
+                      ? `${activeBorder} ${activeBg} ${activeText}`
+                      : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50',
+                  )}
+                >
+                  <span className={clsx('size-1.5 shrink-0 rounded-full', dot)} />
+                  <span>{count}</span>
+                  <span className={clsx(active ? '' : 'text-slate-500')}>{label}</span>
+                </button>
+              )
+            })}
+            <div className="mx-1 h-4 w-px bg-slate-200" />
+            <div className="relative flex-1 min-w-[10rem] max-w-xs">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3 -translate-y-1/2 text-slate-400" />
+              <input type="search" value={lowStockSearch} onChange={(e) => setLowStockSearch(e.target.value)}
+                placeholder="ค้นหา SKU / ชื่อสินค้า…"
+                className="w-full rounded-full border border-slate-200 bg-white py-1 pl-7 pr-3 text-[11px] outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-100" />
+            </div>
+            {urgencyFilter !== 'all' && (
+              <button type="button" onClick={() => setUrgencyFilter('all')}
+                className="ml-auto flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2 py-1 text-[10px] font-semibold text-slate-500 hover:bg-slate-50">
+                ✕ ล้างตัวกรอง
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* ── Table ── */}
       <div className="min-h-0 flex-1 overflow-auto">
         {displayProducts.length === 0 ? (
-          <div className="flex h-full flex-col items-center justify-center gap-4 text-slate-300">
-            <span className="flex size-16 items-center justify-center rounded-2xl border border-slate-200 bg-white">
-              <PackagePlus className="size-8 stroke-[1.2] text-slate-300" />
-            </span>
-            <div className="text-center">
-              <p className="text-sm font-semibold text-slate-400">
-                {lowStockProducts.length === 0 ? 'สต็อกเพียงพอทุกรายการ'
-                  : urgencyFilter === 'missing' ? 'ทุกรายการมีซัพพลายเออร์แล้ว'
-                  : urgencyFilter !== 'all' ? 'ไม่มีรายการในกลุ่มนี้'
-                  : 'ไม่พบรายการที่ค้นหา'}
-              </p>
-              {lowStockProducts.length === 0 && (
-                <p className="mt-1 text-xs text-slate-400">ตั้งค่าขั้นต่ำในหน้า «สั่งซื้อสินค้า» เพื่อให้ระบบแจ้งเตือน</p>
-              )}
-              {urgencyFilter !== 'all' && lowStockProducts.length > 0 && (
-                <button type="button" onClick={() => setUrgencyFilter('all')}
-                  className="mt-2 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-500 hover:bg-slate-50">
-                  ดูทั้งหมด
+          isEmpty ? (
+            <div className="flex h-full flex-col items-center justify-center gap-5">
+              <div className="flex size-24 items-center justify-center rounded-full bg-emerald-50 ring-8 ring-emerald-50/40">
+                <Sparkles className="size-12 text-emerald-400" strokeWidth={1.4} />
+              </div>
+              <div className="text-center">
+                <p className="text-lg font-bold text-slate-700">สต็อกเพียงพอทุกรายการ</p>
+                <p className="mt-1 text-xs text-slate-500">ระบบจะแจ้งเมื่อสินค้าต่ำกว่าขั้นต่ำ</p>
+              </div>
+              {onGoToCatalog && (
+                <button type="button" onClick={onGoToCatalog}
+                  className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 shadow-sm hover:bg-slate-50">
+                  <PackagePlus className="size-3.5" />ไปแฟ้มสินค้า
                 </button>
               )}
+              <p className="text-[10px] text-slate-400">
+                ตั้งค่าขั้นต่ำในแฟ้มสินค้า เพื่อให้ระบบแจ้งเตือน
+              </p>
             </div>
+          ) : (
+            <div className="flex h-full flex-col items-center justify-center gap-4 text-slate-300">
+              <span className="flex size-16 items-center justify-center rounded-2xl border border-slate-200 bg-white">
+                <PackagePlus className="size-8 stroke-[1.2] text-slate-300" />
+              </span>
+              <div className="text-center">
+                <p className="text-sm font-semibold text-slate-400">
+                  {urgencyFilter === 'missing' ? 'ทุกรายการมีซัพพลายเออร์แล้ว'
+                    : urgencyFilter !== 'all' ? 'ไม่มีรายการในกลุ่มนี้'
+                    : 'ไม่พบรายการที่ค้นหา'}
+                </p>
+                {urgencyFilter !== 'all' && (
+                  <button type="button" onClick={() => setUrgencyFilter('all')}
+                    className="mt-2 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-500 hover:bg-slate-50">
+                    ดูทั้งหมด
+                  </button>
+                )}
+              </div>
+            </div>
+          )
+        ) : useCardLayout ? (
+          <div className="space-y-2 px-4 py-3">
+            {displayProducts.map((item) => renderItemCard(item))}
           </div>
         ) : (
           <table className="w-full table-fixed border-collapse text-left text-[11px] leading-tight">
@@ -1298,20 +1298,17 @@ export function LowStockWorkspacePage({ className, onOpenPurchaseCart, onGoToCat
               <col className="w-8" />
               <col className="w-[5.5rem]" />
               <col />
+              <col className="w-[4rem]" />
               <col className="w-[4.5rem]" />
-              <col className="w-[4.5rem]" />
-              <col className="w-[3rem]" />
-              <col className="w-[3rem]" />
-              <col className="w-[4.5rem]" />
-              <col className="w-[4.5rem]" />
-              <col className="min-w-[9rem] w-[18%]" />
+              <col className="w-[4rem]" />
+              <col className="w-[4rem]" />
+              <col className="w-[11rem]" />
               <col className="w-[3rem]" />
               <col className="w-[3rem]" />
               <col className="w-[3.5rem]" />
-              <col className="w-[8rem]" />
             </colgroup>
             <thead className="sticky top-0 z-[1] border-b border-slate-200 bg-white/95 backdrop-blur">
-              <tr className="text-[9px] font-bold uppercase tracking-wide text-slate-500">
+              <tr className="text-[9px] font-bold uppercase tracking-wide text-slate-500 whitespace-nowrap">
                 <th className="px-2 py-2 text-center">
                   <input type="checkbox" checked={allSelected} onChange={toggleSelectAll}
                     className="size-3.5 cursor-pointer rounded accent-amber-500" />
@@ -1322,23 +1319,20 @@ export function LowStockWorkspacePage({ className, onOpenPurchaseCart, onGoToCat
                 </th>
                 <th className="px-2 py-2 text-center">สถานะ</th>
                 <th className="px-2 py-2 text-right">
-                  <SortHeaderButton label="สต็อก / ขาด" sortKey="stock" current={sortKey} dir={sortDir} onClick={toggleSort} align="right" />
+                  <SortHeaderButton label="สต็อก" sortKey="stock" current={sortKey} dir={sortDir} onClick={toggleSort} align="right" />
                 </th>
-                <th className="px-2 py-2 text-right" title={b0?.name}>{b0?.name?.slice(0,3) ?? 'ส1'}</th>
-                <th className="px-2 py-2 text-right" title={b1?.name}>{b1?.name?.slice(0,3) ?? 'ส2'}</th>
                 <th className="px-2 py-2 text-right">
                   <SortHeaderButton label="ขั้นต่ำ" sortKey="min" current={sortKey} dir={sortDir} onClick={toggleSort} align="right" />
                 </th>
                 <th className="px-2 py-2 text-right">
-                  <SortHeaderButton label="เหลือ / ขาย" sortKey="days" current={sortKey} dir={sortDir} onClick={toggleSort} align="right" />
+                  <SortHeaderButton label="เหลือ" sortKey="days" current={sortKey} dir={sortDir} onClick={toggleSort} align="right" />
                 </th>
-                <th className="px-2 py-2">ซัพพลายเออร์</th>
+                <th className="px-2 py-2">ซัพ</th>
                 <th className="px-2 py-2 text-right" title="ขั้นต่ำต่อสั่ง">MOQ</th>
                 <th className="px-2 py-2 text-right" title="ลีดไทม์ (วัน) — ใช้คำนวณจุดสั่ง">LT</th>
                 <th className="px-2 py-2 text-right">
                   <SortHeaderButton label="สั่ง" sortKey="qty" current={sortKey} dir={sortDir} onClick={toggleSort} align="right" />
                 </th>
-                <th className="px-2 py-2 text-center">การดำเนินการ</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -1346,6 +1340,10 @@ export function LowStockWorkspacePage({ className, onOpenPurchaseCart, onGoToCat
                 supplierGroups.flatMap((group) => {
                   const isCollapsed = collapsedSuppliers.has(group.supplierId || '__missing__')
                   const groupKey = group.supplierId || '__missing__'
+                  // Skip group header noise when there's only 1 group (often "ยังไม่ได้เลือกซัพ" with single item)
+                  if (supplierGroups.length === 1) {
+                    return group.items.map((item) => renderItemRow(item))
+                  }
                   const groupQty = group.items.reduce((s, it) => {
                     const sid = resolveSupplierId(it.id)
                     const pend = resolvePendingStock(it.id, sid)
@@ -1363,7 +1361,7 @@ export function LowStockWorkspacePage({ className, onOpenPurchaseCart, onGoToCat
                   }, 0)
                   const headerRow = (
                     <tr key={`grp-${groupKey}`} className="bg-slate-100/80">
-                      <td colSpan={14} className="px-3 py-2">
+                      <td colSpan={11} className="px-3 py-2">
                         <div className="flex flex-wrap items-center gap-2">
                           <button type="button"
                             onClick={() => setCollapsedSuppliers((cur) => {
@@ -1379,12 +1377,29 @@ export function LowStockWorkspacePage({ className, onOpenPurchaseCart, onGoToCat
                             {group.items.length} รายการ · {groupQty.toLocaleString('th-TH')} ชิ้น
                             {groupCost > 0 && ` · ฿${groupCost.toLocaleString('th-TH', { maximumFractionDigits: 0 })}`}
                           </span>
-                          {group.supplierId && (
-                            <button type="button" onClick={() => addAllToPO(group.items)}
-                              className="ml-auto flex items-center gap-1 rounded-lg bg-amber-500 px-2.5 py-1 text-[10px] font-bold text-white shadow-sm hover:bg-amber-600">
-                              <PackagePlus className="size-3" />เพิ่มกลุ่มนี้ลงตะกร้า
-                            </button>
-                          )}
+                          {group.supplierId && (() => {
+                            const now = new Date()
+                            const supPromos = vendorPromos.filter(
+                              (vp) => vp.enabled && (vp.supplierId === '' || vp.supplierId === group.supplierId) &&
+                                new Date(vp.startDate) <= now && new Date(vp.endDate + 'T23:59:59') >= now,
+                            )
+                            if (supPromos.length === 0) return null
+                            return (
+                              <span className="flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-bold text-blue-700"
+                                title={supPromos.map((p) => p.name).join(' · ')}>
+                                🏷 มีโปรซัพ {supPromos.length}
+                              </span>
+                            )
+                          })()}
+                          <button type="button"
+                            onClick={() => setSelectedIds((prev) => {
+                              const n = new Set(prev)
+                              for (const it of group.items) n.add(it.id)
+                              return n
+                            })}
+                            className="ml-auto flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-700 hover:bg-slate-50">
+                            ✓ เลือกทั้งกลุ่ม
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -1452,10 +1467,6 @@ export function LowStockWorkspacePage({ className, onOpenPurchaseCart, onGoToCat
             </div>
           </div>
         </div>
-      )}
-
-      {selfBuyTarget && (
-        <SelfBuyModal target={selfBuyTarget} onClose={() => setSelfBuyTarget(null)} onDone={() => { setSelfBuyTarget(null); setTick((n) => n + 1); showNotice('success', 'รับเข้าสต็อกสำเร็จ') }} />
       )}
 
       {notice && (

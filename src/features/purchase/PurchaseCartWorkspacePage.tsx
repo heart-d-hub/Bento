@@ -373,7 +373,15 @@ export function PurchaseCartWorkspacePage({ className, onGoToCatalog, onGoToPurc
     let seq = 0
     for (const [gSupId, gItems] of groups2) {
       const gSupplier = suppliers.find((s) => s.id === gSupId)
-      const draft = gSupId ? existing.find((o) => o.status === 'ordered' && o.supplierId === gSupId && o.receiveBatches.length === 0) : undefined
+      const draft = gSupId
+        ? existing.find(
+            (o) =>
+              o.status === 'ordered' &&
+              o.supplierId === gSupId &&
+              o.receiveBatches.length === 0 &&
+              o.paymentMode === 'unpaid',
+          )
+        : undefined
       if (gSupId) {
         for (const item of gItems) {
           linkProductToSupplier(gSupId, { productId: item.productId, sku: item.sku, name: item.name, unitCost: item.unitCost })

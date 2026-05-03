@@ -4,7 +4,7 @@ import { loadPurchaseOrders } from '@/features/purchase/data/poStore'
 import {
   CATALOG_CART_CHANGED,
   loadCatalogCart,
-  saveCatalogCartSilent,
+  saveCatalogCart,
   type CatalogCartItem,
 } from '@/features/purchase/data/catalogCartStore'
 
@@ -2195,9 +2195,21 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
   const [vendorPromoModalOpen, setVendorPromoModalOpen] = useState(false)
 
 
-  // Sync when another panel (e.g. LowStock) adds items
+  // Sync when another panel (e.g. LowStock) adds items — dedupe to avoid render loop when this panel emits its own change
   useEffect(() => {
-    const handler = () => setCartItems(loadCatalogCart())
+    const handler = () => {
+      const fresh = loadCatalogCart()
+      setCartItems((cur) => {
+        if (
+          cur.length === fresh.length &&
+          cur.every((c, i) => {
+            const f = fresh[i]
+            return f && c.productId === f.productId && c.qty === f.qty && c.unitCost === f.unitCost && c.supplierId === f.supplierId
+          })
+        ) return cur
+        return fresh as CartItem[]
+      })
+    }
     window.addEventListener(CATALOG_CART_CHANGED, handler)
     return () => window.removeEventListener(CATALOG_CART_CHANGED, handler)
   }, [])
@@ -2571,7 +2583,7 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
 
   const saveCart = (items: CartItem[]) => {
     setCartItems(items)
-    saveCatalogCartSilent(items)
+    saveCatalogCart(items)
   }
 
   const addToCart = (p: Product) => {
@@ -2594,7 +2606,7 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
           supplierName: autoSup?.name,
         }]
       }
-      saveCatalogCartSilent(next)
+      saveCatalogCart(next)
       return next
     })
     setCartOpen(true)
@@ -2603,7 +2615,7 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
   const updateCartItem = (productId: string, patch: Partial<CartItem>) => {
     setCartItems((prev) => {
       const next = prev.map((i) => i.productId === productId ? { ...i, ...patch } : i)
-      saveCatalogCartSilent(next)
+      saveCatalogCart(next)
       return next
     })
   }
@@ -2611,7 +2623,7 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
   const removeFromCart = (productId: string) => {
     setCartItems((prev) => {
       const next = prev.filter((i) => i.productId !== productId)
-      saveCatalogCartSilent(next)
+      saveCatalogCart(next)
       return next
     })
   }
@@ -2644,7 +2656,7 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
           },
         ]
       }
-      saveCatalogCartSilent(next)
+      saveCatalogCart(next)
       return next
     })
     setCartOpen(true)
@@ -2656,7 +2668,6 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
         className={className}
         onBack={() => setLowStockMode(false)}
         onGoToCatalog={() => setLowStockMode(false)}
-        onOpenPurchaseCart={() => { setLowStockMode(false); setCartOpen(true) }}
       />
     )
   }
@@ -3252,7 +3263,7 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
                         const next = idx >= 0
                           ? prev.map((i, n) => n === idx ? { ...i, qty: i.qty + 1 } : i)
                           : [...prev, { productId: item.key, sku: item.sku, name: item.name, qty: 1, unitCost: item.lastPrice, supplierId: item.supplierId || undefined, supplierName: item.supplierName }]
-                        saveCatalogCartSilent(next)
+                        saveCatalogCart(next)
                         return next
                       })
                       setCartOpen(true)

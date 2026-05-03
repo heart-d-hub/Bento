@@ -464,10 +464,9 @@ export function AddProductModal({
   const [dimUnit, setDimUnit] = useState<DimUnit>('mm')
   const [supplierListStr, setSupplierListStr] = useState('')
   const [buyScheme, setBuyScheme] = useState('1+0')
-  const [pd1, setPd1] = useState('')
-  const [pd2, setPd2] = useState('')
-  const [pd3, setPd3] = useState('')
-  const [pd4, setPd4] = useState('')
+  const [discountChain, setDiscountChain] = useState('')
+  const [bonusPaidStr, setBonusPaidStr] = useState('')
+  const [bonusFreeStr, setBonusFreeStr] = useState('')
   const [costStr, setCostStr] = useState('')
   const [costManualOverride, setCostManualOverride] = useState(false)
   const [costSource, setCostSource] = useState<'manual' | 'avg' | 'last'>('manual')
@@ -832,10 +831,9 @@ export function AddProductModal({
     setDimUnit('mm')
     setSupplierListStr('')
     setBuyScheme('1+0')
-    setPd1('')
-    setPd2('')
-    setPd3('')
-    setPd4('')
+    setDiscountChain('')
+    setBonusPaidStr('')
+    setBonusFreeStr('')
     setCostStr('')
     setCostManualOverride(false)
     setSellRows(Array.from({ length: 4 }, () => ({ markup: '', prices: [''] })))
@@ -965,11 +963,14 @@ export function AddProductModal({
       setSupplierListStr(
         p.supplierListPrice !== undefined && p.supplierListPrice > 0 ? formatMoneyInput(p.supplierListPrice) : '',
       )
-      const pcts = p.purchaseDiscountPcts ?? [0, 0, 0, 0]
-      setPd1(pcts[0] ? String(pcts[0]) : '')
-      setPd2(pcts[1] ? String(pcts[1]) : '')
-      setPd3(pcts[2] ? String(pcts[2]) : '')
-      setPd4(pcts[3] ? String(pcts[3]) : '')
+      setDiscountChain(
+        (p.purchaseDiscountPcts ?? [])
+          .filter((v): v is number => typeof v === 'number' && v > 0)
+          .map((v) => String(v))
+          .join('+'),
+      )
+      setBonusPaidStr((p.poLastBonusPaid ?? 0) > 0 ? String(p.poLastBonusPaid) : '')
+      setBonusFreeStr((p.poLastBonusFree ?? 0) > 0 ? String(p.poLastBonusFree) : '')
       setBuyScheme(parseBuyScheme(p.scheme)?.normalized ?? p.scheme)
       setCostStr(p.costPrice > 0 ? formatMoneyInput(p.costPrice) : '')
       setCostManualOverride(p.costPrice > 0 || Boolean(p.costEnteredManually))
@@ -1089,10 +1090,9 @@ export function AddProductModal({
     setVehicleFitOpen(vehicleRowsFromProduct(copySource).length > 0)
     setSupplierListStr('')
     setBuyScheme(parseBuyScheme(copySource.scheme)?.normalized ?? '1+0')
-    setPd1('')
-    setPd2('')
-    setPd3('')
-    setPd4('')
+    setDiscountChain('')
+    setBonusPaidStr('')
+    setBonusFreeStr('')
     setCostStr('')
     setCostManualOverride(false)
     const colN = Math.max(1, nu.length)
@@ -1145,7 +1145,13 @@ export function AddProductModal({
     })
   }, [])
 
-  const pctsPreview: [number, number, number, number] = [parsePct(pd1), parsePct(pd2), parsePct(pd3), parsePct(pd4)]
+  const pctsFromChain = discountChain.split('+').slice(0, 4).map((s) => parsePct(s))
+  const pctsPreview: [number, number, number, number] = [
+    pctsFromChain[0] ?? 0,
+    pctsFromChain[1] ?? 0,
+    pctsFromChain[2] ?? 0,
+    pctsFromChain[3] ?? 0,
+  ]
   const listPPreview = parseMoney(supplierListStr)
   const schemePreview = parseBuyScheme(buyScheme)
   const vatMultiplier = vatMode === 'no_vat' ? 1 : 1 + VAT_RATE
@@ -1569,8 +1575,16 @@ export function AddProductModal({
       avgCost: (editingProduct?.avgCost ?? 0) > 0 ? editingProduct!.avgCost : costPrice,
       sellPrice,
       vatMode: undefined,
-      supplierListPrice: undefined,
-      purchaseDiscountPcts: undefined,
+      supplierListPrice: listP !== undefined && listP > 0 ? listP : undefined,
+      purchaseDiscountPcts: pctsPreview.some((v) => v > 0) ? pctsPreview : undefined,
+      poLastBonusPaid: (() => {
+        const n = Math.floor(Number(bonusPaidStr) || 0)
+        return n > 0 ? n : undefined
+      })(),
+      poLastBonusFree: (() => {
+        const n = Math.floor(Number(bonusFreeStr) || 0)
+        return n > 0 ? n : undefined
+      })(),
       costEnteredManually: costManualOverride || costPrice > 0 ? true : undefined,
       sellTierPercentBasis: sellTierPercentBasis === 'list_discount' ? 'list_discount' : undefined,
       sellPriceTiers,
@@ -2488,6 +2502,105 @@ export function AddProductModal({
                     </div>
                   )}
 
+                  {/* List price + discount chain — drives autoCostPreview */}
+                  <div className={clsx(
+                    'mb-2 rounded-md border px-2 py-1.5 transition',
+                    listPPreview !== undefined && listPPreview > 0
+                      ? 'border-violet-200 bg-violet-50/50'
+                      : 'border-slate-200 bg-white/60',
+                  )}>
+                    <div className="mb-1 flex items-center justify-between">
+                      <span className="text-[10px] font-semibold text-slate-600">ราคาตั้ง × ส่วนลดซัพพลายเออร์</span>
+                      {editingProduct?.poLastDiscountChain && (
+                        <button
+                          type="button"
+                          onClick={() => setDiscountChain(editingProduct.poLastDiscountChain!.trim())}
+                          className="text-[9px] text-violet-600 underline hover:text-violet-800"
+                          title={`ดึงส่วนลดจากโปรซื้อล่าสุด: ${editingProduct.poLastDiscountChain}`}
+                        >
+                          📥 จากโปรซื้อล่าสุด
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1">
+                      <span className="text-[10px] text-slate-500">฿</span>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        value={supplierListStr}
+                        onChange={(e) => setSupplierListStr(e.target.value)}
+                        placeholder="ราคาตั้ง"
+                        className="w-20 rounded border border-violet-200 bg-white px-2 py-0.5 text-right text-xs tabular-nums outline-none focus:border-violet-400"
+                      />
+                      <span className="mx-1 text-[10px] text-slate-400">ลด %</span>
+                      <input
+                        type="text"
+                        inputMode="text"
+                        value={discountChain}
+                        onChange={(e) => setDiscountChain(e.target.value)}
+                        placeholder="เช่น 45+10"
+                        className="flex-1 min-w-[6rem] rounded border border-violet-200 bg-white px-2 py-0.5 text-xs tabular-nums outline-none focus:border-violet-400"
+                      />
+                    </div>
+                    <div className="mt-1 flex flex-wrap items-center gap-1">
+                      <span className="text-[10px] text-slate-500">+ โปรซื้อ</span>
+                      <input
+                        type="number"
+                        min={0}
+                        step={1}
+                        value={bonusPaidStr}
+                        onChange={(e) => setBonusPaidStr(e.target.value)}
+                        placeholder="ซื้อ"
+                        className="w-12 rounded border border-violet-200 bg-white px-1 py-0.5 text-center text-xs tabular-nums outline-none focus:border-violet-400"
+                      />
+                      <span className="text-slate-300">+</span>
+                      <input
+                        type="number"
+                        min={0}
+                        step={1}
+                        value={bonusFreeStr}
+                        onChange={(e) => setBonusFreeStr(e.target.value)}
+                        placeholder="แถม"
+                        className="w-12 rounded border border-violet-200 bg-white px-1 py-0.5 text-center text-xs tabular-nums outline-none focus:border-violet-400"
+                      />
+                      <span className="text-[10px] text-slate-400">ชิ้น</span>
+                    </div>
+                    {listPPreview !== undefined && listPPreview > 0 && (
+                      <div className="mt-1 flex flex-wrap items-center gap-1 font-mono text-[10px] text-slate-600">
+                        <span className="font-bold">฿{listPPreview.toLocaleString('th-TH', { maximumFractionDigits: 2 })}</span>
+                        {pctsPreview.map((p, i) => p > 0 ? (
+                          <span key={i} className="text-violet-600">× {(100 - p).toFixed(0)}%</span>
+                        ) : null)}
+                        {autoCostPreview !== null && (
+                          <>
+                            <span className="text-slate-300">→</span>
+                            <span className={clsx(
+                              'font-bold',
+                              costManualOverride ? 'text-slate-500' : 'text-violet-700',
+                            )}>
+                              ทุน ฿{autoCostPreview.toFixed(2)}
+                              {costManualOverride && (
+                                <span className="ml-1 text-[9px] font-normal text-slate-400">(ทุนถูกเขียนทับ)</span>
+                              )}
+                            </span>
+                          </>
+                        )}
+                      </div>
+                    )}
+                    {(() => {
+                      const paid = Math.floor(Number(bonusPaidStr) || 0)
+                      const free = Math.floor(Number(bonusFreeStr) || 0)
+                      if (paid <= 0 || free <= 0 || autoCostPreview === null) return null
+                      const eff = (autoCostPreview * paid) / (paid + free)
+                      return (
+                        <p className="mt-0.5 font-mono text-[10px] text-emerald-600">
+                          + ซื้อ {paid} แถม {free} → ทุน effective ฿{eff.toFixed(2)}
+                          <span className="ml-1 text-[9px] text-slate-400">(เมื่อสั่งทวีคูณของ {paid})</span>
+                        </p>
+                      )
+                    })()}
+                  </div>
+
                   {/* Cost input row */}
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-[9px] text-slate-400">
@@ -2514,7 +2627,7 @@ export function AddProductModal({
                     </div>
                   </div>
                   {autoCostPreview !== null && !costManualOverride && (
-                    <p className="mt-0.5 text-[9px] text-slate-400">คำนวณจากราคาตั้ง + ส่วนลดซัพพลายเออร์</p>
+                    <p className="mt-0.5 text-[9px] text-slate-400">คำนวณจากราคาตั้ง + ส่วนลดซัพพลายเออร์ + VAT</p>
                   )}
                 </div>
 
