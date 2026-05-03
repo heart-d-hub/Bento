@@ -914,8 +914,10 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
   useEffect(() => {
     setPosSpotlightUrls([])
     setPosSpotlightIndex(0)
-    setPosSpotlightExpanded(false)
-    if (!posSpotlight) return
+    if (!posSpotlight) {
+      setPosSpotlightExpanded(false)
+      return
+    }
     invoke<string[]>('get_product_images_b64', { sku: posSpotlight.sku })
       .then((urls) => setPosSpotlightUrls(urls))
       .catch(() => null)
@@ -950,9 +952,41 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
     [checkoutPaymentType, mixedTransferNum, totals.grandTotal],
   )
 
+  /** Shows the product picture on BOTH the cashier's screen (local floating panel)
+   *  and the customer-facing display. Used by POS cart lines / receipt rows. */
   const showProductImage = (item: { code: string; name: string; price?: number; unit?: string }) => {
     setPosSpotlight({ sku: item.code, name: item.name, price: item.price ?? 0, unit: item.unit ?? '' })
-    writeCfdState({ ...readCfdState(), spotlightSku: item.code, updatedAt: Date.now() })
+    setPosSpotlightExpanded(true)
+    writeCfdState({
+      ...readCfdState(),
+      spotlightSku: item.code,
+      spotlightExpanded: true,
+      spotlightImageIndex: 0,
+      updatedAt: Date.now(),
+    })
+  }
+
+  /** Projects to the customer-facing display only — no local cashier popup.
+   *  Used by the product picker so the cashier can keep browsing without
+   *  the picture jumping in front of their own UI. */
+  const showProductImageOnCustomer = (item: { code: string; name: string; price?: number; unit?: string }) => {
+    writeCfdState({
+      ...readCfdState(),
+      spotlightSku: item.code,
+      spotlightExpanded: true,
+      spotlightImageIndex: 0,
+      updatedAt: Date.now(),
+    })
+  }
+
+  const clearProductImage = () => {
+    setPosSpotlight(null)
+    writeCfdState({
+      ...readCfdState(),
+      spotlightSku: undefined,
+      spotlightExpanded: false,
+      updatedAt: Date.now(),
+    })
   }
 
   const removeLine = (id: number) => {
@@ -2968,13 +3002,14 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
 
       <ProductPickerModal
         open={showProductModal}
-        onClose={() => setShowProductModal(false)}
+        onClose={() => { setShowProductModal(false); clearProductImage() }}
         products={mockProducts}
         productHaystackMap={productHaystackMap}
         defaultPriceLevelIndex={customerTypeToPriceLevelIndex(customer.customerType)}
         isDark={isDark}
         onAddToCart={(p, opts) => addProductToCart(p, opts)}
         onShowProductImage={showProductImage}
+        onClearProductImage={clearProductImage}
         customerAccountCode={isWalkIn ? undefined : customer.accountCode}
       />
 
@@ -3467,85 +3502,37 @@ export function PosWorkspacePage({ className }: PosWorkspacePageProps) {
                 ))}
               </div>
             ) : null
-
-            if (posSpotlightExpanded) {
-              return (
-                <div
-                  className="fixed inset-0 z-[360] flex flex-col items-center justify-center gap-5 bg-white/95 backdrop-blur-md dark:bg-[#0d0f17]/95 cursor-zoom-out"
-                  onClick={() => { setPosSpotlightExpanded(false); writeCfdState({ ...readCfdState(), spotlightExpanded: false, updatedAt: Date.now() }) }}
-                >
-                  <div className="flex h-[60vh] w-[60vh] max-w-[85vw] items-center justify-center overflow-hidden rounded-3xl border border-slate-100 bg-slate-50 shadow-2xl dark:border-[#2a2d3e] dark:bg-[#12141c]">
-                    {currentUrl ? (
-                      <img src={currentUrl} alt={posSpotlight.name} className="h-full w-full object-contain" />
-                    ) : (
-                      <svg viewBox="0 0 24 24" className="size-32 text-slate-200 dark:text-slate-700" fill="none" stroke="currentColor" strokeWidth={1}>
-                        <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
-                      </svg>
-                    )}
-                  </div>
-                  {thumbnails}
-                  <div className="text-center space-y-1 px-8" onClick={(e) => e.stopPropagation()}>
-                    <p className="text-2xl font-black leading-tight text-slate-900 dark:text-white">{posSpotlight.name}</p>
-                    {posSpotlight.price > 0 && (
-                      <p className="text-lg font-semibold text-orange-500">
-                        ฿{posSpotlight.price.toLocaleString('th-TH', { minimumFractionDigits: 2 })}{' '}
-                        <span className="text-sm font-normal text-slate-400">/ {posSpotlight.unit}</span>
-                      </p>
-                    )}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={(e) => { e.stopPropagation(); setPosSpotlight(null); writeCfdState({ ...readCfdState(), spotlightSku: undefined, updatedAt: Date.now() }) }}
-                    className="rounded-xl border border-slate-200 bg-white px-5 py-2 text-sm font-semibold text-slate-500 shadow-sm transition hover:bg-slate-50 dark:border-[#2a2d3e] dark:bg-[#1a1f35] dark:text-slate-300"
-                  >
-                    ปิด
-                  </button>
-                </div>
-              )
-            }
-
             return (
-              <div className="fixed inset-0 z-[360] flex items-center justify-center p-4 pointer-events-none">
-                <div className="pointer-events-auto w-72 overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl dark:border-[#2a2d3e] dark:bg-[#0d0f17]">
-                  <div
-                    className="flex h-56 items-center justify-center bg-slate-50 dark:bg-[#12141c] cursor-zoom-in"
-                    onClick={() => { setPosSpotlightExpanded(true); writeCfdState({ ...readCfdState(), spotlightExpanded: true, updatedAt: Date.now() }) }}
-                  >
-                    {currentUrl ? (
-                      <img src={currentUrl} alt={posSpotlight.name} className="h-full w-full object-contain" />
-                    ) : (
-                      <svg viewBox="0 0 24 24" className="size-20 text-slate-200 dark:text-slate-700" fill="none" stroke="currentColor" strokeWidth={1}>
-                        <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
-                      </svg>
-                    )}
-                  </div>
-                  {posSpotlightUrls.length > 1 && (
-                    <div className="flex items-center justify-center gap-1.5 border-b border-slate-100 py-2 dark:border-[#2a2d3e]">
-                      {posSpotlightUrls.map((u, i) => (
-                        <button key={i} type="button" onClick={() => selectImage(i)}
-                          className={`size-9 overflow-hidden rounded-md border transition ${i === posSpotlightIndex ? 'border-orange-400 shadow' : 'border-slate-200 opacity-50 hover:opacity-100'}`}
-                        >
-                          <img src={u} alt={`${i + 1}`} className="h-full w-full object-contain" />
-                        </button>
-                      ))}
-                    </div>
+              <div
+                className="fixed inset-0 z-[360] flex flex-col items-center justify-center gap-5 bg-white/95 backdrop-blur-md dark:bg-[#0d0f17]/95 cursor-zoom-out"
+                onClick={() => clearProductImage()}
+              >
+                <div className="flex h-[60vh] w-[60vh] max-w-[85vw] items-center justify-center overflow-hidden rounded-3xl border border-slate-100 bg-slate-50 shadow-2xl dark:border-[#2a2d3e] dark:bg-[#12141c]">
+                  {currentUrl ? (
+                    <img src={currentUrl} alt={posSpotlight.name} className="h-full w-full object-contain" />
+                  ) : (
+                    <svg viewBox="0 0 24 24" className="size-32 text-slate-200 dark:text-slate-700" fill="none" stroke="currentColor" strokeWidth={1}>
+                      <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
+                    </svg>
                   )}
-                  <div className="space-y-0.5 p-4">
-                    <p className="text-base font-black leading-snug text-slate-900 dark:text-white">{posSpotlight.name}</p>
-                    {posSpotlight.price > 0 && (
-                      <p className="text-sm text-slate-500 dark:text-slate-400">
-                        ฿{posSpotlight.price.toLocaleString('th-TH', { minimumFractionDigits: 2 })} / {posSpotlight.unit}
-                      </p>
-                    )}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => { setPosSpotlight(null); writeCfdState({ ...readCfdState(), spotlightSku: undefined, updatedAt: Date.now() }) }}
-                    className="w-full border-t border-slate-100 py-2.5 text-xs font-semibold text-slate-400 transition hover:bg-slate-50 dark:border-[#2a2d3e] dark:hover:bg-[#1a1f35]"
-                  >
-                    ปิด
-                  </button>
                 </div>
+                {thumbnails}
+                <div className="text-center space-y-1 px-8" onClick={(e) => e.stopPropagation()}>
+                  <p className="text-2xl font-black leading-tight text-slate-900 dark:text-white">{posSpotlight.name}</p>
+                  {posSpotlight.price > 0 && (
+                    <p className="text-lg font-semibold text-orange-500">
+                      ฿{posSpotlight.price.toLocaleString('th-TH', { minimumFractionDigits: 2 })}{' '}
+                      <span className="text-sm font-normal text-slate-400">/ {posSpotlight.unit}</span>
+                    </p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); clearProductImage() }}
+                  className="rounded-xl border border-slate-200 bg-white px-5 py-2 text-sm font-semibold text-slate-500 shadow-sm transition hover:bg-slate-50 dark:border-[#2a2d3e] dark:bg-[#1a1f35] dark:text-slate-300"
+                >
+                  ปิด
+                </button>
               </div>
             )
           })(),

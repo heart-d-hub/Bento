@@ -20,7 +20,11 @@ import { loadSupplierDirectory, type SupplierProfile } from '@/features/purchase
 import { getPosCatalogProducts } from '@/features/pos/data/posCatalogMerge'
 import { mergeInventoryProductsWithLiveStock } from '@/features/pos/data/posLiveStock'
 import { getProductMasterById, getProductMasterList, saveProductMasterList, collectInventoryCarFilterOptions, productMatchesInventoryCarFilters, PRODUCT_MASTER_LIST_CHANGED_EVENT, type ProductMasterDetail, type VehicleFitmentRef } from '@/features/inventory/data/productMasterData'
-import { loadCategoryTree, type MainCategory } from '@/features/inventory/data/inventoryCategories'
+import {
+  INVENTORY_CATEGORIES_UPDATED_EVENT,
+  loadCategoryTree,
+  type MainCategory,
+} from '@/features/inventory/data/inventoryCategories'
 import { AddProductModal } from '@/features/inventory/components/AddProductModal'
 import { PRODUCT_PROMO_CHANGED_EVENT } from '@/features/purchase/data/poMovingAverage'
 import {
@@ -41,6 +45,7 @@ import { clsx } from 'clsx'
 import {
   ArrowLeftRight,
   ChevronDown,
+  ChevronRight,
   Copy,
   ImageIcon,
   LayoutGrid,
@@ -56,12 +61,14 @@ import {
   Search,
   ShoppingCart,
   Star,
+  Clock,
   Store,
   TriangleAlert,
   Trophy,
   X,
 } from 'lucide-react'
 import { LowStockWorkspacePage } from '@/features/purchase/LowStockWorkspacePage'
+import { SlowMoverWorkspacePage } from '@/features/purchase/SlowMoverWorkspacePage'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 
@@ -2166,10 +2173,14 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
   const [categoryTree, setCategoryTree] = useState<MainCategory[]>(() => loadCategoryTree())
   const [showFavOnly, setShowFavOnly] = useState(false)
   const [lowStockMode, setLowStockMode] = useState(false)
+  const [slowMoverMode, setSlowMoverMode] = useState(false)
   const [showInStoreOnly, setShowInStoreOnly] = useState(true)
   const [supplierId, setSupplierId] = useState('')
   const [categoryFilter, setCategoryFilter] = useState('')
   const [subCategoryFilter, setSubCategoryFilter] = useState('')
+  const [subSubCategoryFilter, setSubSubCategoryFilter] = useState('')
+  const [expandedMain, setExpandedMain] = useState<Set<string>>(() => new Set())
+  const [expandedSub, setExpandedSub] = useState<Set<string>>(() => new Set())
   const [filterCarBrand, setFilterCarBrand] = useState('ทั้งหมด')
   const [filterCarModel, setFilterCarModel] = useState('ทั้งหมด')
   const [filterYear, setFilterYear] = useState('ทั้งหมด')
@@ -2190,6 +2201,31 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
     window.addEventListener(CATALOG_CART_CHANGED, handler)
     return () => window.removeEventListener(CATALOG_CART_CHANGED, handler)
   }, [])
+
+  // Refresh categoryTree when categories are edited elsewhere
+  useEffect(() => {
+    const onUpdate = () => setCategoryTree(loadCategoryTree())
+    window.addEventListener(INVENTORY_CATEGORIES_UPDATED_EVENT, onUpdate)
+    return () => window.removeEventListener(INVENTORY_CATEGORIES_UPDATED_EVENT, onUpdate)
+  }, [])
+
+  const toggleMainExpand = (id: string) => {
+    setExpandedMain((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+  const toggleSubExpand = (mainId: string, subId: string) => {
+    const key = `${mainId}::${subId}`
+    setExpandedSub((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
 
   // Debounce search — filter only fires 250 ms after the user stops typing
   useEffect(() => {
@@ -2259,6 +2295,31 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
         .map((p) => p.subCategory as string),
     )].sort()
   }, [allProducts, categoryFilter])
+
+  /** Per-level product counts for the category sidebar.
+   *  Counts ignore the active category filters so users see how many parts exist
+   *  in each branch of the tree at a glance. Sub-sub level pulls from master records. */
+  const navCounts = useMemo(() => {
+    const main = new Map<string, number>()
+    const sub = new Map<string, number>()
+    const subSub = new Map<string, number>()
+    let total = 0
+    for (const p of allProducts) {
+      total += 1
+      const m = (p.category ?? '').trim()
+      if (!m || m === '—') continue
+      main.set(m, (main.get(m) ?? 0) + 1)
+      const s = (p.subCategory ?? '').trim()
+      if (s) {
+        sub.set(`${m}::${s}`, (sub.get(`${m}::${s}`) ?? 0) + 1)
+        const ss = ((p as unknown as { subSubCategory?: string }).subSubCategory ?? '').trim()
+        if (ss) {
+          subSub.set(`${m}::${s}::${ss}`, (subSub.get(`${m}::${s}::${ss}`) ?? 0) + 1)
+        }
+      }
+    }
+    return { main, sub, subSub, total }
+  }, [allProducts])
 
   // When reference items are visible, include external master products in filter options
   // so the car brand/model dropdowns show all available values, not just in-store ones
@@ -2381,6 +2442,11 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
     if (supplierId) list = list.filter((p) => productSupplierMap.get(p.id)?.some((v) => v.supplierId === supplierId))
     if (categoryFilter) list = list.filter((p) => p.category === categoryFilter)
     if (subCategoryFilter) list = list.filter((p) => p.subCategory === subCategoryFilter)
+    if (subSubCategoryFilter) {
+      list = list.filter(
+        (p) => (p as unknown as { subSubCategory?: string }).subSubCategory === subSubCategoryFilter,
+      )
+    }
     if (hasVehicleFilter) {
       list = list.filter((p) =>
         productMatchesInventoryCarFilters(
@@ -2399,7 +2465,7 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
       list = scored.map(({ p }) => p)
     }
     return list
-  }, [allProducts, showFavOnly, supplierId, categoryFilter, subCategoryFilter, productSupplierMap, debouncedSearch, favs, productFieldsMap, filterCarBrand, filterCarModel, filterYear, filterEngine, filterDrive])
+  }, [allProducts, showFavOnly, supplierId, categoryFilter, subCategoryFilter, subSubCategoryFilter, productSupplierMap, debouncedSearch, favs, productFieldsMap, filterCarBrand, filterCarModel, filterYear, filterEngine, filterDrive])
 
   // Products NOT currently active in store (from master list, filtered out of POS catalog)
   const externalItems = useMemo(() => {
@@ -2414,11 +2480,12 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
       filterYear !== 'ทั้งหมด' ||
       filterEngine !== 'ทั้งหมด' ||
       filterDrive !== 'ทั้งหมด'
-    const hasAnyFilter = hasVehicleFilter || !!categoryFilter || !!subCategoryFilter
+    const hasAnyFilter = hasVehicleFilter || !!categoryFilter || !!subCategoryFilter || !!subSubCategoryFilter
 
     const passesFilter = (p: ProductMasterDetail): boolean => {
       if (categoryFilter && p.category !== categoryFilter) return false
       if (subCategoryFilter && p.subCategory !== subCategoryFilter) return false
+      if (subSubCategoryFilter && p.subSubCategory !== subSubCategoryFilter) return false
       if (!hasVehicleFilter) return true
       return productMatchesInventoryCarFilters(
         p,
@@ -2490,7 +2557,7 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
       }
     }
     return allExternal
-  }, [showInStoreOnly, allProducts, supplierId, debouncedSearch, supplierDirectory, categoryFilter, subCategoryFilter, filterCarBrand, filterCarModel, filterYear, filterEngine, filterDrive])
+  }, [showInStoreOnly, allProducts, supplierId, debouncedSearch, supplierDirectory, categoryFilter, subCategoryFilter, subSubCategoryFilter, filterCarBrand, filterCarModel, filterYear, filterEngine, filterDrive])
 
   const toggleFav = (productId: string) => {
     setFavs((prev) => {
@@ -2594,6 +2661,16 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
     )
   }
 
+  if (slowMoverMode) {
+    return (
+      <SlowMoverWorkspacePage
+        className={className}
+        onBack={() => setSlowMoverMode(false)}
+        onGoToCatalog={() => setSlowMoverMode(false)}
+      />
+    )
+  }
+
   return (
     <div className={clsx('relative flex h-full min-h-0 flex-col overflow-hidden', className)}>
 
@@ -2635,6 +2712,15 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
             {lowStockCount > 0 && (
               <span className="rounded-full bg-rose-200 px-1.5 text-[10px] font-black text-rose-800">{lowStockCount}</span>
             )}
+          </button>
+          <button
+            type="button"
+            onClick={() => setSlowMoverMode(true)}
+            className="flex shrink-0 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-500 transition hover:border-indigo-300 hover:text-indigo-600"
+            title="สินค้าขายช้า / นอนสต็อก"
+          >
+            <Clock className="size-3.5" />
+            ขายช้า
           </button>
           <button
             type="button"
@@ -2742,50 +2828,7 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
             value={supplierId}
             onChange={setSupplierId}
           />
-          <div className="flex items-center gap-1">
-            <select
-              value={categoryFilter}
-              onChange={(e) => { setCategoryFilter(e.target.value); setSubCategoryFilter('') }}
-              className={clsx(
-                'rounded-lg border py-1.5 pl-2.5 pr-6 text-xs font-semibold outline-none transition',
-                categoryFilter
-                  ? 'border-violet-300 bg-violet-50 text-violet-800 focus:border-violet-400'
-                  : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 focus:border-violet-300',
-              )}
-            >
-              <option value="">หมวดทั้งหมด</option>
-              {categories.map((c) => (
-                <option key={c} value={c}>{c}</option>
-              ))}
-            </select>
-            {subCategories.length > 0 && (
-              <select
-                value={subCategoryFilter}
-                onChange={(e) => setSubCategoryFilter(e.target.value)}
-                className={clsx(
-                  'rounded-lg border py-1.5 pl-2.5 pr-6 text-xs font-semibold outline-none transition',
-                  subCategoryFilter
-                    ? 'border-violet-300 bg-violet-100 text-violet-900 focus:border-violet-400'
-                    : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 focus:border-violet-300',
-                )}
-              >
-                <option value="">ทุกหมวดย่อย</option>
-                {subCategories.map((s) => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
-              </select>
-            )}
-            {categoryFilter && (
-              <button
-                type="button"
-                onClick={() => { setCategoryFilter(''); setSubCategoryFilter('') }}
-                className="rounded-full p-1 text-violet-400 hover:bg-violet-50 hover:text-violet-700"
-                title="ล้างหมวด"
-              >
-                <X className="size-3.5" />
-              </button>
-            )}
-          </div>
+          {/* Category filter moved to the left sidebar — see <aside> in the body */}
         </div>
 
         {/* Divider */}
@@ -2904,6 +2947,176 @@ export function PurchaseCatalogPage({ className, onGoToPurchaseCart, onGoToPurch
 
       {/* ── Body ── */}
       <div className="flex min-h-0 flex-1 overflow-hidden">
+
+        {/* Category sidebar — mirrors product-folder layout */}
+        <aside className="hidden w-44 shrink-0 overflow-y-auto border-r border-slate-200 bg-slate-50/40 px-1.5 py-2 lg:block">
+          <button
+            type="button"
+            onClick={() => {
+              setCategoryFilter('')
+              setSubCategoryFilter('')
+              setSubSubCategoryFilter('')
+            }}
+            className={clsx(
+              'mb-1 flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] font-medium transition',
+              !categoryFilter
+                ? 'bg-violet-100 text-violet-900 ring-1 ring-violet-200/80'
+                : 'text-slate-700 hover:bg-white',
+            )}
+          >
+            <span>ทั้งหมด</span>
+            <span className="rounded-md bg-white/80 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-slate-700">
+              {navCounts.total.toLocaleString('th-TH')}
+            </span>
+          </button>
+          {categoryTree.length === 0 ? (
+            <p className="rounded-lg border border-amber-200/80 bg-amber-50/90 px-2 py-2 text-center text-[10px] leading-snug text-amber-900">
+              ยังไม่มีหมวดหมู่
+            </p>
+          ) : (
+            categoryTree.map((main) => {
+              const subs = main.subcategories
+              const open = expandedMain.has(main.id)
+              const mainSelected = categoryFilter === main.name
+              const mainCount = navCounts.main.get(main.name) ?? 0
+              return (
+                <div key={main.id} className="mb-0.5">
+                  {subs.length === 0 ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCategoryFilter(main.name)
+                        setSubCategoryFilter('')
+                        setSubSubCategoryFilter('')
+                      }}
+                      className={clsx(
+                        'flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] transition',
+                        mainSelected
+                          ? 'bg-violet-100 font-medium text-violet-900 ring-1 ring-violet-200/80'
+                          : 'font-medium text-slate-700 hover:bg-white',
+                      )}
+                    >
+                      <span className="line-clamp-2">{main.name}</span>
+                      <span className="shrink-0 rounded-md bg-white/80 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-slate-700">
+                        {mainCount.toLocaleString('th-TH')}
+                      </span>
+                    </button>
+                  ) : (
+                    <>
+                      <div className="flex min-w-0 items-stretch gap-0.5">
+                        <button
+                          type="button"
+                          onClick={() => toggleMainExpand(main.id)}
+                          className="flex shrink-0 items-center justify-center rounded-lg px-0.5 text-slate-500 hover:bg-white hover:text-slate-800"
+                          aria-expanded={open}
+                          aria-label={open ? 'ยุบหมวดย่อย' : 'ขยายหมวดย่อย'}
+                        >
+                          {open ? <ChevronDown className="size-3.5" aria-hidden /> : <ChevronRight className="size-3.5" aria-hidden />}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCategoryFilter(main.name)
+                            setSubCategoryFilter('')
+                            setSubSubCategoryFilter('')
+                            setExpandedMain(new Set([main.id]))
+                            setExpandedSub(new Set())
+                          }}
+                          className={clsx(
+                            'min-w-0 flex-1 rounded-lg px-2 py-1.5 text-left text-[12px] transition',
+                            mainSelected
+                              ? 'bg-violet-100 font-medium text-violet-900 ring-1 ring-violet-200/80'
+                              : 'font-medium text-slate-700 hover:bg-white',
+                          )}
+                        >
+                          <span className="flex items-center justify-between gap-2">
+                            <span className="line-clamp-2">{main.name}</span>
+                            <span className="shrink-0 rounded-md bg-white/80 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-slate-700">
+                              {mainCount.toLocaleString('th-TH')}
+                            </span>
+                          </span>
+                        </button>
+                      </div>
+                      {open && (
+                        <div className="ml-4 space-y-0.5 border-l border-slate-200/90 py-0.5 pl-2">
+                          {subs.map((sub) => {
+                            const subSel = mainSelected && subCategoryFilter === sub.name
+                            const subSubs = sub.subSubcategories
+                            const subKey = `${main.id}::${sub.id}`
+                            const subOpen = expandedSub.has(subKey)
+                            const subCount = navCounts.sub.get(`${main.name}::${sub.name}`) ?? 0
+                            return (
+                              <div key={sub.id} className="space-y-0.5">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setCategoryFilter(main.name)
+                                    setSubCategoryFilter(sub.name)
+                                    setSubSubCategoryFilter('')
+                                    if (subSubs.length > 0) toggleSubExpand(main.id, sub.id)
+                                  }}
+                                  className={clsx(
+                                    'w-full rounded-md px-2 py-1 text-left text-[11.5px] transition',
+                                    subSel
+                                      ? 'bg-violet-100 font-medium text-violet-900 ring-1 ring-violet-200/80'
+                                      : 'text-slate-600 hover:bg-white',
+                                  )}
+                                >
+                                  <span className="flex items-center justify-between gap-2">
+                                    <span className="line-clamp-2">{sub.name}</span>
+                                    <span className="shrink-0 rounded-md bg-white/80 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-slate-700">
+                                      {subCount.toLocaleString('th-TH')}
+                                    </span>
+                                  </span>
+                                </button>
+                                {subSubs.length > 0 && subOpen ? (
+                                  <div className="ml-0 space-y-0.5 border-l border-slate-200/70 py-0.5 pl-2">
+                                    {subSubs.map((ss) => {
+                                      const ssSel =
+                                        mainSelected &&
+                                        subCategoryFilter === sub.name &&
+                                        subSubCategoryFilter === ss.name
+                                      const ssCount =
+                                        navCounts.subSub.get(`${main.name}::${sub.name}::${ss.name}`) ?? 0
+                                      return (
+                                        <button
+                                          key={ss.id}
+                                          type="button"
+                                          onClick={() => {
+                                            setCategoryFilter(main.name)
+                                            setSubCategoryFilter(sub.name)
+                                            setSubSubCategoryFilter(ss.name)
+                                          }}
+                                          className={clsx(
+                                            'w-full rounded-md py-1 pl-3 pr-2 text-left text-[11px] leading-snug transition',
+                                            ssSel
+                                              ? 'bg-violet-100 font-medium text-violet-900 ring-1 ring-violet-200/80'
+                                              : 'text-slate-500 hover:bg-white',
+                                          )}
+                                        >
+                                          <span className="flex items-center justify-between gap-2">
+                                            <span className="line-clamp-2">{ss.name}</span>
+                                            <span className="shrink-0 rounded-md bg-white/80 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-slate-700">
+                                              {ssCount.toLocaleString('th-TH')}
+                                            </span>
+                                          </span>
+                                        </button>
+                                      )
+                                    })}
+                                  </div>
+                                ) : null}
+                              </div>
+                            )
+                          })}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )
+            })
+          )}
+        </aside>
 
         {/* Product grid */}
         <div className="min-w-0 flex-1 overflow-y-auto p-3">

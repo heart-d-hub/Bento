@@ -2,7 +2,7 @@ import * as React from 'react'
 import { useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { clsx } from 'clsx'
-import { Car, Check, CheckSquare, ChevronDown, ChevronRight, Eye, EyeOff, LayoutGrid, List, MapPin, Minus, Plus, Search, ShoppingCart, X } from 'lucide-react'
+import { Car, Check, CheckSquare, ChevronDown, ChevronRight, ChevronUp, Eye, EyeOff, LayoutGrid, List, MapPin, Minus, Plus, Ruler, Search, ShoppingCart, X } from 'lucide-react'
 import {
   collectInventoryCarFilterOptions,
   getProductMasterBySku,
@@ -14,6 +14,12 @@ import {
   loadCategoryTree,
   type MainCategory,
 } from '@/features/inventory/data/inventoryCategories'
+import {
+  dimensionScore,
+  dimensionStrictMatch,
+  parseMeasureMm,
+  type MeasureInput,
+} from '@/features/inventory/utils/dimensionSearch'
 import {
   getPosSellConfig,
   pickDefaultPosUnitAndPrice,
@@ -78,6 +84,9 @@ type ProductPickerModalProps = {
   isDark: boolean
   onAddToCart: (product: PickerProduct, opts?: AddToCartOptions) => void
   onShowProductImage: (info: { code: string; name: string; price: number; unit: string }) => void
+  /** Clear the customer-facing display spotlight — fired when the cashier closes the
+   *  picture (lightbox close, picker close). Optional for back-compat. */
+  onClearProductImage?: () => void
   /** ลูกค้าปัจจุบัน — undefined = walk-in (จะไม่แสดง tab "ลูกค้าคนนี้") */
   customerAccountCode?: string
   /** ใช้แสดงในแถบ tab ลูกค้า */
@@ -123,6 +132,7 @@ export function ProductPickerModal({
   isDark,
   onAddToCart,
   onShowProductImage,
+  onClearProductImage,
   customerAccountCode,
 }: ProductPickerModalProps) {
   const [searchQuery, setSearchQuery] = useState('')
@@ -143,6 +153,13 @@ export function ProductPickerModal({
   const [trim, setTrim] = useState(FILTER_ALL)
   /** Phase 5: chassis-code search — typed by mechanic (e.g., "FM2P", "JZS155") */
   const [chassisCodeQuery, setChassisCodeQuery] = useState('')
+  /** Dimension search — A (inner) / B (outer) / C (height) in mm */
+  const [measA, setMeasA] = useState('')
+  const [measB, setMeasB] = useState('')
+  const [measC, setMeasC] = useState('')
+  const [measTol, setMeasTol] = useState(3)
+  const [measActive, setMeasActive] = useState(false)
+  const [measPanelOpen, setMeasPanelOpen] = useState(false)
   const [selectedProduct, setSelectedProduct] = useState<PickerProduct | null>(null)
   const [viewMode, setViewMode] = useState<'list' | 'grid'>('list')
   const [tab, setTab] = useState<PickerTab>('all')
@@ -196,6 +213,11 @@ export function ProductPickerModal({
       setChosenQty('1')
       setSelectedIds(new Set())
       setVehicleHintDismissed(false)
+      setMeasA('')
+      setMeasB('')
+      setMeasC('')
+      setMeasActive(false)
+      setMeasPanelOpen(false)
     }
   }, [open])
 
@@ -643,12 +665,48 @@ export function ProductPickerModal({
     return tab === 'all' ? ranked.slice(0, 200) : applyTabFilter(ranked)
   }, [products, productHaystackMap, deferredSearchQuery, category, subCategory, subSubCategory, make, model, engine, drive, year, partBrand, hp, euro, trim, chassisCodeQuery, tab, todaySkuMap, customerSkuMap])
 
+  /** Resolved A/B/C measure input (mm). null when B and C are not both valid numbers. */
+  const measureInput = useMemo<MeasureInput | null>(() => {
+    const id = parseMeasureMm(measA)
+    const od = parseMeasureMm(measB)
+    const h = parseMeasureMm(measC)
+    if (h === undefined || od === undefined) return null
+    const input: MeasureInput = { h, od }
+    if (id !== undefined) input.id = id
+    return input
+  }, [measA, measB, measC])
+
+  /** Apply dimension search on top of the existing filter pipeline.
+   *  - strict: products whose dims fall within ±measTol of the input
+   *  - nearest: if no strict match, top-8 closest by score (ranked) */
+  const dimensionMatch = useMemo<{
+    list: PickerProduct[]
+    kind: 'none' | 'invalid' | 'strict' | 'nearest' | 'no_dim_in_filter'
+  }>(() => {
+    if (!measActive) return { list: filteredProducts, kind: 'none' }
+    if (!measureInput) return { list: filteredProducts, kind: 'invalid' }
+    const withMaster = filteredProducts
+      .map((p) => ({ p, master: getProductMasterBySku(p.code) }))
+      .filter((x) => x.master?.physicalDimensions) as { p: PickerProduct; master: ProductMasterDetail }[]
+    if (withMaster.length === 0) return { list: [], kind: 'no_dim_in_filter' }
+    const strict = withMaster.filter((x) => dimensionStrictMatch(x.master, measureInput, measTol))
+    if (strict.length > 0) return { list: strict.map((x) => x.p), kind: 'strict' }
+    const nearest = [...withMaster]
+      .map((x) => ({ p: x.p, score: dimensionScore(x.master, measureInput) ?? Infinity }))
+      .sort((a, b) => a.score - b.score)
+      .slice(0, 8)
+      .map((x) => x.p)
+    return { list: nearest, kind: 'nearest' }
+  }, [filteredProducts, measActive, measureInput, measTol])
+
+  const displayProducts = dimensionMatch.list
+
   // Auto-select first product เมื่อ list เปลี่ยน
   useEffect(() => {
     if (!open) return
-    if (selectedProduct && filteredProducts.some((p) => p.id === selectedProduct.id)) return
-    setSelectedProduct(filteredProducts[0] ?? null)
-  }, [filteredProducts, open, selectedProduct])
+    if (selectedProduct && displayProducts.some((p) => p.id === selectedProduct.id)) return
+    setSelectedProduct(displayProducts[0] ?? null)
+  }, [displayProducts, open, selectedProduct])
 
   // เมื่อ selectedProduct เปลี่ยน — reset unit/tier/qty
   const sellConfig = useMemo(
@@ -794,19 +852,19 @@ export function ProductPickerModal({
 
       // ↑↓ — navigate list (only when not editing detail inputs)
       if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && (!isTextField || isSearchFocused)) {
-        if (filteredProducts.length === 0) return
+        if (displayProducts.length === 0) return
         e.preventDefault()
         const dir = e.key === 'ArrowDown' ? 1 : -1
-        const currentIdx = selectedProduct ? filteredProducts.findIndex((x) => x.id === selectedProduct.id) : -1
+        const currentIdx = selectedProduct ? displayProducts.findIndex((x) => x.id === selectedProduct.id) : -1
         const nextIdx = currentIdx < 0
-          ? (dir > 0 ? 0 : filteredProducts.length - 1)
-          : Math.max(0, Math.min(filteredProducts.length - 1, currentIdx + dir))
-        setSelectedProduct(filteredProducts[nextIdx])
+          ? (dir > 0 ? 0 : displayProducts.length - 1)
+          : Math.max(0, Math.min(displayProducts.length - 1, currentIdx + dir))
+        setSelectedProduct(displayProducts[nextIdx])
       }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [open, selectedProduct, chosenQty, chosenUnitIndex, chosenTierIndex, chosenPrice, filteredProducts])
+  }, [open, selectedProduct, chosenQty, chosenUnitIndex, chosenTierIndex, chosenPrice, displayProducts])
 
   // Scroll selected row/card into view (Phase 1C)
   useLayoutEffect(() => {
@@ -838,7 +896,7 @@ export function ProductPickerModal({
                 เลือกสินค้า
               </span>
               <span className="rounded-full bg-gradient-to-r from-blue-100 to-cyan-100 px-2 py-0.5 text-[10px] font-bold text-blue-700 shadow-sm dark:from-cyan-900/50 dark:to-emerald-900/50 dark:text-cyan-300">
-                {filteredProducts.length} รายการ
+                {displayProducts.length} รายการ
               </span>
             </div>
             <div className="flex items-center gap-1.5">
@@ -943,6 +1001,14 @@ export function ProductPickerModal({
                 placeholder="รุ่นรถ"
               />
               <SearchableFilterSelect
+                value={trim}
+                options={trimOptions}
+                allValue={FILTER_ALL}
+                onChange={setTrim}
+                ariaLabel="รุ่นย่อย / Trim"
+                placeholder="รุ่นย่อย / Trim"
+              />
+              <SearchableFilterSelect
                 value={engine}
                 options={engineOptions}
                 allValue={FILTER_ALL}
@@ -986,33 +1052,49 @@ export function ProductPickerModal({
                   placeholder="Euro"
                 />
               )}
-              <SearchableFilterSelect
-                value={trim}
-                options={trimOptions}
-                allValue={FILTER_ALL}
-                onChange={setTrim}
-                ariaLabel="รุ่นย่อย / Trim"
-                placeholder="รุ่นย่อย / Trim"
-              />
-              <div className="relative">
-                <input
-                  type="text"
-                  value={chassisCodeQuery}
-                  onChange={(e) => setChassisCodeQuery(e.target.value)}
-                  placeholder="รหัสตัวถัง / chassis (เช่น FM2P, JZS155)"
-                  className="h-9 w-full min-w-0 rounded-lg border border-slate-200 bg-white px-2 text-sm uppercase shadow-sm outline-none transition focus:border-slate-400 focus:ring-1 focus:ring-slate-200 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-cyan-100"
-                  aria-label="ค้นหารหัสตัวถัง"
-                />
-                {chassisCodeQuery && (
-                  <button
-                    type="button"
-                    onClick={() => setChassisCodeQuery('')}
-                    className="absolute right-1.5 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-slate-700"
-                    aria-label="ล้างรหัสตัวถัง"
-                  >
-                    <X className="size-3" />
-                  </button>
-                )}
+              <div className="flex min-w-0 items-stretch gap-1.5">
+                <div className="relative min-w-0 flex-1">
+                  <input
+                    type="text"
+                    value={chassisCodeQuery}
+                    onChange={(e) => setChassisCodeQuery(e.target.value)}
+                    placeholder="รหัสตัวถัง / chassis (เช่น FM2P, JZS155)"
+                    className="h-9 w-full min-w-0 rounded-lg border border-slate-200 bg-white px-2 text-sm uppercase shadow-sm outline-none transition focus:border-slate-400 focus:ring-1 focus:ring-slate-200 dark:border-[#2a2d3e] dark:bg-[#12141c] dark:text-cyan-100"
+                    aria-label="ค้นหารหัสตัวถัง"
+                  />
+                  {chassisCodeQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setChassisCodeQuery('')}
+                      className="absolute right-1.5 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                      aria-label="ล้างรหัสตัวถัง"
+                    >
+                      <X className="size-3" />
+                    </button>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  aria-expanded={measPanelOpen}
+                  aria-controls="picker-meas-dimension-panel"
+                  title="ค้นหาตามมิติ (กรณีไม่เห็นเบอร์ OEM)"
+                  onClick={() => setMeasPanelOpen((open) => !open)}
+                  className={clsx(
+                    'relative inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border shadow-sm outline-none transition focus-visible:ring-2',
+                    measPanelOpen
+                      ? 'border-violet-400 bg-violet-100/80 text-violet-900 dark:border-violet-500/60 dark:bg-violet-950/40 dark:text-violet-200'
+                      : 'border-violet-200/90 bg-gradient-to-br from-violet-50 to-white text-violet-800 hover:border-violet-300 hover:bg-violet-100/80 dark:border-violet-700/40 dark:from-violet-950/30 dark:to-[#12141c] dark:text-violet-300',
+                  )}
+                >
+                  <Ruler className="size-4" strokeWidth={1.75} aria-hidden />
+                  <span className="sr-only">เปิดหรือย่อค้นหาตามมิติ</span>
+                  {measActive ? (
+                    <span
+                      className="absolute right-1.5 top-1.5 size-2 rounded-full bg-emerald-500 ring-2 ring-white dark:ring-[#0d0f17]"
+                      aria-hidden
+                    />
+                  ) : null}
+                </button>
               </div>
             </div>
             {(presets.length > 0 || activeVehicleFilterCount > 0) && (
@@ -1076,6 +1158,128 @@ export function ProductPickerModal({
               </div>
             )}
           </div>
+
+          {/* Dimension search panel — opens when Ruler button toggled */}
+          {measPanelOpen && (
+            <div
+              id="picker-meas-dimension-panel"
+              className="shrink-0 border-b border-violet-200/80 bg-gradient-to-br from-violet-50/90 to-white px-3 py-2 dark:border-violet-700/40 dark:from-violet-950/30 dark:to-[#0a0c13]"
+            >
+              <div className="flex flex-wrap items-start gap-2">
+                <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-violet-100 text-violet-800 dark:bg-violet-900/40 dark:text-violet-200">
+                  <Ruler className="size-4" strokeWidth={1.75} aria-hidden />
+                </div>
+                <div className="min-w-0 flex-1 space-y-1.5">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <h3 className="text-[12px] font-semibold text-violet-950 dark:text-violet-200">
+                        ค้นหาตามมิติ (กรณีไม่เห็นเบอร์ OEM)
+                      </h3>
+                      <p className="mt-0.5 text-[10px] leading-snug text-violet-900/90 dark:text-violet-300/80">
+                        หน่วยเป็นมิลลิเมตร (mm) — กรอก B (เส้นผ่านศูนย์กลางนอก) และ C (สูง) อย่างน้อย
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setMeasPanelOpen(false)}
+                      title="ย่อแถบค้นหามิติ"
+                      className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-violet-200 bg-white px-2 py-1 text-[10px] font-medium text-violet-900 hover:bg-violet-50 dark:border-violet-700/40 dark:bg-[#12141c] dark:text-violet-200 dark:hover:bg-violet-950/40"
+                    >
+                      <ChevronUp className="size-3" aria-hidden />
+                      ย่อ
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4 lg:grid-cols-5">
+                    <label className="flex min-w-0 flex-col gap-0.5">
+                      <span className="text-[10px] font-medium leading-snug text-violet-900/90 dark:text-violet-300/80">A — ใน (ไม่บังคับ)</span>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        placeholder="ไม่บังคับ"
+                        value={measA}
+                        onChange={(e) => setMeasA(e.target.value)}
+                        aria-label="A — เส้นผ่านศูนย์กลางใน"
+                        className="w-full min-w-0 rounded-lg border border-violet-200 bg-white px-2 py-1 text-xs tabular-nums outline-none focus:border-violet-400 focus:ring-1 focus:ring-violet-200 dark:border-violet-700/40 dark:bg-[#12141c] dark:text-violet-100"
+                      />
+                    </label>
+                    <label className="flex min-w-0 flex-col gap-0.5">
+                      <span className="text-[10px] font-medium leading-snug text-violet-900/90 dark:text-violet-300/80">B — นอก</span>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        placeholder="เช่น 68"
+                        value={measB}
+                        onChange={(e) => setMeasB(e.target.value)}
+                        aria-label="B — เส้นผ่านศูนย์กลางนอก"
+                        className="w-full min-w-0 rounded-lg border border-violet-200 bg-white px-2 py-1 text-xs tabular-nums outline-none focus:border-violet-400 focus:ring-1 focus:ring-violet-200 dark:border-violet-700/40 dark:bg-[#12141c] dark:text-violet-100"
+                      />
+                    </label>
+                    <label className="flex min-w-0 flex-col gap-0.5">
+                      <span className="text-[10px] font-medium leading-snug text-violet-900/90 dark:text-violet-300/80">C — สูง</span>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        placeholder="เช่น 85"
+                        value={measC}
+                        onChange={(e) => setMeasC(e.target.value)}
+                        aria-label="C — ความสูง"
+                        className="w-full min-w-0 rounded-lg border border-violet-200 bg-white px-2 py-1 text-xs tabular-nums outline-none focus:border-violet-400 focus:ring-1 focus:ring-violet-200 dark:border-violet-700/40 dark:bg-[#12141c] dark:text-violet-100"
+                      />
+                    </label>
+                    <label className="flex min-w-0 flex-col gap-0.5">
+                      <span className="text-[10px] font-medium text-violet-900/90 dark:text-violet-300/80">คลาดเคลื่อนได้ ±</span>
+                      <select
+                        aria-label="คลาดเคลื่อนได้"
+                        value={measTol}
+                        onChange={(e) => setMeasTol(Number(e.target.value))}
+                        className="w-full min-w-0 rounded-lg border border-violet-200 bg-white px-2 py-1 text-xs outline-none focus:border-violet-400 focus:ring-1 focus:ring-violet-200 dark:border-violet-700/40 dark:bg-[#12141c] dark:text-violet-100"
+                      >
+                        {[1, 2, 3, 5, 8].map((n) => (
+                          <option key={n} value={n}>± {n} mm</option>
+                        ))}
+                      </select>
+                    </label>
+                    <div className="flex items-end gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setMeasActive(true)}
+                        className="flex-1 rounded-lg border border-violet-700 bg-violet-800 px-2 py-1 text-[11px] font-medium text-white hover:bg-violet-900"
+                      >
+                        ใช้
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMeasActive(false)
+                          setMeasA('')
+                          setMeasB('')
+                          setMeasC('')
+                        }}
+                        className="flex-1 rounded-lg border border-violet-200 bg-white px-2 py-1 text-[11px] font-medium text-violet-900 hover:bg-violet-50 dark:border-violet-700/40 dark:bg-[#12141c] dark:text-violet-200 dark:hover:bg-violet-950/40"
+                      >
+                        ล้าง
+                      </button>
+                    </div>
+                  </div>
+                  {measActive && dimensionMatch.kind === 'invalid' && (
+                    <p className="text-[11px] font-medium text-rose-700 dark:text-rose-400">
+                      กรอก B และ C เป็นตัวเลข
+                    </p>
+                  )}
+                  {measActive && dimensionMatch.kind === 'strict' && (
+                    <p className="text-[11px] font-medium text-emerald-800 dark:text-emerald-400">
+                      พบสินค้ามิติตรง ±{measTol} mm
+                    </p>
+                  )}
+                  {measActive && dimensionMatch.kind === 'nearest' && (
+                    <p className="text-[11px] font-medium text-amber-900 dark:text-amber-400">
+                      ไม่พบในช่วงที่กำหนด — แสดงสินค้าใกล้เคียงที่สุด
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Vehicle hint banner (Phase 3C) — แสดงเฉพาะเมื่อมีลูกค้า + infer ได้ + ยังไม่ dismiss */}
           {showVehicleHint && customerVehicleHint && (
@@ -1288,22 +1492,24 @@ export function ProductPickerModal({
                 viewMode === 'list' ? 'w-72 shrink-0' : 'min-w-0 flex-1',
               )}
             >
-              {filteredProducts.length === 0 ? (
+              {displayProducts.length === 0 ? (
                 <div className="flex flex-col items-center gap-2 px-4 py-12 text-center">
                   <Search className="size-8 text-slate-300 dark:text-slate-600" />
                   <p className="text-sm font-semibold text-slate-500 dark:text-slate-400">
-                    {tab === 'today'
-                      ? customerLoading ? 'กำลังโหลด...' : 'ยังไม่มีการขายวันนี้'
-                      : tab === 'customer'
-                        ? customerLoading ? 'กำลังโหลด...' : 'ลูกค้านี้ยังไม่มีประวัติการซื้อ'
-                        : 'ไม่พบสินค้า'}
+                    {measActive && dimensionMatch.kind === 'no_dim_in_filter'
+                      ? 'ในรายการที่กรองอยู่ไม่มีสินค้าที่ลงมิติไว้'
+                      : tab === 'today'
+                        ? customerLoading ? 'กำลังโหลด...' : 'ยังไม่มีการขายวันนี้'
+                        : tab === 'customer'
+                          ? customerLoading ? 'กำลังโหลด...' : 'ลูกค้านี้ยังไม่มีประวัติการซื้อ'
+                          : 'ไม่พบสินค้า'}
                   </p>
                   {tab === 'all' && (
                     <p className="text-xs text-slate-400 dark:text-slate-500">ลองเปลี่ยนคำค้นหาหรือตัวกรอง</p>
                   )}
                 </div>
               ) : viewMode === 'list' ? (
-                filteredProducts.map((p) => (
+                displayProducts.map((p) => (
                   <ProductRow
                     key={p.id}
                     product={p}
@@ -1316,8 +1522,8 @@ export function ProductPickerModal({
                   />
                 ))
               ) : (
-                <div className="grid grid-cols-2 gap-2 p-2 sm:grid-cols-3">
-                  {filteredProducts.map((p) => (
+                <div className="grid grid-cols-2 gap-2 p-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5">
+                  {displayProducts.map((p) => (
                     <ProductCard
                       key={p.id}
                       product={p}
@@ -1369,6 +1575,7 @@ export function ProductPickerModal({
                   onQtyChange={setChosenQty}
                   onAddAndClose={() => handleAddToCart(true)}
                   onShowProductImage={onShowProductImage}
+                  onClearProductImage={onClearProductImage}
                   onSelectProduct={setSelectedProduct}
                   onQuickAddProduct={handleQuickAdd}
                 />
@@ -1440,6 +1647,8 @@ type DetailPaneProps = {
   onQtyChange: (v: string) => void
   onAddAndClose: () => void
   onShowProductImage: (info: { code: string; name: string; price: number; unit: string }) => void
+  /** Clear the customer-facing display spotlight when the cashier closes the lightbox. */
+  onClearProductImage?: () => void
   /** Phase 3D — เลือกสินค้าทดแทน */
   onSelectProduct: (product: PickerProduct) => void
   /** Phase 3E — quick-add cross-sell โดยไม่สลับ detail */
@@ -1467,6 +1676,7 @@ function DetailPane({
   onQtyChange,
   onAddAndClose,
   onShowProductImage,
+  onClearProductImage,
   onSelectProduct,
   onQuickAddProduct,
 }: DetailPaneProps) {
@@ -1541,7 +1751,6 @@ function DetailPane({
             sku={sp.code}
             size="fill"
             style={{ width: '100%', height: '100%' }}
-            zoomable
             objectFit="cover"
             onProject={() =>
               onShowProductImage({ code: sp.code, name: sp.name, price: chosenPrice, unit: chosenUnitLabel })

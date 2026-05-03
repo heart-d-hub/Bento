@@ -72,6 +72,12 @@ import {
   Trash2,
 } from 'lucide-react'
 import { SearchableFilterSelect } from '@/features/inventory/components/SearchableFilterSelect'
+import {
+  dimensionScore,
+  dimensionStrictMatch,
+  parseMeasureMm,
+  type MeasureInput,
+} from '@/features/inventory/utils/dimensionSearch'
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
 function formatBaht(n: number) {
@@ -365,9 +371,6 @@ function MasterCatalogSortTh({
   )
 }
 
-/** ค่าที่วัด A/B/C ตรงกับ inner / outer / height ในแฟ้ม */
-type MeasureInput = { h: number; od: number; id?: number }
-
 function paperFieldsForNav(tree: MainCategory[], sel: CategoryNavSelection) {
   if (sel.type === 'main') return tree.find((m) => m.id === sel.mainId)?.paperFields
   if (sel.type === 'sub') {
@@ -400,36 +403,6 @@ function formatDimsCompact(d: PhysicalDimensions): string {
   if (d.outerDiameterMm !== undefined) parts.push(`B:${d.outerDiameterMm}`)
   if (d.heightMm !== undefined) parts.push(`C:${d.heightMm}`)
   return parts.length ? parts.join(' · ') + ' mm' : ''
-}
-
-function parseMeasureMm(s: string): number | undefined {
-  const t = s.trim().replace(',', '.')
-  if (!t) return undefined
-  const n = Number(t)
-  return Number.isFinite(n) && n >= 0 ? n : undefined
-}
-
-function dimensionStrictMatch(p: ProductMasterDetail, input: MeasureInput, tol: number): boolean {
-  const d = p.physicalDimensions
-  if (!d) return false
-  if (d.outerDiameterMm !== undefined && Math.abs(d.outerDiameterMm - input.od) > tol) return false
-  if (d.heightMm !== undefined && Math.abs(d.heightMm - input.h) > tol) return false
-  if (d.innerDiameterMm !== undefined && input.id !== undefined) {
-    if (Math.abs(d.innerDiameterMm - input.id) > tol) return false
-  }
-  return true
-}
-
-function dimensionScore(p: ProductMasterDetail, input: MeasureInput): number | null {
-  const d = p.physicalDimensions
-  if (!d) return null
-  let s = 0
-  if (d.outerDiameterMm !== undefined) s += Math.abs(d.outerDiameterMm - input.od)
-  if (d.heightMm !== undefined) s += Math.abs(d.heightMm - input.h)
-  if (input.id !== undefined && d.innerDiameterMm !== undefined) {
-    s += Math.abs(d.innerDiameterMm - input.id)
-  }
-  return s
 }
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
@@ -2859,6 +2832,16 @@ export function ProductDataFileView() {
             />
           </label>
           <label className="block min-w-0">
+            <span className="mb-0.5 block text-[11px] text-slate-500">รุ่นย่อย / Trim</span>
+            <SearchableFilterSelect
+              value={filterTrim}
+              options={filterOptions.trims}
+              allValue={FILTER_ALL}
+              onChange={setFilterTrim}
+              ariaLabel="รุ่นย่อย / Trim"
+            />
+          </label>
+          <label className="block min-w-0">
             <span className="mb-0.5 block text-[11px] text-slate-500">เครื่องยนต์</span>
             <SearchableFilterSelect
               value={filterEngine}
@@ -2880,15 +2863,37 @@ export function ProductDataFileView() {
           </label>
           <label className="block min-w-0">
             <span className="mb-0.5 block text-[11px] text-slate-500">รุ่นปี</span>
+            <SearchableFilterSelect
+              value={filterYear}
+              options={filterOptions.years}
+              allValue={FILTER_ALL}
+              onChange={setFilterYear}
+              ariaLabel="รุ่นปี"
+            />
+          </label>
+          <label className="block min-w-0">
+            <span className="mb-0.5 block text-[11px] text-slate-500">รหัสตัวถัง / chassis</span>
             <div className="flex min-w-0 items-stretch gap-1.5">
-              <SearchableFilterSelect
-                value={filterYear}
-                options={filterOptions.years}
-                allValue={FILTER_ALL}
-                onChange={setFilterYear}
-                ariaLabel="รุ่นปี"
-                className="min-w-0 flex-1"
-              />
+              <div className="relative min-w-0 flex-1">
+                <input
+                  type="text"
+                  value={filterChassisCode}
+                  onChange={(e) => setFilterChassisCode(e.target.value)}
+                  placeholder="เช่น FM2P, JZS155"
+                  className="h-9 w-full min-w-0 rounded-lg border border-slate-200 bg-white px-2 text-sm uppercase shadow-sm outline-none focus:border-slate-400 focus:ring-1 focus:ring-slate-200"
+                  aria-label="ค้นหารหัสตัวถัง"
+                />
+                {filterChassisCode && (
+                  <button
+                    type="button"
+                    onClick={() => setFilterChassisCode('')}
+                    className="absolute right-1.5 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                    aria-label="ล้างรหัสตัวถัง"
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
               <button
                 type="button"
                 aria-expanded={measPanelOpen}
@@ -2909,39 +2914,6 @@ export function ProductDataFileView() {
                   />
                 ) : null}
               </button>
-            </div>
-          </label>
-          <label className="block min-w-0">
-            <span className="mb-0.5 block text-[11px] text-slate-500">รุ่นย่อย / Trim</span>
-            <SearchableFilterSelect
-              value={filterTrim}
-              options={filterOptions.trims}
-              allValue={FILTER_ALL}
-              onChange={setFilterTrim}
-              ariaLabel="รุ่นย่อย / Trim"
-            />
-          </label>
-          <label className="block min-w-0">
-            <span className="mb-0.5 block text-[11px] text-slate-500">รหัสตัวถัง / chassis</span>
-            <div className="relative">
-              <input
-                type="text"
-                value={filterChassisCode}
-                onChange={(e) => setFilterChassisCode(e.target.value)}
-                placeholder="เช่น FM2P, JZS155"
-                className="h-9 w-full min-w-0 rounded-lg border border-slate-200 bg-white px-2 text-sm uppercase shadow-sm outline-none focus:border-slate-400 focus:ring-1 focus:ring-slate-200"
-                aria-label="ค้นหารหัสตัวถัง"
-              />
-              {filterChassisCode && (
-                <button
-                  type="button"
-                  onClick={() => setFilterChassisCode('')}
-                  className="absolute right-1.5 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-slate-700"
-                  aria-label="ล้างรหัสตัวถัง"
-                >
-                  ×
-                </button>
-              )}
             </div>
           </label>
         </div>

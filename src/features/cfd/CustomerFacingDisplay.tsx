@@ -233,61 +233,40 @@ function QrScreen({ state }: { state: CfdState }) {
   )
 }
 
-/* ── Product Spotlight ─────────────────────────────────────────────── */
-function ProductSpotlight({ sku, line, expanded, imageIndex }: { sku: string; line?: CfdLine; expanded: boolean; imageIndex: number }) {
+/* ── Product Spotlight (always fullscreen) ─────────────────────────── */
+function ProductSpotlight({ sku, line, imageIndex }: { sku: string; line?: CfdLine; imageIndex: number }) {
   const [imageUrls, setImageUrls] = useState<string[]>([])
 
   useEffect(() => {
     setImageUrls([])
-    import('@/features/inventory/data/productImages')
-      .then(({ getProductImageUrls }) => getProductImageUrls(sku))
-      .then(setImageUrls)
-      .catch(() => null)
+    let cancelled = false
+    // Bypass the module-level cache so the image always tracks the current SKU on disk.
+    Promise.all([
+      import('@tauri-apps/api/core'),
+      import('@/features/desktop/isTauri'),
+    ])
+      .then(async ([{ invoke }, { isTauri }]) => {
+        if (!isTauri() || !sku.trim()) return [] as string[]
+        try {
+          return await invoke<string[]>('get_product_images_b64', { sku })
+        } catch {
+          return [] as string[]
+        }
+      })
+      .then((urls) => { if (!cancelled) setImageUrls(urls) })
+      .catch(() => { if (!cancelled) setImageUrls([]) })
+    return () => { cancelled = true }
   }, [sku])
 
   const imageUrl = imageUrls[imageIndex] ?? imageUrls[0] ?? null
 
-  if (expanded) {
-    return (
-      <div
-        className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-6 bg-white select-none"
-      >
-        <div className="flex h-[65vh] w-[65vh] max-w-[90vw] items-center justify-center overflow-hidden rounded-3xl border border-slate-100 bg-slate-50 shadow-2xl">
-          {imageUrl ? (
-            <img src={imageUrl} alt={line?.name} className="h-full w-full object-contain" />
-          ) : (
-            <svg viewBox="0 0 24 24" className="size-32 text-slate-200" fill="none" stroke="currentColor" strokeWidth={1}>
-              <rect x="3" y="3" width="18" height="18" rx="2" />
-              <circle cx="8.5" cy="8.5" r="1.5" />
-              <path d="M21 15l-5-5L5 21" />
-            </svg>
-          )}
-        </div>
-        {line && (
-          <div className="text-center space-y-1 px-8">
-            <p className="text-4xl font-black leading-tight text-slate-900">{line.name}</p>
-            <p className="text-2xl font-semibold text-orange-500">
-              ฿{fmt(line.unitPrice)}&nbsp;<span className="text-lg font-normal text-slate-400">/ {line.unitLabel}</span>
-            </p>
-          </div>
-        )}
-        <div className="flex items-center gap-2 text-sm text-slate-300 tracking-widest uppercase">
-          <span className="size-2 rounded-full bg-orange-400 animate-pulse" />
-          สแกนแล้ว
-        </div>
-      </div>
-    )
-  }
-
   return (
-    <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-5 bg-white/97 backdrop-blur-sm select-none">
-      <div
-        className="flex size-52 items-center justify-center overflow-hidden rounded-3xl border-2 border-slate-100 bg-slate-50 shadow-2xl"
-      >
+    <div className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-6 bg-white select-none">
+      <div className="flex h-[65vh] w-[65vh] max-w-[90vw] items-center justify-center overflow-hidden rounded-3xl border border-slate-100 bg-slate-50 shadow-2xl">
         {imageUrl ? (
           <img src={imageUrl} alt={line?.name} className="h-full w-full object-contain" />
         ) : (
-          <svg viewBox="0 0 24 24" className="size-20 text-slate-200" fill="none" stroke="currentColor" strokeWidth={1}>
+          <svg viewBox="0 0 24 24" className="size-32 text-slate-200" fill="none" stroke="currentColor" strokeWidth={1}>
             <rect x="3" y="3" width="18" height="18" rx="2" />
             <circle cx="8.5" cy="8.5" r="1.5" />
             <path d="M21 15l-5-5L5 21" />
@@ -295,16 +274,16 @@ function ProductSpotlight({ sku, line, expanded, imageIndex }: { sku: string; li
         )}
       </div>
       {line && (
-        <div className="text-center space-y-1 px-6">
-          <p className="text-3xl font-black leading-tight text-slate-900">{line.name}</p>
-          <p className="text-lg font-semibold text-slate-400">
-            ฿{fmt(line.unitPrice)}&nbsp;/&nbsp;{line.unitLabel}
+        <div className="text-center space-y-1 px-8">
+          <p className="text-4xl font-black leading-tight text-slate-900">{line.name}</p>
+          <p className="text-2xl font-semibold text-orange-500">
+            ฿{fmt(line.unitPrice)}&nbsp;<span className="text-lg font-normal text-slate-400">/ {line.unitLabel}</span>
           </p>
         </div>
       )}
-      <div className="flex items-center gap-2 text-xs text-slate-300 tracking-widest uppercase">
-        <span className="size-1.5 rounded-full bg-orange-400 animate-pulse" />
-        แตะรูปเพื่อขยาย
+      <div className="flex items-center gap-2 text-sm text-slate-300 tracking-widest uppercase">
+        <span className="size-2 rounded-full bg-orange-400 animate-pulse" />
+        สแกนแล้ว
       </div>
     </div>
   )
@@ -367,7 +346,24 @@ export function CustomerFacingDisplay() {
       }
     }
     window.addEventListener('storage', handler)
-    return () => window.removeEventListener('storage', handler)
+
+    // Tauri webviews don't always fire 'storage' across windows. Poll as a safety net —
+    // re-read on each tick, only update React state when the payload actually changed.
+    let lastRaw = ''
+    const poll = setInterval(() => {
+      try {
+        const raw = localStorage.getItem(CFD_STATE_KEY) ?? ''
+        if (raw === lastRaw) return
+        lastRaw = raw
+        if (!raw) return
+        setState(JSON.parse(raw) as CfdState)
+      } catch { /* noop */ }
+    }, 400)
+
+    return () => {
+      window.removeEventListener('storage', handler)
+      clearInterval(poll)
+    }
   }, [])
 
   useEffect(() => {
@@ -413,15 +409,14 @@ export function CustomerFacingDisplay() {
 
         {/* Order / welcome — 55% */}
         <div className="relative min-w-0 flex-1 p-4 pl-3">
-          {state.mode === 'idle' && <IdleScreen settings={settings} />}
+          {state.mode === 'idle' && !spotlightSku && <IdleScreen settings={settings} />}
           {state.mode === 'qr' && <QrScreen state={state} />}
           {(state.mode === 'active' || state.mode === 'confirmed') && <ActiveScreen state={state} />}
           {state.mode === 'confirmed' && <ConfirmedOverlay state={state} />}
-          {spotlightSku && state.mode === 'active' && (
+          {spotlightSku && state.mode !== 'qr' && state.mode !== 'confirmed' && (
             <ProductSpotlight
               sku={spotlightSku}
               line={state.lines.find((l) => l.sku === spotlightSku)}
-              expanded={!!state.spotlightExpanded}
               imageIndex={state.spotlightImageIndex ?? 0}
             />
           )}

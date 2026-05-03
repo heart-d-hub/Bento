@@ -66,7 +66,11 @@
       "Read(//tmp/**)",
       "Bash(cygpath -w /tmp/node_modules)",
       "Bash(git check-ignore *)",
-      "Bash(echo \"Exit: $?\")"
+      "Bash(echo \"Exit: $?\")",
+      "Bash(echo \"tsc exit=$?\")",
+      "Bash(echo \"eslint exit=$?\")",
+      "Bash(echo \"---STASHED EXIT $?\")",
+      "Bash(echo \"build=$?\")"
     ]
   },
   "model": "claude-opus-4-7"

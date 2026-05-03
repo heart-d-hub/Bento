@@ -18,6 +18,8 @@ type Props = {
   className?: string
   zoomable?: boolean
   onProject?: () => void
+  /** ปิด project to CFD เมื่อ lightbox ถูกปิด — ใช้คู่กับ onProject เพื่อ clear customer display */
+  onProjectClose?: () => void
   /** เมื่อไม่มีรูปจริง — แสดง avatar gradient + ตัวอักษรนี้แทน (เช่น 'I' จาก IDEMITSU) */
   fallbackLetter?: string
   /** เมื่อไม่มีรูปจริง + ไม่มี letter — แสดง emoji แทน (เช่น 🛢️ สำหรับน้ำมันเครื่อง) */
@@ -46,7 +48,7 @@ function pickGradient(seed: string): string {
   return FALLBACK_GRADIENTS[Math.abs(h) % FALLBACK_GRADIENTS.length]
 }
 
-export function ProductImage({ sku, size = 'md', className, zoomable = false, onProject, fallbackLetter, fallbackEmoji, objectFit = 'contain', style }: Props) {
+export function ProductImage({ sku, size = 'md', className, zoomable = false, onProject, onProjectClose, fallbackLetter, fallbackEmoji, objectFit = 'contain', style }: Props) {
   const [url, setUrl] = useState<string | null>(null)
   const [errored, setErrored] = useState(false)
   const [lightboxOpen, setLightboxOpen] = useState(false)
@@ -90,13 +92,20 @@ export function ProductImage({ sku, size = 'md', className, zoomable = false, on
             onError={() => setErrored(true)}
             onClick={(e) => {
               if (!zoomable && onProject) { e.stopPropagation(); onProject(); return }
-              if (zoomable) setLightboxOpen(true)
+              if (zoomable) {
+                setLightboxOpen(true)
+                // Also push to the customer-facing display so the customer sees what the cashier is showing
+                onProject?.()
+              }
             }}
           />
           {zoomable && (
             <div
               className="absolute inset-0 flex items-center justify-center rounded-lg bg-black/0 opacity-0 transition group-hover:bg-black/20 group-hover:opacity-100 cursor-zoom-in"
-              onClick={() => setLightboxOpen(true)}
+              onClick={() => {
+                setLightboxOpen(true)
+                onProject?.()
+              }}
             >
               <ZoomIn className="size-5 text-white drop-shadow" />
             </div>
@@ -142,11 +151,11 @@ export function ProductImage({ sku, size = 'md', className, zoomable = false, on
         createPortal(
           <div
             className="fixed inset-0 z-[500] flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm"
-            onClick={() => setLightboxOpen(false)}
+            onClick={() => { setLightboxOpen(false); onProjectClose?.() }}
           >
             <button
               type="button"
-              onClick={() => setLightboxOpen(false)}
+              onClick={() => { setLightboxOpen(false); onProjectClose?.() }}
               className="absolute right-4 top-4 rounded-full bg-white/10 p-2 text-white transition hover:bg-white/20"
               aria-label="ปิด"
             >

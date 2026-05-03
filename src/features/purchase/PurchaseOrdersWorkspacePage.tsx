@@ -2895,7 +2895,7 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
                                           สินค้าแถม
                                         </span>
                                         {/* Buy+get cycle */}
-                                        <div className={clsx('flex items-center gap-1', (l.bonusPct ?? 0) > 0 && 'opacity-40')}>
+                                        <div className="flex items-center gap-1">
                                           <input
                                             type="number"
                                             min={0}
@@ -2923,33 +2923,6 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
                                             }}
                                             className="w-14 rounded border border-violet-200 bg-white px-2 py-1 text-center text-xs outline-none focus:border-violet-400"
                                           />
-                                        </div>
-                                        <div className="flex items-center gap-1 text-[9px] text-slate-400 font-normal">
-                                          <span className="mx-1">— หรือ —</span>
-                                        </div>
-                                        {/* % extra */}
-                                        <div className={clsx('flex items-center gap-1', ((l.bonusPaidQty ?? 0) > 0 || (l.bonusFreeQty ?? 0) > 0) && 'opacity-40')}>
-                                          <input
-                                            type="number"
-                                            min={0}
-                                            max={100}
-                                            step={0.5}
-                                            value={l.bonusPct ?? ''}
-                                            placeholder="เช่น 5"
-                                            onChange={(e) => {
-                                              const bonusPct = Number.parseFloat(e.target.value) || undefined
-                                              const cost = calcEffectiveCost(l.listPrice, l.discountChain, undefined, undefined, l.orderedQty, l.unitCostOrder, bonusPct)
-                                              patchLine(l.lineId, { bonusPct, bonusPaidQty: undefined, bonusFreeQty: undefined, ...((l.listPrice ?? 0) > 0 ? { unitCostOrder: cost } : {}) })
-                                              savePoLastPromo(l.productId, l.listPrice, l.discountChain, undefined, undefined, bonusPct)
-                                            }}
-                                            className="w-14 rounded border border-violet-200 bg-white px-2 py-1 text-center text-xs outline-none focus:border-violet-400"
-                                          />
-                                          <span className="text-slate-500">% เพิ่ม</span>
-                                          {(l.bonusPct ?? 0) > 0 && (
-                                            <span className="text-[9px] text-emerald-600 font-normal">
-                                              = {Math.floor(l.orderedQty * l.bonusPct! / 100)} ชิ้น
-                                            </span>
-                                          )}
                                         </div>
                                       </div>
 
