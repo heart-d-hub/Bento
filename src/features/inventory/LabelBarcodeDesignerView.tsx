@@ -29,7 +29,7 @@ import {
 } from '@/features/inventory/data/priceCipherStore'
 import { loadStoreProfile, STORE_PROFILE_CHANGED_EVENT } from '@/features/settings/data/storeProfileStore'
 import { QUICK_START_TEMPLATES, type QuickStartTemplate } from '@/features/inventory/data/labelDesignerQuickStarts'
-import { CopyPlus, Plus, RotateCcw, Save, Sparkles, Store, Trash2 } from 'lucide-react'
+import { CopyPlus, Plus, Redo2, RotateCcw, Save, Sparkles, Store, Trash2, Undo2 } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 type LabelBarcodeDesignerViewProps = {
@@ -201,6 +201,8 @@ export function LabelBarcodeDesignerView({ className, previewRow }: LabelBarcode
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [zoom, setZoom] = useState(1.6)
   const [quickStartOpen, setQuickStartOpen] = useState(false)
+  const [historyPast, setHistoryPast] = useState<LabelDesignerTemplatesState[]>([])
+  const [historyFuture, setHistoryFuture] = useState<LabelDesignerTemplatesState[]>([])
   const [storeNamePreview, setStoreNamePreview] = useState(() => loadStoreProfile().storeName)
   const [cipherSettings, setCipherSettings] = useState(() => loadPriceCipherSettings())
   const canvasRef = useRef<HTMLDivElement | null>(null)
@@ -226,8 +228,56 @@ export function LabelBarcodeDesignerView({ className, previewRow }: LabelBarcode
     return t ?? lib.templates[0] ?? null
   }, [lib])
 
+  const libRef = useRef(lib)
+  useEffect(() => {
+    libRef.current = lib
+  }, [lib])
+
+  const HISTORY_MAX = 50
+  const pushHistory = useCallback(() => {
+    setHistoryPast((past) => {
+      const snapshot = structuredClone(libRef.current)
+      const next = [...past, snapshot]
+      return next.length > HISTORY_MAX ? next.slice(-HISTORY_MAX) : next
+    })
+    setHistoryFuture([])
+  }, [])
+
   const mergeLib = useCallback((recipe: (prev: LabelDesignerTemplatesState) => LabelDesignerTemplatesState) => {
+    pushHistory()
     setLib((prev) => saveLabelDesignerTemplatesState(recipe(prev)))
+  }, [pushHistory])
+
+  const undo = useCallback(() => {
+    setHistoryPast((past) => {
+      if (past.length === 0) return past
+      const prev = past[past.length - 1]!
+      const newPast = past.slice(0, -1)
+      setHistoryFuture((future) => {
+        const snapshot = structuredClone(libRef.current)
+        const next = [snapshot, ...future]
+        return next.length > HISTORY_MAX ? next.slice(0, HISTORY_MAX) : next
+      })
+      setLib(saveLabelDesignerTemplatesState(prev))
+      setSelectedId(null)
+      return newPast
+    })
+  }, [])
+
+  const redo = useCallback(() => {
+    setHistoryFuture((future) => {
+      if (future.length === 0) return future
+      const next = future[0]!
+      const newFuture = future.slice(1)
+      setHistoryPast((past) => {
+        const snapshot = structuredClone(libRef.current)
+        const arr = [...past, snapshot]
+        return arr.length > HISTORY_MAX ? arr.slice(-HISTORY_MAX) : arr
+      })
+      setLib(saveLabelDesignerTemplatesState(next))
+      setSelectedId(null)
+      return newFuture
+    })
   }, [])
 
   useLayoutEffect(() => {
@@ -299,6 +349,30 @@ export function LabelBarcodeDesignerView({ className, previewRow }: LabelBarcode
     [mergeLib],
   )
 
+  const duplicateElement = useCallback(
+    (id: string) => {
+      const newId = newElementId()
+      mergeLib((prev) => ({
+        ...prev,
+        templates: prev.templates.map((t) => {
+          if (t.id !== prev.activeId) return t
+          const src = t.elements.find((e) => e.id === id)
+          if (!src) return t
+          const offset = 4
+          const dup: LabelDesignerElement = {
+            ...src,
+            id: newId,
+            x: clamp(src.x + offset, 0, 100 - src.w),
+            y: clamp(src.y + offset, 0, 100 - src.h),
+          }
+          return { ...t, elements: [...t.elements, dup] }
+        }),
+      }))
+      queueMicrotask(() => setSelectedId(newId))
+    },
+    [mergeLib],
+  )
+
   const toggleCheckboxField = useCallback(
     (opt: DesignerCheckboxOption, enabled: boolean) => {
       mergeLib((prev) => {
@@ -336,6 +410,7 @@ export function LabelBarcodeDesignerView({ className, previewRow }: LabelBarcode
     const baseline = savedBaselineRef.current
     if (!baseline) return
     if (!window.confirm('คืนค่าตามที่กดบันทึกล่าสุด? การแก้หลังบันทึกจะหาย')) return
+    pushHistory()
     const clone = structuredClone(baseline)
     setLib(clone)
     saveLabelDesignerTemplatesState(clone)
@@ -378,11 +453,79 @@ export function LabelBarcodeDesignerView({ className, previewRow }: LabelBarcode
     }
   }, [])
 
+  // Keyboard shortcuts: Ctrl+Z/Y, Delete, Ctrl+D, Esc, Arrow keys
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null
+      const tag = target?.tagName?.toLowerCase()
+      const isTyping = tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable
+      if (isTyping) return
+
+      const mod = e.ctrlKey || e.metaKey
+
+      // Undo / Redo
+      if (mod && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
+        e.preventDefault()
+        undo()
+        return
+      }
+      if (mod && ((e.shiftKey && (e.key === 'z' || e.key === 'Z')) || e.key === 'y' || e.key === 'Y')) {
+        e.preventDefault()
+        redo()
+        return
+      }
+
+      if (selectedId) {
+        // Delete element
+        if (!mod && (e.key === 'Delete' || e.key === 'Backspace')) {
+          e.preventDefault()
+          removeElement(selectedId)
+          return
+        }
+        // Duplicate (Ctrl+D)
+        if (mod && (e.key === 'd' || e.key === 'D')) {
+          e.preventDefault()
+          duplicateElement(selectedId)
+          return
+        }
+        // Arrow nudge
+        if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+          e.preventDefault()
+          const tpl = libRef.current.templates.find((t) => t.id === libRef.current.activeId)
+          const el = tpl?.elements.find((x) => x.id === selectedId)
+          if (!el || !tpl) return
+          const stepMm = e.shiftKey ? 5 : 1
+          const stepXPct = (stepMm / tpl.widthMm) * 100
+          const stepYPct = (stepMm / tpl.heightMm) * 100
+          let nx = el.x
+          let ny = el.y
+          if (e.key === 'ArrowLeft') nx = clamp(el.x - stepXPct, 0, 100 - el.w)
+          if (e.key === 'ArrowRight') nx = clamp(el.x + stepXPct, 0, 100 - el.w)
+          if (e.key === 'ArrowUp') ny = clamp(el.y - stepYPct, 0, 100 - el.h)
+          if (e.key === 'ArrowDown') ny = clamp(el.y + stepYPct, 0, 100 - el.h)
+          updateElement(selectedId, { x: nx, y: ny })
+          return
+        }
+      }
+
+      // Esc — deselect
+      if (e.key === 'Escape') {
+        if (selectedId) {
+          e.preventDefault()
+          setSelectedId(null)
+        }
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [selectedId, undo, redo, removeElement, duplicateElement, updateElement])
+
   const onPointerDownElement = (e: React.PointerEvent, el: LabelDesignerElement) => {
     if (e.button !== 0) return
     e.stopPropagation()
     e.preventDefault()
     setSelectedId(el.id)
+    pushHistory()
     dragRef.current = {
       id: el.id,
       startClientX: e.clientX,
@@ -483,6 +626,24 @@ export function LabelBarcodeDesignerView({ className, previewRow }: LabelBarcode
               />
               <span className="tabular-nums">{zoom.toFixed(1)}×</span>
             </label>
+            <button
+              type="button"
+              onClick={undo}
+              disabled={historyPast.length === 0}
+              title="ย้อนกลับ (Ctrl+Z)"
+              className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-[11px] text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Undo2 className="size-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={redo}
+              disabled={historyFuture.length === 0}
+              title="ทำซ้ำ (Ctrl+Y / Ctrl+Shift+Z)"
+              className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-[11px] text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Redo2 className="size-3.5" />
+            </button>
             <button
               type="button"
               onClick={() => {
