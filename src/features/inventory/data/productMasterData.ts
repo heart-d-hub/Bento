@@ -479,8 +479,10 @@ export type ProductMasterDetail = {
   unitLarge?: string
   /** บรรจุ */
   packaging?: string
-  /** ที่เก็บ */
+  /** @deprecated ใช้ storageLocations แทน — เก็บไว้อ่านข้อมูลเก่า; primary = storageLocations[0] */
   storageLocation?: string
+  /** ที่เก็บหลายตำแหน่ง (เช่น ชั้นหน้า + สต็อกหลังร้าน) — ตัวแรก = หลัก */
+  storageLocations?: string[]
   /** หมายเหตุ */
   notes?: string
   /** หมายเหตุแสดงบน POS — โชว์หลังชื่อสินค้า (เช่น โปรโมชัน) */
@@ -544,6 +546,8 @@ export type ProductMasterDetail = {
   receiveBonusRules?: ReceiveBonusRule[]
   /** ส่วนประกอบของสินค้าชุด (Bundle/Kit) — ตัดสต็อกจาก SKU ส่วนประกอบแทน SKU ชุด */
   bundleComponents?: BundleComponent[]
+  /** ID แม่แบบป้ายบาร์โค้ดเฉพาะของสินค้านี้ — ทับค่าหมวด; ไม่ระบุ = ใช้ของหมวด */
+  labelTemplateId?: string
   /** ISO timestamp เมื่อถูกย้ายเข้าถังขยะ — ถ้ามีค่า = soft-deleted */
   deletedAt?: string
 }
@@ -663,6 +667,26 @@ export function sellPriceTierContextFromProduct(
 }
 
 /** รวม salesUnits จากฟิลด์ใหม่หรือแปลงจากหน่วยย่อย/ใหญ่ + บรรจุ */
+/** ที่เก็บทั้งหมด — รวม storageLocations (ใหม่) กับ storageLocation (เก่า, fallback) */
+export function productStorageLocations(p: {
+  storageLocations?: string[]
+  storageLocation?: string
+}): string[] {
+  if (p.storageLocations && p.storageLocations.length > 0) {
+    return p.storageLocations.map((s) => s.trim()).filter((s) => s.length > 0)
+  }
+  const single = (p.storageLocation ?? '').trim()
+  return single ? [single] : []
+}
+
+/** ที่เก็บหลัก — ตำแหน่งแรกของ storageLocations หรือ storageLocation (เก่า) */
+export function primaryStorageLocation(p: {
+  storageLocations?: string[]
+  storageLocation?: string
+}): string | undefined {
+  return productStorageLocations(p)[0]
+}
+
 export function normalizeSalesUnits(p: ProductMasterDetail): SalesUnit[] {
   if (p.salesUnits && p.salesUnits.length > 0) {
     return p.salesUnits.map((u) => ({
@@ -1758,9 +1782,19 @@ export function getProductMasterList(): ProductMasterDetail[] {
   }
   try {
     const raw = localStorage.getItem(PRODUCT_MASTER_LIST_LS_KEY)
-    if (!raw) return [...PRODUCT_MASTER_DETAILS]
+    if (!raw) {
+      const seed = [...PRODUCT_MASTER_DETAILS]
+      productMasterMemoryCache = seed
+      productMasterSkuMap = null
+      return seed
+    }
     const parsed = JSON.parse(raw) as unknown
-    if (!Array.isArray(parsed) || parsed.length === 0) return [...PRODUCT_MASTER_DETAILS]
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      const seed = [...PRODUCT_MASTER_DETAILS]
+      productMasterMemoryCache = seed
+      productMasterSkuMap = null
+      return seed
+    }
     const afterHose = migrateLegacyHoseProductTag(parsed as ProductMasterDetail[])
     const oemFix = migrateSkuDuplicateFromOemToFactory(afterHose)
     const wheelsFix = migrateWheels1WD(oemFix.list)
@@ -1777,9 +1811,14 @@ export function getProductMasterList(): ProductMasterDetail[] {
         schedulePersistProductMasterListToDb(finalList)
       }
     }
+    productMasterMemoryCache = finalList
+    productMasterSkuMap = null
     return finalList
   } catch {
-    return [...PRODUCT_MASTER_DETAILS]
+    const seed = [...PRODUCT_MASTER_DETAILS]
+    productMasterMemoryCache = seed
+    productMasterSkuMap = null
+    return seed
   }
 }
 

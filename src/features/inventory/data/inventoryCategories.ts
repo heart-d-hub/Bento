@@ -1,6 +1,6 @@
 import { MOCK_PRODUCTS } from '@/features/inventory/data/mockInventory'
 import { isTauri } from '@/features/desktop/isTauri'
-import { getProductMasterList } from '@/features/inventory/data/productMasterData'
+import { getProductMasterList, type ProductMasterDetail } from '@/features/inventory/data/productMasterData'
 import { invoke } from '@tauri-apps/api/core'
 
 const LEGACY_LIST_KEY = 'bento_inventory_category_list_v1'
@@ -49,6 +49,8 @@ export type SubSubCategory = {
   productFormShowFactoryNo?: boolean
   productFormShowVehicleFitment?: boolean
   productFormShowPhysicalDimensions?: boolean
+  /** แม่แบบป้ายบาร์โค้ดของหมวดนี้ — ใช้เมื่อสินค้าไม่ระบุของตัวเอง; สืบทอด ย่อย2 → ย่อย1 → หลัก */
+  labelTemplateId?: string
 }
 
 export type SubCategory = {
@@ -68,6 +70,8 @@ export type SubCategory = {
   productFormShowFactoryNo?: boolean
   productFormShowVehicleFitment?: boolean
   productFormShowPhysicalDimensions?: boolean
+  /** @see SubSubCategory.labelTemplateId */
+  labelTemplateId?: string
 }
 
 export type MainCategory = {
@@ -91,6 +95,8 @@ export type MainCategory = {
   productFormShowFactoryNo?: boolean
   productFormShowVehicleFitment?: boolean
   productFormShowPhysicalDimensions?: boolean
+  /** @see SubSubCategory.labelTemplateId */
+  labelTemplateId?: string
 }
 
 /** ผลรวมว่าจะแสดงแต่ละฟิลด์เสริมในฟอร์มเพิ่มสินค้าหรือไม่ (แบ่งขายแสดงเสมอ; แท็กสินค้าควบคุมที่หมวด) */
@@ -104,6 +110,12 @@ export type ProductFormFieldVisibility = {
 
 function normalizeOptionalBool(raw: unknown): boolean | undefined {
   return typeof raw === 'boolean' ? raw : undefined
+}
+
+function normalizeOptionalString(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  const t = raw.trim()
+  return t.length > 0 ? t : undefined
 }
 
 function pickProductFormShow(
@@ -333,6 +345,7 @@ function normalizeSubSub(s: unknown): SubSubCategory | null {
     productFormShowFactoryNo: normalizeOptionalBool(o.productFormShowFactoryNo),
     productFormShowVehicleFitment: normalizeOptionalBool(o.productFormShowVehicleFitment),
     productFormShowPhysicalDimensions: normalizeOptionalBool(o.productFormShowPhysicalDimensions),
+    labelTemplateId: normalizeOptionalString(o.labelTemplateId),
   }
 }
 
@@ -359,6 +372,7 @@ function normalizeSub(s: unknown): SubCategory | null {
     productFormShowFactoryNo: normalizeOptionalBool(o.productFormShowFactoryNo),
     productFormShowVehicleFitment: normalizeOptionalBool(o.productFormShowVehicleFitment),
     productFormShowPhysicalDimensions: normalizeOptionalBool(o.productFormShowPhysicalDimensions),
+    labelTemplateId: normalizeOptionalString(o.labelTemplateId),
   }
 }
 
@@ -394,6 +408,7 @@ export function normalizeCategoryTree(tree: unknown): MainCategory[] {
       productFormShowFactoryNo: normalizeOptionalBool(o.productFormShowFactoryNo),
       productFormShowVehicleFitment: normalizeOptionalBool(o.productFormShowVehicleFitment),
       productFormShowPhysicalDimensions: normalizeOptionalBool(o.productFormShowPhysicalDimensions),
+      labelTemplateId: normalizeOptionalString(o.labelTemplateId),
     })
   }
   return out
@@ -616,6 +631,48 @@ export function resolveBoltHeadGroupBySizeForProduct(
     return main.boltHeadGroupBySize ?? false
   }
   return main.boltHeadGroupBySize ?? false
+}
+
+/**
+ * แม่แบบป้ายของหมวด — สืบทอด ย่อย2 → ย่อย1 → หลัก; ไม่พบ = undefined
+ * (สินค้าใช้ของตัวเองก่อน fallback มาที่นี่)
+ */
+export function resolveLabelTemplateIdForCategory(
+  tree: MainCategory[],
+  categoryMain: string,
+  subName?: string,
+  subSubName?: string,
+): string | undefined {
+  const n = (s: string) => s.trim().toLowerCase()
+  const main = tree.find((m) => n(m.name) === n(categoryMain))
+  if (!main) return undefined
+  const sub = subName?.trim()
+    ? main.subcategories.find((s) => n(s.name) === n(subName))
+    : undefined
+  const subSub =
+    sub && subSubName?.trim()
+      ? sub.subSubcategories.find((x) => n(x.name) === n(subSubName))
+      : undefined
+  if (subSub?.labelTemplateId) return subSub.labelTemplateId
+  if (sub?.labelTemplateId) return sub.labelTemplateId
+  return main.labelTemplateId
+}
+
+/**
+ * แม่แบบป้ายของสินค้า: สินค้า → หมวด (ย่อย2 → ย่อย1 → หลัก) → undefined
+ * ผู้เรียกควร fallback ต่อด้วย user pref / template แรกในไลบรารี
+ */
+export function resolveLabelTemplateIdForProduct(
+  product: Pick<ProductMasterDetail, 'labelTemplateId' | 'category' | 'subCategory' | 'subSubCategory'>,
+  tree: MainCategory[],
+): string | undefined {
+  if (product.labelTemplateId) return product.labelTemplateId
+  return resolveLabelTemplateIdForCategory(
+    tree,
+    product.category,
+    product.subCategory,
+    product.subSubCategory,
+  )
 }
 
 export { newId }

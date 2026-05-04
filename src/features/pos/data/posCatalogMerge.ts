@@ -17,7 +17,7 @@ export function masterToInventoryProduct(m: ProductMasterDetail): InventoryProdu
     factoryOem: m.factoryNo ?? '',
     name: m.name,
     brand: m.brand === '—' ? '' : m.brand,
-    location: m.storageLocation ?? m.crossBranch?.[0]?.position ?? '',
+    location: m.storageLocations?.[0] ?? m.storageLocation ?? m.crossBranch?.[0]?.position ?? '',
     stock,
     minStock: 0,
     category: m.category,

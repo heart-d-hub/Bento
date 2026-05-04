@@ -43,12 +43,21 @@ export function LabelBarcodeSvg({
         margin: 2,
         fontSize,
       })
+      // JsBarcode ตั้ง width/height คงที่ → ใส่ viewBox ให้ SVG สเกลตามกล่อง (ไม่ล้น)
+      const w = parseFloat(el.getAttribute('width') ?? '0')
+      const h = parseFloat(el.getAttribute('height') ?? '0')
+      if (w > 0 && h > 0) {
+        el.setAttribute('viewBox', `0 0 ${w} ${h}`)
+        el.removeAttribute('width')
+        el.removeAttribute('height')
+        el.setAttribute('preserveAspectRatio', 'xMidYMid meet')
+      }
     } catch {
       /* invalid code */
     }
   }, [value, height, textFontSize])
 
-  return <svg ref={svgRef} className={className ?? 'max-h-[52px] w-full min-w-0'} aria-hidden />
+  return <svg ref={svgRef} className={className ?? 'h-full max-h-full w-full min-w-0'} aria-hidden />
 }
 
 export function LabelStickerCell({

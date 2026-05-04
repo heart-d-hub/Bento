@@ -3,7 +3,6 @@ import {
   LabelDesignerPrintPage,
   type LabelDesignerPrintLayoutMode,
 } from '@/features/inventory/components/LabelDesignerPrintPage'
-import { type LabelDisplayFlags } from '@/features/inventory/components/LabelPrintParts'
 import type { LabelDesignerTemplate } from '@/features/inventory/data/labelDesignerTemplateStore'
 import {
   LABEL_DESIGNER_TEMPLATES_CHANGED_EVENT,
@@ -21,18 +20,11 @@ import {
   type LabelPrintQueueItem,
 } from '@/features/inventory/data/labelPrintQueueStore'
 import {
-  LABEL_PRINT_REFERENCE_PRINTER_MODEL,
-  LABEL_PRINT_SHEET_WIDTH_MM,
   computeAutoSheetCols,
   DESIGNER_PRINT_SHEET_ROWS_DEFAULT,
-  labelPrintContentWidthMm,
   labelPrintPageBoxMm,
 } from '@/features/inventory/data/labelDesignerPrintMedia'
-import {
-  loadLabelPrintUiPrefs,
-  saveLabelPrintUiPrefs,
-  type LabelPrintUiPrefs,
-} from '@/features/inventory/data/labelPrintUiPrefs'
+import { loadLabelPrintUiPrefs } from '@/features/inventory/data/labelPrintUiPrefs'
 import {
   buildComposite2x4LabelPages,
   buildLabelPages,
@@ -41,7 +33,13 @@ import {
   type EnrichedLabelRow,
 } from '@/features/inventory/labelPrintLayout'
 import { isComposite2x4StickerTemplate } from '@/features/inventory/data/labelDesignerDensityPresets'
-import { getProductMasterList, normalizeSalesUnits, type ProductMasterDetail } from '@/features/inventory/data/productMasterData'
+import {
+  loadCategoryTree,
+  resolveLabelTemplateIdForProduct,
+  INVENTORY_CATEGORIES_UPDATED_EVENT,
+  type MainCategory,
+} from '@/features/inventory/data/inventoryCategories'
+import { getProductMasterList, normalizeSalesUnits, primaryStorageLocation, productStorageLocations, type ProductMasterDetail } from '@/features/inventory/data/productMasterData'
 import { DESIGNER_SAMPLE_ROW } from '@/features/inventory/labelDesignerFieldUtils'
 import { LabelBarcodeDesignerView } from '@/features/inventory/LabelBarcodeDesignerView'
 import { LabelPriceCipherSettingsView } from '@/features/inventory/LabelPriceCipherSettingsView'
@@ -51,6 +49,8 @@ import { useWorkspaceTabs } from '@/features/main/context/WorkspaceTabsContext'
 import {
   ArrowRight,
   Barcode,
+  Eye,
+  FlaskConical,
   KeyRound,
   LayoutTemplate,
   Package,
@@ -59,21 +59,11 @@ import {
   Trash2,
   X,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 
 type LabelPrintWorkspacePageProps = {
   className?: string
-}
-
-function templateLabel(t: LabelPrintQueueItem['template']): string {
-  if (t === 'small') return 'เล็ก'
-  if (t === 'medium') return 'กลาง'
-  return 'ใหญ่'
-}
-
-function formatBaht(n: number): string {
-  return n.toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
 function labelCarModelText(
@@ -95,41 +85,23 @@ type PrintJob = {
   sheetCols: number
   sheetRows: number
   printLayout: LabelDesignerPrintLayoutMode
-  flags: LabelDisplayFlags
   storeName: string
   priceCipher: PriceCipherSettings
 }
 
 export function LabelPrintWorkspacePage({ className }: LabelPrintWorkspacePageProps) {
-  const prefsRef = useRef<HTMLDivElement | null>(null)
   const { labelPrintTopSection, setLabelPrintTopSection, openTab, setBranchStockPanel } = useWorkspaceTabs()
   const [barcodeSubTab, setBarcodeSubTab] = useState<'queue' | 'designer' | 'price-cipher'>('queue')
   const [rows, setRows] = useState<LabelPrintQueueItem[]>(() => loadLabelPrintQueue())
-  const [prefs, setPrefs] = useState(loadLabelPrintUiPrefs)
+  const prefs = useMemo(() => loadLabelPrintUiPrefs(), [])
   const [addQuery, setAddQuery] = useState('')
 
-  const [settingsOpen, setSettingsOpen] = useState(false)
   const [previewOpen, setPreviewOpen] = useState(false)
   const [previewData, setPreviewData] = useState<PrintJob | null>(null)
   const [printJob, setPrintJob] = useState<PrintJob | null>(null)
 
-  const showName = prefs.showName
-  const showOem = prefs.showOem
-  const showFactoryNo = prefs.showFactoryNo
-  const showSku = prefs.showSku
-  const showPrice = prefs.showPrice
   const [designerLib, setDesignerLib] = useState(() => loadLabelDesignerTemplatesState())
-
-  const effectiveDesignerTemplateId =
-    prefs.lastDesignerTemplateId ?? designerLib.templates[0]?.id ?? ''
-
-  const patchPrefs = useCallback((patch: Partial<LabelPrintUiPrefs>) => {
-    setPrefs((prev) => {
-      const next = { ...prev, ...patch }
-      saveLabelPrintUiPrefs(next)
-      return next
-    })
-  }, [])
+  const [categoryTree, setCategoryTree] = useState<MainCategory[]>(() => loadCategoryTree())
 
   useEffect(() => {
     const refresh = () => setRows(loadLabelPrintQueue())
@@ -141,6 +113,12 @@ export function LabelPrintWorkspacePage({ className }: LabelPrintWorkspacePagePr
     const refresh = () => setDesignerLib(loadLabelDesignerTemplatesState())
     window.addEventListener(LABEL_DESIGNER_TEMPLATES_CHANGED_EVENT, refresh)
     return () => window.removeEventListener(LABEL_DESIGNER_TEMPLATES_CHANGED_EVENT, refresh)
+  }, [])
+
+  useEffect(() => {
+    const refresh = () => setCategoryTree(loadCategoryTree())
+    window.addEventListener(INVENTORY_CATEGORIES_UPDATED_EVENT, refresh)
+    return () => window.removeEventListener(INVENTORY_CATEGORIES_UPDATED_EVENT, refresh)
   }, [])
 
   const totalSheets = useMemo(() => rows.reduce((sum, r) => sum + r.qty, 0), [rows])
@@ -164,7 +142,8 @@ export function LabelPrintWorkspacePage({ className }: LabelPrintWorkspacePagePr
           carModelText: labelCarModelText(master?.carModelLabel, master?.yearLabel, master?.carModels?.[0]),
           salesUnitText: salesUnit,
           brandText: master?.brand,
-          storageLocation: master?.storageLocation,
+          storageLocation: master ? primaryStorageLocation(master) : undefined,
+          storageLocations: master ? productStorageLocations(master) : undefined,
           price: r.price ?? master?.sellPrice,
           costPrice,
           priceCipherMoney: buildPriceCipherMoneyForRow(master, {
@@ -176,45 +155,58 @@ export function LabelPrintWorkspacePage({ className }: LabelPrintWorkspacePagePr
     [rows],
   )
 
-  const displayFlags: LabelDisplayFlags = useMemo(
-    () => ({ showName, showOem, showFactoryNo, showSku, showPrice }),
-    [showName, showOem, showFactoryNo, showSku, showPrice],
-  )
-
   const designerPreviewRow = rowsWithMeta[0] ?? DESIGNER_SAMPLE_ROW
 
-  const openPrintSettings = () => {
-    if (rows.length === 0) {
-      window.alert('ยังไม่มีคิวพิมพ์')
-      return
-    }
-    if (designerLib.templates.length === 0) {
-      window.alert('สร้างแม่แบบในแท็บออกแบบป้ายก่อน')
-      return
-    }
-    setSettingsOpen(true)
+  type QueueGroup = {
+    templateId: string
+    templateName: string
+    templateMissing: boolean
+    rows: EnrichedLabelRow[]
+    totalSheets: number
   }
 
-  const buildPrintJob = (): PrintJob | null => {
-    const expanded = expandQueueToLabels(rowsWithMeta)
-    if (expanded.length === 0) {
-      window.alert('จำนวนแผ่นในคิวเป็น 0 — ตรวจสอบจำนวนต่อรายการ')
-      return null
+  const groups: QueueGroup[] = useMemo(() => {
+    const fallbackId = prefs.lastDesignerTemplateId ?? designerLib.templates[0]?.id ?? ''
+    const order: string[] = []
+    const map = new Map<string, EnrichedLabelRow[]>()
+    for (const r of rowsWithMeta) {
+      const id = r.labelTemplateId ?? fallbackId
+      if (!map.has(id)) {
+        map.set(id, [])
+        order.push(id)
+      }
+      map.get(id)!.push(r)
     }
+    return order.map((templateId) => {
+      const groupRows = map.get(templateId)!
+      const entry = designerLib.templates.find((t) => t.id === templateId)
+      return {
+        templateId,
+        templateName: entry?.name || (templateId ? '(ไม่พบแม่แบบ)' : '(ยังไม่ได้เลือกแม่แบบ)'),
+        templateMissing: !entry,
+        rows: groupRows,
+        totalSheets: groupRows.reduce((s, r) => s + r.qty, 0),
+      }
+    })
+  }, [rowsWithMeta, prefs.lastDesignerTemplateId, designerLib.templates])
 
-    const tid = prefs.lastDesignerTemplateId ?? designerLib.templates[0]?.id
-    if (!tid) {
-      window.alert('ยังไม่มีแม่แบบ — ไปที่แท็บออกแบบป้ายก่อน')
+  const buildJobForGroup = (group: QueueGroup): PrintJob | null => {
+    if (group.templateMissing) {
+      window.alert(`ไม่พบแม่แบบ "${group.templateName}" — แก้แม่แบบที่หมวด/สินค้า หรือสร้างแม่แบบใหม่ในแท็บออกแบบป้าย`)
       return null
     }
-    const entry = designerLib.templates.find((t) => t.id === tid)
+    const expanded = expandQueueToLabels(group.rows)
+    if (expanded.length === 0) {
+      window.alert('จำนวนแผ่นในกลุ่มเป็น 0 — ตรวจสอบจำนวนต่อรายการ')
+      return null
+    }
+    const entry = designerLib.templates.find((t) => t.id === group.templateId)
     if (!entry) {
       window.alert('ไม่พบแม่แบบที่เลือก')
       return null
     }
     const template = entryToTemplate(entry)
     const sheetRows = DESIGNER_PRINT_SHEET_ROWS_DEFAULT
-
     if (isComposite2x4StickerTemplate(template)) {
       const sheetCols = computeAutoSheetCols(50)
       const physicalPerPage = sheetCols * sheetRows
@@ -225,12 +217,10 @@ export function LabelPrintWorkspacePage({ className }: LabelPrintWorkspacePagePr
         sheetCols,
         sheetRows,
         printLayout: 'composite2x4' as const,
-        flags: displayFlags,
         storeName: loadStoreProfile().storeName,
         priceCipher: loadPriceCipherSettings(),
       }
     }
-
     const sheetCols = computeAutoSheetCols(template.widthMm)
     const per = sheetCols * sheetRows
     const pages = buildLabelPages(expanded, per)
@@ -240,30 +230,28 @@ export function LabelPrintWorkspacePage({ className }: LabelPrintWorkspacePagePr
       sheetCols,
       sheetRows,
       printLayout: 'simple' as const,
-      flags: displayFlags,
       storeName: loadStoreProfile().storeName,
       priceCipher: loadPriceCipherSettings(),
     }
   }
 
-  const handlePreviewFromDialog = () => {
-    const job = buildPrintJob()
+  const handlePrintGroup = (group: QueueGroup) => {
+    const job = buildJobForGroup(group)
+    if (job) setPrintJob(job)
+  }
+
+  const handlePreviewGroup = (group: QueueGroup) => {
+    const job = buildJobForGroup(group)
     if (!job) return
     setPreviewData(job)
     setPreviewOpen(true)
-    setSettingsOpen(false)
   }
 
-  const handlePrintFromDialog = () => {
-    const job = buildPrintJob()
-    if (!job) return
-    setPrintJob(job)
-    setSettingsOpen(false)
-  }
-
-  const scrollToFormPrefs = () => {
-    setSettingsOpen(false)
-    prefsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  const handleTestGroup = (group: QueueGroup) => {
+    if (group.rows.length === 0) return
+    const sample = [{ ...group.rows[0]!, qty: 1 }]
+    const job = buildJobForGroup({ ...group, rows: sample })
+    if (job) setPrintJob(job)
   }
 
   useEffect(() => {
@@ -351,6 +339,7 @@ export function LabelPrintWorkspacePage({ className }: LabelPrintWorkspacePagePr
       price: p.sellPrice,
       qty: 1,
       template: 'medium',
+      labelTemplateId: resolveLabelTemplateIdForProduct(p, categoryTree),
     })
     setAddQuery('')
   }
@@ -383,112 +372,6 @@ export function LabelPrintWorkspacePage({ className }: LabelPrintWorkspacePagePr
             document.body,
           )
         : null}
-
-      {settingsOpen ? (
-        <div
-          className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/45 p-4 backdrop-blur-[1px]"
-          role="dialog"
-          aria-modal
-          aria-labelledby="label-print-settings-title"
-        >
-          <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-4 shadow-xl">
-            <div className="mb-3 flex items-start justify-between gap-2">
-              <div>
-                <h2 id="label-print-settings-title" className="text-base font-semibold text-slate-900">
-                  สั่งพิมพ์ป้าย
-                </h2>
-                <p className="mt-0.5 text-xs text-slate-600">
-                  เลือกแม่แบบและเครื่องพิมพ์ — ป้ายเรียงซ้ายไปขวา; จำนวนคอลัมน์คำนวณจากความกว้างแม่แบบและกระดาษ
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setSettingsOpen(false)}
-                className="rounded-lg border border-slate-200 p-1.5 text-slate-600 hover:bg-slate-50"
-                aria-label="ปิด"
-              >
-                <X className="size-4" />
-              </button>
-            </div>
-
-            <div className="space-y-3">
-              <label className="block">
-                <span className="mb-1 block text-xs font-medium text-slate-700">แม่แบบป้าย</span>
-                <select
-                  value={effectiveDesignerTemplateId}
-                  onChange={(e) => patchPrefs({ lastDesignerTemplateId: e.target.value })}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
-                >
-                  {designerLib.templates.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.name || 'ไม่มีชื่อ'} ({t.widthMm}×{t.heightMm} มม.)
-                    </option>
-                  ))}
-                </select>
-                <p className="mt-1 text-[10px] text-slate-500">
-                  สร้างและแก้ในแท็บออกแบบป้าย — บันทึกแล้วจะอยู่ในรายการนี้ — แม่แบบ 25×17.5 (2×4) พิมพ์ 4 รายการต่อดวง
-                  50×35 มม. เรียงซ้ายบน → ซ้ายล่าง → ขวาบน → ขวาล่าง
-                </p>
-              </label>
-
-              <div>
-                <span className="mb-1 block text-xs font-medium text-slate-700">เครื่องพิมพ์</span>
-                <p className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
-                  เลือก <strong className="font-semibold text-slate-800">{LABEL_PRINT_REFERENCE_PRINTER_MODEL}</strong> ในกล่องพิมพ์ของ
-                  Windows (ไดรเวอร์ TSC) — กระดาษ/ม้วนกว้าง ~{LABEL_PRINT_SHEET_WIDTH_MM} มม. พื้นที่พิมพ์กว้าง ~{labelPrintContentWidthMm()} มม.
-                  สอบเทียบจุดเริ่มพิมพ์ในไดรเวอร์หรือยูทิลิตี้เครื่องถ้าจำเป็น
-                </p>
-                <p className="mt-2 rounded-xl border border-amber-200/90 bg-amber-50/90 px-3 py-2 text-[10px] leading-snug text-amber-950">
-                  <strong className="font-semibold">สำคัญ — ขนาดกระดาษในกล่องพิมพ์:</strong> อย่าเลือก <strong>&quot;2 x 4&quot;</strong> ถ้าใช้ม้วนกว้าง{' '}
-                  {LABEL_PRINT_SHEET_WIDTH_MM} มม. — ค่านั้นมักหมายถึง <strong>2×4 นิ้ว</strong> (แคบ ~51mm กว้าง) ไม่ใช่ม้วน 4 นิ้ว
-                  จึงเห็นป้ายแคบๆ อยู่แถวบนและพื้นที่ขาวเต็มหน้า
-                  <br />
-                  ให้เลือก <strong>USER / Custom</strong> หรือ preset ในไดรเวอร์ TSC สำหรับม้วน <strong>4 นิ้ว (104mm)</strong> / ความกว้างใกล้{' '}
-                  {LABEL_PRINT_SHEET_WIDTH_MM} มม. แทน
-                  <br />
-                  <strong className="font-semibold">อื่นๆ:</strong> ปิด <strong>Headers and footers</strong> — <strong>Scale 100%</strong> —{' '}
-                  <strong>Margins: None</strong> (ไม่ใช่ Default) — <strong>Pages per sheet: 1</strong> — ห้าม Fit to page
-                </p>
-              </div>
-            </div>
-
-            <div className="mt-4 flex flex-wrap gap-2 border-t border-slate-100 pt-4">
-              <button
-                type="button"
-                onClick={handlePrintFromDialog}
-                className="inline-flex flex-1 min-w-[5rem] items-center justify-center gap-1.5 rounded-xl bg-emerald-600 px-3 py-2 text-xs font-semibold text-white shadow-sm hover:bg-emerald-700"
-              >
-                พิมพ์
-              </button>
-              <button
-                type="button"
-                onClick={handlePreviewFromDialog}
-                className="inline-flex flex-1 min-w-[5rem] items-center justify-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-900 hover:bg-indigo-100"
-              >
-                <Search className="size-3.5" aria-hidden />
-                หน้าจอ
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setSettingsOpen(false)
-                  scrollToFormPrefs()
-                }}
-                className="inline-flex flex-1 min-w-[5rem] items-center justify-center rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-800 hover:bg-slate-50"
-              >
-                แก้ฟอร์ม
-              </button>
-              <button
-                type="button"
-                onClick={() => setSettingsOpen(false)}
-                className="inline-flex flex-1 min-w-[5rem] items-center justify-center rounded-xl border border-slate-200 px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-50"
-              >
-                ยกเลิก
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
 
       {previewOpen && previewData ? (
         <div
@@ -658,7 +541,9 @@ export function LabelPrintWorkspacePage({ className }: LabelPrintWorkspacePagePr
                 <Barcode className="size-5" strokeWidth={1.75} aria-hidden />
               </span>
               <div>
-                <h1 className="text-base font-semibold text-slate-900 lg:text-lg">ออกแบบบาร์โค้ด</h1>
+                <h1 className="text-base font-semibold text-slate-900 lg:text-lg">
+                  {barcodeSubTab === 'queue' ? 'คิวพิมพ์ป้าย' : 'ตั้งค่ารหัสราคา'}
+                </h1>
                 {barcodeSubTab === 'queue' ? (
                   <p className="text-xs text-slate-600 lg:text-sm">
                     จัดคิวก่อนพิมพ์จริง — เลือกข้อมูลที่ต้องการโชว์บนป้ายสินค้า
@@ -670,15 +555,10 @@ export function LabelPrintWorkspacePage({ className }: LabelPrintWorkspacePagePr
                 )}
               </div>
             </div>
-            {barcodeSubTab === 'queue' ? (
-              <button
-                type="button"
-                onClick={openPrintSettings}
-                className="inline-flex min-h-9 items-center gap-1.5 rounded-xl border border-indigo-500/20 bg-indigo-600 px-3 py-1.5 text-[11px] font-semibold text-white shadow-sm transition hover:bg-indigo-700"
-              >
-                <Printer className="size-3.5" aria-hidden />
-                พิมพ์ทั้งหมด ({totalSheets.toLocaleString('th-TH')} แผ่น)
-              </button>
+            {barcodeSubTab === 'queue' && rows.length > 0 ? (
+              <p className="text-[11px] text-slate-500">
+                {rows.length.toLocaleString('th-TH')} รายการ · {totalSheets.toLocaleString('th-TH')} แผ่นรวม · {groups.length} กลุ่มแม่แบบ
+              </p>
             ) : null}
           </div>
         ) : (
@@ -706,73 +586,18 @@ export function LabelPrintWorkspacePage({ className }: LabelPrintWorkspacePagePr
 
       {labelPrintTopSection === 'barcode' && barcodeSubTab === 'designer' ? (
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-3">
-          <LabelBarcodeDesignerView className="min-h-0 flex-1" previewRow={designerPreviewRow} />
+          <LabelBarcodeDesignerView
+            className="min-h-0 flex-1"
+            previewRow={designerPreviewRow}
+            previewRowOptions={rowsWithMeta}
+          />
         </div>
       ) : null}
 
       {labelPrintTopSection === 'barcode' && barcodeSubTab === 'queue' ? (
-      <div className="grid min-h-0 flex-1 gap-3 p-3 lg:grid-cols-[minmax(0,20rem)_1fr]">
-        <aside
-          ref={prefsRef}
-          className="max-h-full min-h-0 overflow-y-auto rounded-2xl border border-slate-200 bg-slate-50/70 p-3 scroll-mt-4"
-        >
-          <p className="mb-2 text-xs font-semibold text-slate-700">ข้อมูลที่จะแสดงบนป้าย</p>
-          <div className="space-y-2">
-            <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs text-slate-700">
-              <input
-                type="checkbox"
-                checked={showName}
-                onChange={(e) => patchPrefs({ showName: e.target.checked })}
-                className="size-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-              />
-              ชื่อสินค้า
-            </label>
-            <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs text-slate-700">
-              <input
-                type="checkbox"
-                checked={showOem}
-                onChange={(e) => patchPrefs({ showOem: e.target.checked })}
-                className="size-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-              />
-              เบอร์ OEM
-            </label>
-            <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs text-slate-700">
-              <input
-                type="checkbox"
-                checked={showFactoryNo}
-                onChange={(e) => patchPrefs({ showFactoryNo: e.target.checked })}
-                className="size-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-              />
-              เบอร์โรงงาน
-            </label>
-            <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs text-slate-700">
-              <input
-                type="checkbox"
-                checked={showSku}
-                onChange={(e) => patchPrefs({ showSku: e.target.checked })}
-                className="size-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-              />
-              รหัส SKU
-            </label>
-            <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs text-slate-700">
-              <input
-                type="checkbox"
-                checked={showPrice}
-                onChange={(e) => patchPrefs({ showPrice: e.target.checked })}
-                className="size-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-              />
-              ราคา
-            </label>
-            <p className="text-[11px] text-slate-500">
-              รายการพิมพ์จะมาจากคิวที่ส่งเข้ามา (เช่น กด F8 จากแฟ้มข้อมูลสินค้า) — ติ๊กด้านบนคือ “แก้ฟอร์ม”
-              ว่าจะโชว์ฟิลด์ใดบนป้าย
-            </p>
-          </div>
-        </aside>
-
-        <section className="flex min-h-0 flex-col gap-2 overflow-hidden rounded-2xl border border-slate-200 bg-white">
+        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-3">
           {/* Inline search → add directly */}
-          <div className="relative shrink-0 border-b border-slate-100 bg-slate-50/40 p-2">
+          <div className="relative shrink-0 rounded-2xl border border-slate-200 bg-slate-50/40 p-2">
             <div className="relative">
               <Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-slate-400" aria-hidden />
               <input
@@ -843,104 +668,146 @@ export function LabelPrintWorkspacePage({ className }: LabelPrintWorkspacePagePr
             )}
           </div>
 
-          <div className="min-h-0 flex-1 overflow-auto">
-          <table className="w-full min-w-[48rem] border-collapse text-xs">
-            <thead>
-              <tr className="sticky top-0 z-10 border-b border-slate-200 bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
-                <th className="px-3 py-2 text-left">สินค้า</th>
-                <th className="px-3 py-2 text-left">บาร์โค้ด</th>
-                <th className="px-3 py-2 text-left">ข้อมูลที่จะแสดง</th>
-                <th className="px-3 py-2 text-center">ขนาด</th>
-                <th className="px-3 py-2 text-right">จำนวนแผ่น</th>
-                <th className="px-3 py-2 text-right" />
-              </tr>
-            </thead>
-            <tbody>
-              {rows.length === 0 ? (
-                <tr>
-                  <td colSpan={6} className="px-6 py-12">
-                    <div className="mx-auto flex max-w-xl flex-col items-center gap-4 text-center">
-                      <div className="flex size-16 items-center justify-center rounded-2xl bg-violet-50 ring-1 ring-violet-100">
-                        <Package className="size-8 text-violet-500" strokeWidth={1.5} />
-                      </div>
-                      <div className="space-y-1">
-                        <h3 className="text-base font-bold text-slate-800">ยังไม่มีคิวพิมพ์</h3>
-                        <p className="text-xs text-slate-500">เลือกสินค้าจากแฟ้ม แล้วส่งเข้าคิวเพื่อพิมพ์ป้าย</p>
-                      </div>
-
-                      <ol className="mt-1 grid w-full grid-cols-3 gap-2 text-left">
-                        {[
-                          { n: 1, t: 'ไปแฟ้มสินค้า', d: 'เปิดรายการสินค้าทั้งหมด' },
-                          { n: 2, t: 'เลือกสินค้า', d: 'ติ๊กแถวที่ต้องการพิมพ์' },
-                          { n: 3, t: 'กด F8', d: 'ส่งเข้าคิวพิมพ์ที่นี่' },
-                        ].map((s) => (
-                          <li
-                            key={s.n}
-                            className="flex flex-col gap-1 rounded-xl border border-slate-200 bg-slate-50/50 p-3"
-                          >
-                            <span className="flex size-6 items-center justify-center rounded-full bg-violet-600 text-[11px] font-bold text-white">
-                              {s.n}
-                            </span>
-                            <span className="text-[12px] font-bold text-slate-700">{s.t}</span>
-                            <span className="text-[10px] text-slate-500">{s.d}</span>
-                          </li>
-                        ))}
-                      </ol>
-
-                      <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            openTab('branch-stock', 'แฟ้มสินค้า')
-                            setBranchStockPanel('product-file')
-                          }}
-                          className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 px-4 py-2 text-xs font-bold text-white shadow-sm hover:bg-violet-700"
-                        >
-                          <Package className="size-3.5" />
-                          ไปแฟ้มสินค้า
-                          <ArrowRight className="size-3.5" />
-                        </button>
-                        <span className="text-[11px] text-slate-400">
-                          หรือกด <kbd className="rounded border border-slate-300 bg-white px-1.5 py-0.5 font-mono text-[10px] font-semibold text-slate-700">F8</kbd> ในแฟ้มสินค้า
-                        </span>
-                      </div>
+          {rows.length === 0 ? (
+            <div className="flex min-h-0 flex-1 items-center justify-center rounded-2xl border border-slate-200 bg-white px-6 py-12">
+              <div className="mx-auto flex max-w-xl flex-col items-center gap-4 text-center">
+                <div className="flex size-16 items-center justify-center rounded-2xl bg-violet-50 ring-1 ring-violet-100">
+                  <Package className="size-8 text-violet-500" strokeWidth={1.5} />
+                </div>
+                <div className="space-y-1">
+                  <h3 className="text-base font-bold text-slate-800">ยังไม่มีคิวพิมพ์</h3>
+                  <p className="text-xs text-slate-500">เลือกสินค้าจากแฟ้ม แล้วส่งเข้าคิวเพื่อพิมพ์ป้าย</p>
+                </div>
+                <ol className="mt-1 grid w-full grid-cols-3 gap-2 text-left">
+                  {[
+                    { n: 1, t: 'ไปแฟ้มสินค้า', d: 'เปิดรายการสินค้าทั้งหมด' },
+                    { n: 2, t: 'เลือกสินค้า', d: 'ติ๊กแถวที่ต้องการพิมพ์' },
+                    { n: 3, t: 'กด F8', d: 'ส่งเข้าคิวพิมพ์ที่นี่' },
+                  ].map((s) => (
+                    <li
+                      key={s.n}
+                      className="flex flex-col gap-1 rounded-xl border border-slate-200 bg-slate-50/50 p-3"
+                    >
+                      <span className="flex size-6 items-center justify-center rounded-full bg-violet-600 text-[11px] font-bold text-white">
+                        {s.n}
+                      </span>
+                      <span className="text-[12px] font-bold text-slate-700">{s.t}</span>
+                      <span className="text-[10px] text-slate-500">{s.d}</span>
+                    </li>
+                  ))}
+                </ol>
+                <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      openTab('branch-stock', 'แฟ้มสินค้า')
+                      setBranchStockPanel('product-file')
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 px-4 py-2 text-xs font-bold text-white shadow-sm hover:bg-violet-700"
+                  >
+                    <Package className="size-3.5" />
+                    ไปแฟ้มสินค้า
+                    <ArrowRight className="size-3.5" />
+                  </button>
+                  <span className="text-[11px] text-slate-400">
+                    หรือกด <kbd className="rounded border border-slate-300 bg-white px-1.5 py-0.5 font-mono text-[10px] font-semibold text-slate-700">F8</kbd> ในแฟ้มสินค้า
+                  </span>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto pr-1">
+              {groups.map((group) => (
+                <section
+                  key={group.templateId}
+                  className={clsx(
+                    'overflow-hidden rounded-2xl border bg-white',
+                    group.templateMissing ? 'border-red-200' : 'border-slate-200',
+                  )}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 bg-slate-50/40 px-3 py-2.5">
+                    <div className="min-w-0">
+                      <h3 className="flex items-center gap-1.5 text-sm font-semibold text-slate-900">
+                        <LayoutTemplate className="size-3.5 text-indigo-600" aria-hidden />
+                        <span className="truncate">{group.templateName}</span>
+                        {group.templateMissing ? (
+                          <span className="rounded bg-red-50 px-1.5 py-0.5 text-[10px] font-medium text-red-700">
+                            ไม่พบแม่แบบ
+                          </span>
+                        ) : null}
+                      </h3>
+                      <p className="text-[11px] text-slate-500">
+                        {group.rows.length.toLocaleString('th-TH')} รายการ ·{' '}
+                        {group.totalSheets.toLocaleString('th-TH')} แผ่น
+                      </p>
                     </div>
-                  </td>
-                </tr>
-              ) : (
-                rowsWithMeta.map((r) => (
-                  <tr key={r.id} className="border-b border-slate-100 last:border-0">
-                    <td className="px-3 py-2 text-slate-800">{r.name}</td>
-                    <td className="px-3 py-2 font-mono text-[11px] text-slate-700">{r.barcode}</td>
-                    <td className="px-3 py-2 text-[11px] leading-relaxed text-slate-700">
-                      <div className="space-y-0.5">
-                        {showName ? <p>ชื่อ: {r.name || '-'}</p> : null}
-                        {showOem ? <p>OEM: {r.oemNo || '-'}</p> : null}
-                        {showFactoryNo ? <p>โรงงาน: {r.factoryNo || '-'}</p> : null}
-                        {showSku ? <p>SKU: {r.sku || '-'}</p> : null}
-                        {showPrice ? <p>ราคา: {r.price != null ? `฿${formatBaht(r.price)}` : '-'}</p> : null}
-                      </div>
-                    </td>
-                    <td className="px-3 py-2 text-center text-slate-700">{templateLabel(r.template)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-slate-800">{r.qty.toLocaleString('th-TH')}</td>
-                    <td className="px-3 py-2 text-right">
+                    <div className="flex flex-wrap gap-1.5">
                       <button
                         type="button"
-                        onClick={() => removeRow(r.id)}
-                        className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2 py-1 text-[10px] font-medium text-red-800 hover:bg-red-100"
+                        onClick={() => handleTestGroup(group)}
+                        disabled={group.templateMissing}
+                        title="พิมพ์ป้ายแรกในกลุ่ม 1 ใบ"
+                        className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-800 shadow-sm transition hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-40"
                       >
-                        <Trash2 className="size-3" aria-hidden />
-                        ลบ
+                        <FlaskConical className="size-3.5" aria-hidden />
+                        ทดสอบ 1 ใบ
                       </button>
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-          </div>
-        </section>
-      </div>
+                      <button
+                        type="button"
+                        onClick={() => handlePreviewGroup(group)}
+                        disabled={group.templateMissing}
+                        className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        <Eye className="size-3.5" aria-hidden />
+                        ดูตัวอย่าง
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handlePrintGroup(group)}
+                        disabled={group.templateMissing}
+                        className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-indigo-500/20 bg-indigo-600 px-2.5 py-1 text-[11px] font-semibold text-white shadow-sm transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        <Printer className="size-3.5" aria-hidden />
+                        พิมพ์ ({group.totalSheets.toLocaleString('th-TH')} แผ่น)
+                      </button>
+                    </div>
+                  </div>
+                  <table className="w-full border-collapse text-xs">
+                    <thead>
+                      <tr className="border-b border-slate-200 bg-slate-50/60 text-[10px] uppercase tracking-wide text-slate-500">
+                        <th className="px-3 py-1.5 text-left">สินค้า</th>
+                        <th className="px-3 py-1.5 text-left">บาร์โค้ด</th>
+                        <th className="px-3 py-1.5 text-right">จำนวนแผ่น</th>
+                        <th className="px-3 py-1.5 text-right" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {group.rows.map((r) => (
+                        <tr key={r.id} className="border-b border-slate-100 last:border-0">
+                          <td className="px-3 py-2 text-slate-800">{r.name}</td>
+                          <td className="px-3 py-2 font-mono text-[11px] text-slate-700">{r.barcode}</td>
+                          <td className="px-3 py-2 text-right tabular-nums text-slate-800">
+                            {r.qty.toLocaleString('th-TH')}
+                          </td>
+                          <td className="px-3 py-2 text-right">
+                            <button
+                              type="button"
+                              onClick={() => removeRow(r.id)}
+                              className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2 py-1 text-[10px] font-medium text-red-800 hover:bg-red-100"
+                            >
+                              <Trash2 className="size-3" aria-hidden />
+                              ลบ
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </section>
+              ))}
+            </div>
+          )}
+        </div>
       ) : null}
     </div>
   )

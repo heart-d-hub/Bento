@@ -11,6 +11,7 @@ export type LabelDesignerField =
   | 'storeName'
   | 'priceCipher'
   | 'binLocation'
+  | 'binLocationsAll'
 
 export type LabelDesignerElement = {
   id: string
@@ -25,6 +26,14 @@ export type LabelDesignerElement = {
   fontWeight?: 'normal' | 'semibold' | 'bold'
   textVariant?: 'plain' | 'badge'
   salesUnitIndex?: number
+  /** ซ่อน element ถ้าค่าฟิลด์ว่าง — แทนที่จะโชว์ "—" */
+  hideIfEmpty?: boolean
+  /** เอียง */
+  italic?: boolean
+  /** ขีดเส้นใต้ */
+  underline?: boolean
+  /** สีตัวอักษร — CSS color string (#hex / rgb / name); ไม่ระบุ = ดำ */
+  color?: string
 }
 
 export type LabelDesignerTemplate = {
@@ -94,6 +103,10 @@ function normalizeElement(e: LabelDesignerElement): LabelDesignerElement {
         : undefined,
     textVariant: e.textVariant === 'badge' ? 'badge' : undefined,
     salesUnitIndex: normalizeSalesUnitIndex(e.salesUnitIndex),
+    hideIfEmpty: e.hideIfEmpty === true ? true : undefined,
+    italic: e.italic === true ? true : undefined,
+    underline: e.underline === true ? true : undefined,
+    color: typeof e.color === 'string' && e.color.trim() ? e.color.trim() : undefined,
   }
 }
 

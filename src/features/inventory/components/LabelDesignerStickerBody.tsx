@@ -42,6 +42,9 @@ export function LabelDesignerStickerBody({
           { storeName, priceCipher },
           { salesUnitIndex: el.salesUnitIndex },
         )
+        const isEmpty = !value || value === '—' || value.trim() === ''
+        // hideIfEmpty: ซ่อนตอนพิมพ์จริง (ไม่ interactive) แต่โชว์ใน designer พร้อมแสดงสถานะ "ซ่อน"
+        if (el.hideIfEmpty && isEmpty && !interactive) return null
         const isSel = interactive && selectedId === el.id
         const barcodeH = barcodeBarsHeightPx(template.heightMm, el.h)
         const qrPx =
@@ -60,6 +63,7 @@ export function LabelDesignerStickerBody({
                   ? 'border border-violet-500 shadow-md ring-1 ring-violet-300/80'
                   : 'border-0'
                 : 'border-0',
+              el.hideIfEmpty && isEmpty && interactive && 'opacity-40 outline-dashed outline-1 outline-amber-400',
             )}
             style={{
               left: `${el.x}%`,
@@ -68,6 +72,7 @@ export function LabelDesignerStickerBody({
               height: `${el.h}%`,
             }}
             onPointerDown={interactive && onPointerDownElement ? (e) => onPointerDownElement(e, el) : undefined}
+            title={el.hideIfEmpty && isEmpty ? 'จะซ่อนตอนพิมพ์ — ไม่มีข้อมูล' : undefined}
           >
             {interactive && isSel ? (
               <span className="pointer-events-none absolute -top-4 left-0 z-10 max-w-[140%] truncate rounded bg-violet-600 px-1 py-0.5 text-[7px] font-medium text-white shadow">
@@ -85,7 +90,7 @@ export function LabelDesignerStickerBody({
                     value={value || '00000000'}
                     height={barcodeH}
                     textFontSize={el.fontSize ?? defaultBarcodeTextFontSize(barcodeH)}
-                    className="h-auto w-full min-w-0 max-h-none"
+                    className="h-full max-h-full w-full min-w-0"
                   />
                 </div>
               ) : el.kind === 'qrcode' ? (
@@ -103,7 +108,13 @@ export function LabelDesignerStickerBody({
                 >
                   <span
                     className="max-w-full truncate rounded-sm border-2 border-slate-900 bg-white px-1 py-px leading-none text-slate-900 shadow-sm print:border-0 print:shadow-none"
-                    style={{ fontSize: el.fontSize ?? 8, fontWeight: fw }}
+                    style={{
+                      fontSize: el.fontSize ?? 8,
+                      fontWeight: fw,
+                      fontStyle: el.italic ? 'italic' : undefined,
+                      textDecoration: el.underline ? 'underline' : undefined,
+                      color: el.color || undefined,
+                    }}
                     title={value}
                   >
                     {value}
@@ -112,13 +123,17 @@ export function LabelDesignerStickerBody({
               ) : (
                 <p
                   className={clsx(
-                    'line-clamp-6 h-full min-h-0 leading-tight text-slate-900',
+                    'line-clamp-6 h-full min-h-0 leading-tight',
                     el.field === 'priceCipher' && 'font-mono tracking-tight',
+                    !el.color && 'text-slate-900',
                   )}
                   style={{
                     fontSize: el.fontSize ?? 9,
                     textAlign: el.textAlign ?? 'left',
                     fontWeight: fw,
+                    fontStyle: el.italic ? 'italic' : undefined,
+                    textDecoration: el.underline ? 'underline' : undefined,
+                    color: el.color || undefined,
                   }}
                 >
                   {value}

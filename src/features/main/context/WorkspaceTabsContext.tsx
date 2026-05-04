@@ -19,6 +19,7 @@ export type BranchStockPanel =
   | 'product-file'
   | 'categories'
   | 'product-tags'
+  | 'bin-index'
 
 /** มุมมองย่อยในคลังกลาง (รวมโอนข้ามสาขา) */
 export type CentralWarehousePanel = 'hub-stock' | 'transfer'

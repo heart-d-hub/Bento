@@ -353,6 +353,20 @@ export function MainTopNav({
             >
               แท็กสินค้า
             </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={branchStockPanel === 'bin-index'}
+              onClick={() => setBranchStockPanel('bin-index')}
+              className={clsx(
+                'min-h-8 rounded-lg px-2.5 py-1.5 text-xs font-medium transition touch-manipulation',
+                branchStockPanel === 'bin-index'
+                  ? 'bg-white text-slate-900 shadow-sm'
+                  : 'text-slate-600 hover:bg-white/60',
+              )}
+            >
+              ดัชนีที่เก็บ
+            </button>
           </div>
         )}
       </div>

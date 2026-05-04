@@ -15,8 +15,10 @@ export type EnrichedLabelRow = LabelPrintQueueItem & {
   carModelText?: string
   salesUnitText?: string
   brandText?: string
-  /** ที่เก็บ / Bin location เช่น "A-3-15" — มาจาก master.storageLocation */
+  /** ที่เก็บหลัก / Bin location เช่น "A-3-15" — มาจาก primaryStorageLocation(master) */
   storageLocation?: string
+  /** ที่เก็บทั้งหมด — สำหรับ field binLocationsAll */
+  storageLocations?: string[]
   price?: number
   /** ต้นทุนจากแฟ้มสินค้า — ใช้เข้ารหัสราคาบนป้าย */
   costPrice?: number

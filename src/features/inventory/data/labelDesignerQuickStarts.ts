@@ -24,7 +24,7 @@ function buildAutoPartsOemFocus(): LabelDesignerTemplate {
     widthMm: 50,
     heightMm: 35,
     elements: [
-      el({ kind: 'text', field: 'storeName', x: 50, y: 2, w: 47, h: 10, fontSize: 6, textAlign: 'right', textVariant: 'badge' }),
+      el({ kind: 'text', field: 'storeName', x: 50, y: 2, w: 47, h: 10, fontSize: 6, textAlign: 'right' }),
       el({ kind: 'text', field: 'oem', x: 3, y: 14, w: 94, h: 16, fontSize: 13, textAlign: 'center', fontWeight: 'bold' }),
       el({ kind: 'text', field: 'name', x: 3, y: 32, w: 62, h: 9, fontSize: 7, textAlign: 'left' }),
       el({ kind: 'barcode', field: 'barcode', x: 3, y: 44, w: 62, h: 50 }),
@@ -42,7 +42,7 @@ function buildPriceTag(): LabelDesignerTemplate {
     widthMm: 50,
     heightMm: 35,
     elements: [
-      el({ kind: 'text', field: 'storeName', x: 3, y: 2, w: 94, h: 9, fontSize: 6, textAlign: 'right', textVariant: 'badge' }),
+      el({ kind: 'text', field: 'storeName', x: 3, y: 2, w: 94, h: 9, fontSize: 6, textAlign: 'right' }),
       el({ kind: 'text', field: 'name', x: 3, y: 12, w: 94, h: 12, fontSize: 9, textAlign: 'center', fontWeight: 'bold' }),
       el({ kind: 'text', field: 'price', x: 3, y: 26, w: 94, h: 28, fontSize: 18, textAlign: 'center', fontWeight: 'bold' }),
       el({ kind: 'barcode', field: 'barcode', x: 3, y: 58, w: 65, h: 35 }),
@@ -75,7 +75,7 @@ function buildDetailFull(): LabelDesignerTemplate {
     heightMm: 50,
     elements: [
       el({ kind: 'text', field: 'brand', x: 3, y: 2, w: 50, h: 8, fontSize: 6, textAlign: 'left', fontWeight: 'bold' }),
-      el({ kind: 'text', field: 'storeName', x: 55, y: 2, w: 42, h: 8, fontSize: 5, textAlign: 'right', textVariant: 'badge' }),
+      el({ kind: 'text', field: 'storeName', x: 55, y: 2, w: 42, h: 8, fontSize: 5, textAlign: 'right' }),
       el({ kind: 'text', field: 'name', x: 3, y: 11, w: 94, h: 10, fontSize: 7, textAlign: 'left' }),
       el({ kind: 'text', field: 'oem', x: 3, y: 23, w: 60, h: 8, fontSize: 7, textAlign: 'left', fontWeight: 'semibold' }),
       el({ kind: 'text', field: 'factory', x: 65, y: 23, w: 32, h: 8, fontSize: 6, textAlign: 'right' }),

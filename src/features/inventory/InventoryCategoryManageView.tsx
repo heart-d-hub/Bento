@@ -17,6 +17,11 @@ import {
   type ProductTagDefinition,
 } from '@/features/inventory/data/productTagsRegistry'
 import {
+  LABEL_DESIGNER_TEMPLATES_CHANGED_EVENT,
+  loadLabelDesignerTemplatesState,
+  type LabelDesignerTemplateEntry,
+} from '@/features/inventory/data/labelDesignerTemplateStore'
+import {
   getProductMasterList,
   PRODUCT_MASTER_LIST_CHANGED_EVENT,
   type ProductMasterDetail,
@@ -267,6 +272,11 @@ export function InventoryCategoryManageView() {
   const [tagRegistryList, setTagRegistryList] = useState<ProductTagDefinition[]>(() =>
     loadProductTagsRegistry(),
   )
+  /** ID แม่แบบป้ายของหมวดที่กำลังแก้ — '' = ไม่กำหนด (สืบทอด/ค่าเริ่มต้น) */
+  const [editLabelTemplateId, setEditLabelTemplateId] = useState('')
+  const [labelTemplates, setLabelTemplates] = useState<LabelDesignerTemplateEntry[]>(
+    () => loadLabelDesignerTemplatesState().templates,
+  )
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null)
   const [expandedMain, setExpandedMain] = useState<Set<string>>(() => new Set())
   const [productListTick, setProductListTick] = useState(0)
@@ -289,6 +299,12 @@ export function InventoryCategoryManageView() {
     const on = () => setTagRegistryList(loadProductTagsRegistry())
     window.addEventListener(PRODUCT_TAGS_CHANGED_EVENT, on)
     return () => window.removeEventListener(PRODUCT_TAGS_CHANGED_EVENT, on)
+  }, [])
+
+  useEffect(() => {
+    const on = () => setLabelTemplates(loadLabelDesignerTemplatesState().templates)
+    window.addEventListener(LABEL_DESIGNER_TEMPLATES_CHANGED_EVENT, on)
+    return () => window.removeEventListener(LABEL_DESIGNER_TEMPLATES_CHANGED_EVENT, on)
   }, [])
 
   const products = useMemo(() => getProductMasterList(), [productListTick])
@@ -347,6 +363,7 @@ export function InventoryCategoryManageView() {
       setEditBoltHeadGroup(m.boltHeadGroupBySize ?? false)
       setEditProductFormFields(resolveProductFormFieldVisibility(tree, m.name))
       setEditTagsInMasterForm(resolveProductTagsInMasterForm(tree, m.name))
+      setEditLabelTemplateId(m.labelTemplateId ?? '')
       return
     }
     if (target.kind === 'sub') {
@@ -365,6 +382,7 @@ export function InventoryCategoryManageView() {
       setEditBoltHeadGroup(sub.boltHeadGroupBySize ?? false)
       setEditProductFormFields(resolveProductFormFieldVisibility(tree, main.name, sub.name))
       setEditTagsInMasterForm(resolveProductTagsInMasterForm(tree, main.name, sub.name))
+      setEditLabelTemplateId(sub.labelTemplateId ?? '')
       return
     }
     const main = tree.find((x) => x.id === target.mainId)
@@ -383,6 +401,7 @@ export function InventoryCategoryManageView() {
     setEditBoltHeadGroup(ss.boltHeadGroupBySize ?? false)
     setEditProductFormFields(resolveProductFormFieldVisibility(tree, main.name, sub.name, ss.name))
     setEditTagsInMasterForm(resolveProductTagsInMasterForm(tree, main.name, sub.name, ss.name))
+    setEditLabelTemplateId(ss.labelTemplateId ?? '')
   }
 
   function closeEditCategoryDialog() {
@@ -417,6 +436,8 @@ export function InventoryCategoryManageView() {
       productTagsInMasterForm: editTagsInMasterForm,
     }
 
+    const labelTemplateIdPayload = editLabelTemplateId.trim() || undefined
+
     if (editTarget.kind === 'main') {
       const { mainId } = editTarget
       if (tree.some((m) => m.id !== mainId && m.name.toLowerCase() === name.toLowerCase())) {
@@ -434,6 +455,7 @@ export function InventoryCategoryManageView() {
                 allowedProductTagIds: editTagsInMasterForm ? allowedTagPayload : undefined,
                 boltHeadGroupBySize: editBoltHeadGroup,
                 ...productFormPayload,
+                labelTemplateId: labelTemplateIdPayload,
               }
             : m,
         ),
@@ -462,6 +484,7 @@ export function InventoryCategoryManageView() {
                         allowedProductTagIds: editTagsInMasterForm ? allowedTagPayload : undefined,
                         boltHeadGroupBySize: editBoltHeadGroup,
                         ...productFormPayload,
+                        labelTemplateId: labelTemplateIdPayload,
                       }
                     : s,
                 ),
@@ -497,6 +520,7 @@ export function InventoryCategoryManageView() {
                                 allowedProductTagIds: editTagsInMasterForm ? allowedTagPayload : undefined,
                                 boltHeadGroupBySize: editBoltHeadGroup,
                                 ...productFormPayload,
+                                labelTemplateId: labelTemplateIdPayload,
                               }
                             : ss,
                         ),
@@ -1549,6 +1573,33 @@ export function InventoryCategoryManageView() {
                 </span>
               </span>
             </label>
+            <div className="mt-2 border-t border-slate-100 pt-2">
+              <p className="mb-1 text-[10px] font-semibold text-slate-800">แม่แบบป้ายบาร์โค้ด</p>
+              <p className="mb-1.5 text-[10px] leading-snug text-slate-500">
+                สินค้าในหมวดนี้จะใช้แม่แบบนี้พิมพ์ป้าย — สินค้าแต่ละชิ้น override ได้ที่ฟอร์มสินค้า
+              </p>
+              <select
+                value={editLabelTemplateId}
+                onChange={(e) => setEditLabelTemplateId(e.target.value)}
+                className={inputClass}
+              >
+                <option value="">
+                  {editTarget.kind === 'main'
+                    ? '— ใช้ค่าเริ่มต้นของระบบ —'
+                    : '— ใช้ตามหมวดแม่ —'}
+                </option>
+                {labelTemplates.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name || 'ไม่มีชื่อ'} ({t.widthMm}×{t.heightMm} มม.)
+                  </option>
+                ))}
+              </select>
+              {labelTemplates.length === 0 ? (
+                <p className="mt-1 text-[10px] text-amber-700">
+                  ยังไม่มีแม่แบบ — สร้างก่อนที่หน้า «ออกแบบป้าย»
+                </p>
+              ) : null}
+            </div>
             <div className="mt-2 border-t border-slate-100 pt-2">
               <p className="mb-1 text-[10px] font-semibold text-slate-800">ฟิลเตอร์ฟอร์ม «เพิ่มสินค้า» (แฟ้มข้อมูล)</p>
               <p className="mb-2 text-[10px] leading-snug text-slate-500">

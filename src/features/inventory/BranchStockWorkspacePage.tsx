@@ -1,3 +1,4 @@
+import { BinIndexView } from '@/features/inventory/BinIndexView'
 import { BranchStockView } from '@/features/inventory/BranchStockView'
 import { SplitSaleStockView } from '@/features/inventory/SplitSaleStockView'
 import { InventoryCategoryManageView } from '@/features/inventory/InventoryCategoryManageView'
@@ -26,6 +27,7 @@ export function BranchStockWorkspacePage({ className }: BranchStockWorkspacePage
         {branchStockPanel === 'product-file' && <ProductDataFileView />}
         {branchStockPanel === 'categories' && <InventoryCategoryManageView />}
         {branchStockPanel === 'product-tags' && <InventoryProductTagsView />}
+        {branchStockPanel === 'bin-index' && <BinIndexView />}
       </div>
     </div>
   )

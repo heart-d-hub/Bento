@@ -166,6 +166,7 @@ export function productToCsvRow(p: ProductMasterDetail): ProductMasterCsvRow {
     inStoreCatalog: p.inStoreCatalog === false ? '0' : '1',
     salesStatus: p.salesStatus ?? 'active',
     storageLocation: p.storageLocation ?? '',
+    storageLocationsJson: JSON.stringify(p.storageLocations ?? []),
     packaging: p.packaging ?? '',
     isGenuine: p.isGenuine ? '1' : '0',
     unitSmall: p.unitSmall ?? '',
@@ -258,6 +259,18 @@ export function csvRowToProduct(
     })(),
     salesStatus: parseSalesStatusCell(row.salesStatus),
     storageLocation: (row.storageLocation ?? '').trim() || undefined,
+    storageLocations: (() => {
+      const raw = (row.storageLocationsJson ?? '').trim()
+      if (!raw) return undefined
+      try {
+        const arr = JSON.parse(raw) as unknown
+        if (!Array.isArray(arr)) return undefined
+        const cleaned = arr.filter((s): s is string => typeof s === 'string').map((s) => s.trim()).filter(Boolean)
+        return cleaned.length > 0 ? cleaned : undefined
+      } catch {
+        return undefined
+      }
+    })(),
     packaging: (row.packaging ?? '').trim() || undefined,
     isGenuine: row.isGenuine === '1' || row.isGenuine === 'true',
     unitSmall: (row.unitSmall ?? '').trim() || undefined,

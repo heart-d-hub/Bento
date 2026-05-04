@@ -16,6 +16,11 @@ import {
   type ProductTagDefinition,
 } from '@/features/inventory/data/productTagsRegistry'
 import {
+  LABEL_DESIGNER_TEMPLATES_CHANGED_EVENT,
+  loadLabelDesignerTemplatesState,
+  type LabelDesignerTemplateEntry,
+} from '@/features/inventory/data/labelDesignerTemplateStore'
+import {
   applyStorageLocationToCrossBranch,
   buildNextMasterEditMetadata,
   defaultCrossBranchRowsForNewProduct,
@@ -30,6 +35,7 @@ import {
   MM_PER_HUN,
   normalizeSalesUnits,
   primarySellPriceFromTiers,
+  productStorageLocations,
   sellPriceSmallUnitFromTier,
   type BarcodeEntry,
   type PhysicalDimensions,
@@ -449,9 +455,16 @@ export function AddProductModal({
     showPerTier: boolean
   }[]>([])
   const [packaging, setPackaging] = useState('')
-  const [storageLocation, setStorageLocation] = useState('')
+  const [storageLocationRows, setStorageLocationRows] = useState<
+    { id: string; value: string }[]
+  >([{ id: `loc-${Date.now()}`, value: '' }])
   const [notes, setNotes] = useState('')
   const [posDisplayNote, setPosDisplayNote] = useState('')
+  /** override แม่แบบป้ายของสินค้านี้ — '' = ใช้ตามหมวด */
+  const [productLabelTemplateId, setProductLabelTemplateId] = useState('')
+  const [labelTemplates, setLabelTemplates] = useState<LabelDesignerTemplateEntry[]>(
+    () => loadLabelDesignerTemplatesState().templates,
+  )
   /** ไม่ติ๊ก = inStoreCatalog false (อ้างอิงเท่านั้น) */
   const [inStoreCatalog, setInStoreCatalog] = useState(true)
   const [salesStatus, setSalesStatus] = useState<ProductSalesStatus>('active')
@@ -638,6 +651,12 @@ export function AddProductModal({
   }, [])
 
   useEffect(() => {
+    const on = () => setLabelTemplates(loadLabelDesignerTemplatesState().templates)
+    window.addEventListener(LABEL_DESIGNER_TEMPLATES_CHANGED_EVENT, on)
+    return () => window.removeEventListener(LABEL_DESIGNER_TEMPLATES_CHANGED_EVENT, on)
+  }, [])
+
+  useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
@@ -802,9 +821,10 @@ export function AddProductModal({
     }
     setQuantityBreakRows([])
     setPackaging('')
-    setStorageLocation('')
+    setStorageLocationRows([{ id: `loc-${Date.now()}`, value: '' }])
     setNotes('')
     setPosDisplayNote('')
+    setProductLabelTemplateId('')
     setInStoreCatalog(true)
     setSalesStatus('active')
     setCategoryPickerTouched(false)
@@ -941,9 +961,17 @@ export function AddProductModal({
         }),
       )
       setPackaging(p.packaging ?? '')
-      setStorageLocation(p.storageLocation ?? '')
+      {
+        const locs = productStorageLocations(p)
+        setStorageLocationRows(
+          locs.length > 0
+            ? locs.map((value, i) => ({ id: `loc-${Date.now()}-${i}`, value }))
+            : [{ id: `loc-${Date.now()}`, value: '' }],
+        )
+      }
       setNotes(p.notes ?? '')
       setPosDisplayNote(p.posDisplayNote ?? '')
+      setProductLabelTemplateId(p.labelTemplateId ?? '')
       setInStoreCatalog(p.inStoreCatalog !== false)
       setSalesStatus(p.salesStatus ?? 'active')
       const pd = p.physicalDimensions
@@ -1077,9 +1105,10 @@ export function AddProductModal({
     }
     setStockModeDetailsOpen(csm === 'kg_roll' || csm === 'meter_roll' || csm === 'box_piece')
     setPackaging('')
-    setStorageLocation('')
+    setStorageLocationRows([{ id: `loc-${Date.now()}`, value: '' }])
     setNotes(copySource.notes ?? '')
     setPosDisplayNote(copySource.posDisplayNote ?? '')
+    setProductLabelTemplateId(copySource.labelTemplateId ?? '')
     setInStoreCatalog(copySource.inStoreCatalog !== false)
     setSalesStatus(copySource.salesStatus ?? 'active')
     setDimA('')
@@ -1459,12 +1488,17 @@ export function AddProductModal({
     const latestForMeta = getProductMasterById(id)
     const masterMeta = buildNextMasterEditMetadata(latestForMeta, branchId, getStaffUsername())
 
+    const cleanedStorageLocations = storageLocationRows
+      .map((r) => r.value.trim())
+      .filter((s) => s.length > 0)
+    const primaryStorageLoc = cleanedStorageLocations[0] ?? ''
+
     const crossBranchNormalized = prev?.crossBranch?.length
       ? normalizeCrossBranchRows(prev.crossBranch)
       : defaultCrossBranchRowsForNewProduct(id)
     const crossBranch = applyStorageLocationToCrossBranch(
       crossBranchNormalized,
-      storageLocation.trim(),
+      primaryStorageLoc,
       branchId,
     )
 
@@ -1592,9 +1626,11 @@ export function AddProductModal({
       isGenuine: isGenuine || undefined,
       salesUnits: salesUnitsAligned,
       packaging: packaging.trim() || undefined,
-      storageLocation: storageLocation.trim() || undefined,
+      storageLocation: primaryStorageLoc || undefined,
+      storageLocations: cleanedStorageLocations.length > 0 ? cleanedStorageLocations : undefined,
       notes: notes.trim() || undefined,
       posDisplayNote: posDisplayNote.trim() || undefined,
+      labelTemplateId: productLabelTemplateId.trim() || undefined,
       stockMode: stockModeChoice === 'piece' ? undefined : stockModeChoice,
       nominalKgPerRoll:
         stockModeChoice === 'kg_roll' && nominalKgResolved != null && nominalKgResolved > 0
@@ -1979,10 +2015,60 @@ export function AddProductModal({
                       placeholder="เช่น 12 ชิ้น/ลัง"
                     />
                   </label>
-                  <label className="block min-w-0">
-                    <span className={labelClass}>ที่เก็บ</span>
-                    <input className={inputClass} value={storageLocation} onChange={(e) => setStorageLocation(e.target.value)} />
-                  </label>
+                  <div className="min-w-0">
+                    <span className={labelClass}>ที่เก็บ (วางหลายที่ได้ — แถวบนสุด = หลัก)</span>
+                    <div className="space-y-1">
+                      {storageLocationRows.map((row, i) => (
+                        <div key={row.id} className="flex items-center gap-1">
+                          <span className="w-5 shrink-0 text-center text-[10px] font-medium text-slate-500">
+                            {i + 1}
+                          </span>
+                          <input
+                            className={clsx(inputClass, 'flex-1')}
+                            value={row.value}
+                            onChange={(e) =>
+                              setStorageLocationRows((prev) =>
+                                prev.map((r, j) => (j === i ? { ...r, value: e.target.value } : r)),
+                              )
+                            }
+                            placeholder={i === 0 ? 'เช่น A-3-15 (ที่หลัก)' : 'เช่น B-1-22 (สำรอง)'}
+                          />
+                          {storageLocationRows.length > 1 ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setStorageLocationRows((prev) => prev.filter((_, j) => j !== i))
+                              }
+                              className="rounded border border-slate-200 bg-white p-1 text-slate-500 hover:bg-red-50 hover:text-red-700"
+                              aria-label="ลบที่เก็บนี้"
+                              title="ลบ"
+                            >
+                              <X className="size-3" />
+                            </button>
+                          ) : null}
+                        </div>
+                      ))}
+                      <p className="text-[10px] leading-snug text-slate-500">
+                        <span className="font-medium text-slate-600">ตัวอย่างรูปแบบ:</span>{' '}
+                        <code className="rounded bg-slate-100 px-1">A-3-15</code> (แถว-ชั้น-ช่อง) ·{' '}
+                        <code className="rounded bg-slate-100 px-1">ชั้น 2 ตู้ B</code> ·{' '}
+                        <code className="rounded bg-slate-100 px-1">หลังร้าน</code> ·{' '}
+                        <code className="rounded bg-slate-100 px-1">โกดัง 2-R3</code>
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setStorageLocationRows((prev) => [
+                            ...prev,
+                            { id: `loc-${Date.now()}-${prev.length}`, value: '' },
+                          ])
+                        }
+                        className="inline-flex items-center gap-1 rounded border border-dashed border-slate-300 px-2 py-0.5 text-[11px] text-slate-600 hover:border-violet-300 hover:bg-violet-50"
+                      >
+                        + เพิ่มที่เก็บ
+                      </button>
+                    </div>
+                  </div>
                 </div>
 
                 <div className="mt-1.5 grid gap-1.5 sm:grid-cols-2">
@@ -2005,6 +2091,21 @@ export function AddProductModal({
                       onChange={(e) => setPosDisplayNote(e.target.value)}
                       placeholder="เช่น ซื้อ 1 ลังแถมเสื้อ"
                     />
+                  </label>
+                  <label className="block min-w-0 sm:col-span-2">
+                    <span className={labelClass}>แม่แบบป้ายบาร์โค้ด — เฉพาะสินค้านี้</span>
+                    <select
+                      className={inputClass}
+                      value={productLabelTemplateId}
+                      onChange={(e) => setProductLabelTemplateId(e.target.value)}
+                    >
+                      <option value="">— ใช้ตามหมวด —</option>
+                      {labelTemplates.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name || 'ไม่มีชื่อ'} ({t.widthMm}×{t.heightMm} มม.)
+                        </option>
+                      ))}
+                    </select>
                   </label>
                 </div>
 

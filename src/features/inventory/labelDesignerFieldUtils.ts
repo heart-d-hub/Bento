@@ -12,6 +12,7 @@ import {
   getProductMasterList,
   normalizeSalesUnits,
   PRODUCT_MASTER_DETAILS,
+  productStorageLocations,
   type ProductMasterDetail,
 } from '@/features/inventory/data/productMasterData'
 
@@ -28,6 +29,9 @@ export const DESIGNER_SAMPLE_ROW: EnrichedLabelRow = {
   salesUnitText: normalizeSalesUnits(sampleMaster)[0]?.label ?? 'ชิ้น',
   brandText: sampleMaster.brand,
   storageLocation: sampleMaster.storageLocation ?? 'A-3-15',
+  storageLocations: productStorageLocations(sampleMaster).length > 0
+    ? productStorageLocations(sampleMaster)
+    : ['A-3-15', 'หลังร้าน', 'โกดัง 2'],
   price: 1250,
   costPrice: 108.75,
   qty: 1,
@@ -91,6 +95,15 @@ export function getDesignerFieldValue(
       return row.brandText || '—'
     case 'binLocation':
       return row.storageLocation || '—'
+    case 'binLocationsAll': {
+      if (row.storageLocations && row.storageLocations.length > 0) {
+        return row.storageLocations.join(', ')
+      }
+      const master = findProductMasterForLabelRow(row)
+      const locs = master ? productStorageLocations(master) : []
+      if (locs.length > 0) return locs.join(', ')
+      return row.storageLocation || '—'
+    }
     case 'price':
       return row.price != null ? `฿${formatBahtLabel(row.price)}` : '—'
     case 'storeName':
@@ -130,7 +143,9 @@ export function fieldLabelTh(field: LabelDesignerField): string {
     case 'brand':
       return 'บริษัท / แบรนด์ชิ้นงาน'
     case 'binLocation':
-      return 'ที่เก็บ (Bin)'
+      return 'ที่เก็บ (Bin) — หลัก'
+    case 'binLocationsAll':
+      return 'ที่เก็บทั้งหมด (Bin)'
     case 'price':
       return 'ราคา'
     case 'storeName':

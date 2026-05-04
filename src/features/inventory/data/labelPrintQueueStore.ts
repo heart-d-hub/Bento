@@ -10,6 +10,8 @@ export type LabelPrintQueueItem = {
   price?: number
   qty: number
   template: LabelTemplate
+  /** snapshot ของ ID แม่แบบป้าย (designer template) ที่ resolve ตอน enqueue — ไม่มี = ใช้ default */
+  labelTemplateId?: string
 }
 
 const KEY = 'bento.inventory.labelPrintQueue.v1'

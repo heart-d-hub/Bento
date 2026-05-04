@@ -17,11 +17,17 @@ import {
 import {
   INVENTORY_CATEGORIES_UPDATED_EVENT,
   loadCategoryTree,
+  resolveLabelTemplateIdForProduct,
   type MainCategory,
   type SubCategory,
 } from '@/features/inventory/data/inventoryCategories'
 import { dimLayoutFromPaperFields, type PaperDimLayout } from '@/features/inventory/data/paperDimensionLayout'
 import { appendLabelPrintQueue } from '@/features/inventory/data/labelPrintQueueStore'
+import {
+  LABEL_DESIGNER_TEMPLATES_CHANGED_EVENT,
+  loadLabelDesignerTemplatesState,
+  type LabelDesignerTemplateEntry,
+} from '@/features/inventory/data/labelDesignerTemplateStore'
 import { getBranchById } from '@/features/auth/branches'
 import { normalizeCrossBranchRows } from '@/features/inventory/data/branchInventoryModel'
 import {
@@ -37,6 +43,7 @@ import {
   normalizeSalesUnits,
   PRODUCT_MASTER_LIST_CHANGED_EVENT,
   productMatchesInventoryCarFilters,
+  productStorageLocations,
   saveProductMasterList,
   sellPriceAtUnitIndex,
   sellPriceTierContextFromProduct,
@@ -140,6 +147,7 @@ function buildSearchHitText(p: ProductMasterDetail): string {
   const notes = (p.notes ?? '').toLowerCase()
   const posNote = (p.posDisplayNote ?? '').toLowerCase()
   const boxBar = (p.boxBarcode ?? '').toLowerCase()
+  const locs = productStorageLocations(p).join(' ').toLowerCase()
   const fitText = safeVehicleFitments(p.vehicleFitments)
     .map(
       (f) =>
@@ -189,6 +197,8 @@ function buildSearchHitText(p: ProductMasterDetail): string {
     ' ' +
     posNote +
     ' ' +
+    locs +
+    ' ' +
     fitText
   ).toLowerCase()
 }
@@ -215,6 +225,7 @@ function enqueueProductLabelPrintFromMaster(p: ProductMasterDetail) {
     price: p.sellPrice,
     qty,
     template: 'medium',
+    labelTemplateId: resolveLabelTemplateIdForProduct(p, loadCategoryTree()),
   })
 }
 
@@ -782,7 +793,8 @@ const ProductMasterFlipCard = memo(function ProductMasterFlipCard({
   const oemTags = (product.oemTags ?? []).filter((t) => t && t.trim().length > 0)
   const stock = totalCrossBranchStock(product)
   const dimStr = product.physicalDimensions ? formatDimsCompact(product.physicalDimensions) : ''
-  const loc = (product.storageLocation ?? '').trim()
+  const productLocs = productStorageLocations(product)
+  const loc = productLocs[0] ?? ''
   const carSummary = preferredFitment
     ? [
         preferredFitment.brandName,
@@ -1029,15 +1041,25 @@ const ProductMasterListRow = memo(function ProductMasterListRow({
         ) : (
           (() => {
             const dimStr = product.physicalDimensions ? formatDimsCompact(product.physicalDimensions) : ''
-            const loc = product.storageLocation?.trim() ?? ''
-            if (!dimStr && !loc) return null
+            const locs = productStorageLocations(product)
+            const primary = locs[0] ?? ''
+            const extras = locs.length - 1
+            if (!dimStr && !primary) return null
             return (
               <p className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[11px] leading-snug text-slate-400 tabular-nums pos-compact:text-[10px]">
                 {dimStr ? <span>{dimStr}</span> : null}
-                {loc ? (
-                  <span className="flex items-center gap-0.5 not-italic text-slate-400">
+                {primary ? (
+                  <span
+                    className="flex items-center gap-0.5 not-italic text-slate-400"
+                    title={extras > 0 ? locs.join(', ') : undefined}
+                  >
                     <MapPin className="size-2.5 shrink-0" aria-hidden />
-                    {loc}
+                    {primary}
+                    {extras > 0 ? (
+                      <span className="ml-0.5 rounded bg-slate-100 px-1 text-[9px] font-medium text-slate-600">
+                        +{extras}
+                      </span>
+                    ) : null}
                   </span>
                 ) : null}
               </p>
@@ -1383,11 +1405,27 @@ function ProductMasterDetailContent({
                   <FieldLine label="บรรจุ">{selected.packaging}</FieldLine>
                 </div>
               ) : null}
-              {selected.storageLocation ? (
-                <div className="mt-2">
-                  <FieldLine label="ที่เก็บ">{selected.storageLocation}</FieldLine>
-                </div>
-              ) : null}
+              {(() => {
+                const locs = productStorageLocations(selected)
+                if (locs.length === 0) return null
+                return (
+                  <div className="mt-2">
+                    <FieldLine label="ที่เก็บ">
+                      {locs.length === 1 ? (
+                        locs[0]
+                      ) : (
+                        <span className="space-x-1">
+                          <span className="font-medium">{locs[0]}</span>
+                          <span className="text-[10px] text-slate-500">(หลัก)</span>
+                          {locs.slice(1).map((l, i) => (
+                            <span key={i} className="text-slate-600">· {l}</span>
+                          ))}
+                        </span>
+                      )}
+                    </FieldLine>
+                  </div>
+                )
+              })()}
               {selected.notes ? (
                 <div className="mt-2">
                   <FieldLine label="หมายเหตุ">
@@ -1742,6 +1780,11 @@ export function ProductDataFileView() {
   const [hardDeleteTarget, setHardDeleteTarget] = useState<ProductMasterDetail | null>(null)
   const [bulkSelected, setBulkSelected] = useState<Set<string>>(() => new Set())
   const [moveCategoryPickerOpen, setMoveCategoryPickerOpen] = useState(false)
+  const [bulkLabelTemplateOpen, setBulkLabelTemplateOpen] = useState(false)
+  const [bulkStorageEditorOpen, setBulkStorageEditorOpen] = useState(false)
+  const [labelTemplates, setLabelTemplates] = useState<LabelDesignerTemplateEntry[]>(
+    () => loadLabelDesignerTemplatesState().templates,
+  )
 
   useEffect(() => {
     if (showBin) setShowBin(false)
@@ -1801,6 +1844,55 @@ export function ProductDataFileView() {
     setBulkSelected(new Set())
     setSelectedProductId((cur) => (cur && idSet.has(cur) ? null : cur))
   }, [])
+
+  const bulkSetLabelTemplate = useCallback((ids: string[], templateId: string | undefined) => {
+    if (ids.length === 0) return
+    const idSet = new Set(ids)
+    setProducts((prev) =>
+      prev.map((p) =>
+        idSet.has(p.id) ? { ...p, labelTemplateId: templateId || undefined } : p,
+      ),
+    )
+    setBulkSelected(new Set())
+  }, [])
+
+  const bulkSetStorageLocation = useCallback(
+    (
+      ids: string[],
+      mode: 'replace-all' | 'set-primary' | 'append' | 'clear',
+      value: string,
+    ) => {
+      if (ids.length === 0) return
+      const idSet = new Set(ids)
+      const v = value.trim()
+      setProducts((prev) =>
+        prev.map((p) => {
+          if (!idSet.has(p.id)) return p
+          const current = productStorageLocations(p)
+          let next: string[] = current
+          if (mode === 'clear') {
+            next = []
+          } else if (mode === 'replace-all') {
+            next = v ? [v] : []
+          } else if (mode === 'set-primary') {
+            if (!v) return p
+            next = [v, ...current.filter((l) => l !== v)]
+          } else if (mode === 'append') {
+            if (!v) return p
+            if (current.includes(v)) return p
+            next = [...current, v]
+          }
+          return {
+            ...p,
+            storageLocations: next.length > 0 ? next : undefined,
+            storageLocation: next[0],
+          }
+        }),
+      )
+      setBulkSelected(new Set())
+    },
+    [],
+  )
 
   const activeProducts = useMemo(() => products.filter((p) => !p.deletedAt), [products])
   const binProducts = useMemo(() => products.filter((p) => !!p.deletedAt), [products])
@@ -1905,6 +1997,12 @@ export function ProductDataFileView() {
     const onMaster = () => setProducts([...getProductMasterList()])
     window.addEventListener(PRODUCT_MASTER_LIST_CHANGED_EVENT, onMaster)
     return () => window.removeEventListener(PRODUCT_MASTER_LIST_CHANGED_EVENT, onMaster)
+  }, [])
+
+  useEffect(() => {
+    const on = () => setLabelTemplates(loadLabelDesignerTemplatesState().templates)
+    window.addEventListener(LABEL_DESIGNER_TEMPLATES_CHANGED_EVENT, on)
+    return () => window.removeEventListener(LABEL_DESIGNER_TEMPLATES_CHANGED_EVENT, on)
   }, [])
 
   useEffect(() => {
@@ -3307,6 +3405,20 @@ export function ProductDataFileView() {
                 </button>
                 <button
                   type="button"
+                  onClick={() => setBulkLabelTemplateOpen(true)}
+                  className="rounded-lg border border-violet-300 bg-white px-2.5 py-1 text-xs font-medium text-violet-800 shadow-sm hover:bg-violet-50 pos-compact:text-[11px]"
+                >
+                  ตั้งแม่แบบป้าย…
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBulkStorageEditorOpen(true)}
+                  className="rounded-lg border border-amber-300 bg-white px-2.5 py-1 text-xs font-medium text-amber-800 shadow-sm hover:bg-amber-50 pos-compact:text-[11px]"
+                >
+                  ตั้งที่เก็บ…
+                </button>
+                <button
+                  type="button"
                   onClick={() => {
                     if (window.confirm(`ย้าย ${bulkSelected.size} รายการไปถังขยะ?`)) {
                       bulkSoftDelete([...bulkSelected])
@@ -3634,6 +3746,186 @@ export function ProductDataFileView() {
             </div>
           </div>
         )}
+
+        {bulkLabelTemplateOpen && (
+          <BulkLabelTemplateDialog
+            count={bulkSelected.size}
+            templates={labelTemplates}
+            onClose={() => setBulkLabelTemplateOpen(false)}
+            onApply={(templateId) => {
+              bulkSetLabelTemplate([...bulkSelected], templateId)
+              setBulkLabelTemplateOpen(false)
+            }}
+          />
+        )}
+
+        {bulkStorageEditorOpen && (
+          <BulkStorageEditorDialog
+            count={bulkSelected.size}
+            onClose={() => setBulkStorageEditorOpen(false)}
+            onApply={(mode, value) => {
+              bulkSetStorageLocation([...bulkSelected], mode, value)
+              setBulkStorageEditorOpen(false)
+            }}
+          />
+        )}
+      </div>
+    </div>
+  )
+}
+
+function BulkLabelTemplateDialog({
+  count,
+  templates,
+  onClose,
+  onApply,
+}: {
+  count: number
+  templates: LabelDesignerTemplateEntry[]
+  onClose: () => void
+  onApply: (templateId: string | undefined) => void
+}) {
+  const [selected, setSelected] = useState<string>('')
+  return (
+    <div
+      className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-900/45 p-4"
+      role="dialog"
+      aria-modal="true"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-4 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="text-sm font-semibold text-slate-900">
+          ตั้งแม่แบบป้ายให้ {count.toLocaleString('th-TH')} สินค้า
+        </h3>
+        <p className="mt-1 text-xs text-slate-600">
+          แม่แบบที่เลือกจะ override แม่แบบของหมวด — ใช้กับสินค้าที่ต้องการป้ายแบบเฉพาะ
+        </p>
+        <select
+          value={selected}
+          onChange={(e) => setSelected(e.target.value)}
+          className="mt-3 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+        >
+          <option value="">— ใช้ตามหมวด (ลบค่าเฉพาะ) —</option>
+          {templates.map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.name || 'ไม่มีชื่อ'} ({t.widthMm}×{t.heightMm} มม.)
+            </option>
+          ))}
+        </select>
+        {templates.length === 0 ? (
+          <p className="mt-2 text-[10px] text-amber-700">
+            ยังไม่มีแม่แบบในระบบ — สร้างก่อนที่หน้า «ออกแบบป้าย»
+          </p>
+        ) : null}
+        <div className="mt-4 flex gap-2">
+          <button
+            type="button"
+            onClick={() => onApply(selected || undefined)}
+            className="flex-1 rounded-xl bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-700"
+          >
+            {selected ? 'ตั้งแม่แบบนี้' : 'ลบแม่แบบเฉพาะ'}
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-xl border border-slate-200 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50"
+          >
+            ยกเลิก
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function BulkStorageEditorDialog({
+  count,
+  onClose,
+  onApply,
+}: {
+  count: number
+  onClose: () => void
+  onApply: (mode: 'replace-all' | 'set-primary' | 'append' | 'clear', value: string) => void
+}) {
+  const [mode, setMode] = useState<'replace-all' | 'set-primary' | 'append' | 'clear'>('set-primary')
+  const [value, setValue] = useState('')
+  const needsValue = mode !== 'clear'
+  return (
+    <div
+      className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-900/45 p-4"
+      role="dialog"
+      aria-modal="true"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-4 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="text-sm font-semibold text-slate-900">
+          ตั้งที่เก็บให้ {count.toLocaleString('th-TH')} สินค้า
+        </h3>
+        <div className="mt-3 space-y-1.5 text-xs">
+          {[
+            { key: 'set-primary', label: 'ตั้งเป็นที่หลัก', hint: 'ย้ายขึ้นต้นรายการ; ถ้าไม่มี จะเพิ่มเข้ามาใหม่' },
+            { key: 'append', label: 'เพิ่มเป็นที่สำรอง', hint: 'ต่อท้ายรายการ; ถ้ามีอยู่แล้วข้าม' },
+            { key: 'replace-all', label: 'แทนที่ทั้งหมด', hint: 'ลบที่เก็บเดิมทั้งหมด ใช้ค่านี้เป็นหลักแทน' },
+            { key: 'clear', label: 'ล้างที่เก็บทั้งหมด', hint: 'ลบทุกที่เก็บของสินค้าที่เลือก' },
+          ].map((opt) => (
+            <label
+              key={opt.key}
+              className="flex cursor-pointer items-start gap-2 rounded-lg border border-slate-200 bg-slate-50/50 px-2.5 py-1.5 hover:bg-slate-50"
+            >
+              <input
+                type="radio"
+                name="bulk-storage-mode"
+                checked={mode === opt.key}
+                onChange={() => setMode(opt.key as typeof mode)}
+                className="mt-0.5 size-3.5 text-violet-600"
+              />
+              <span className="min-w-0">
+                <span className="block font-medium text-slate-800">{opt.label}</span>
+                <span className="block text-[10px] text-slate-500">{opt.hint}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+        {needsValue ? (
+          <label className="mt-3 block">
+            <span className="mb-1 block text-[10px] font-medium text-slate-600">ที่เก็บ</span>
+            <input
+              type="text"
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              placeholder="เช่น A-3-15, ชั้น 2 ตู้ B, หลังร้าน"
+              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+              autoFocus
+            />
+          </label>
+        ) : (
+          <p className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-900">
+            ⚠️ จะลบที่เก็บทั้งหมดของสินค้าที่เลือก {count.toLocaleString('th-TH')} รายการ
+          </p>
+        )}
+        <div className="mt-4 flex gap-2">
+          <button
+            type="button"
+            disabled={needsValue && !value.trim()}
+            onClick={() => onApply(mode, value)}
+            className="flex-1 rounded-xl bg-amber-600 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            ใช้กับ {count.toLocaleString('th-TH')} รายการ
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-xl border border-slate-200 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50"
+          >
+            ยกเลิก
+          </button>
+        </div>
       </div>
     </div>
   )
