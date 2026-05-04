@@ -1,5 +1,15 @@
 import { getStoredBranch } from '@/features/auth/authSession'
-import { masterSearchExtrasForSku, getProductMasterById, getProductMasterBySku, getProductMasterByBarcode } from '@/features/inventory/data/productMasterData'
+import { masterSearchExtrasForSku, getProductMasterById, getProductMasterBySku, getProductMasterByBarcode, productStorageLocations, primaryStorageLocation } from '@/features/inventory/data/productMasterData'
+import { PostReceiveWorklistModal } from '@/features/purchase/components/PostReceiveWorklistModal'
+import {
+  POST_RECEIVE_TASK_CHANGED_EVENT,
+  loadPostReceiveTasks,
+  pendingPostReceiveTasks,
+  upsertPostReceiveTask,
+  type PostReceiveSku,
+  type PostReceiveTask,
+} from '@/features/purchase/data/postReceiveTaskStore'
+import { loadPostReceiveSettings, shouldAutoQueueLabel } from '@/features/purchase/data/postReceiveSettings'
 import type { InventoryProduct } from '@/features/inventory/data/mockInventory'
 import { loadVendorPromotions, saveVendorPromotions } from '@/features/promotions/data/vendorPromotionsStore'
 import type { VendorPromotion } from '@/features/promotions/data/promotionTypes'
@@ -395,6 +405,9 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
   const [receiveOpen, setReceiveOpen] = useState(false)
   const [inlineReceive, setInlineReceive] = useState(false)
   const [receiveDraft, setReceiveDraft] = useState<Record<string, { qty: string; cost: string; shortage: string; shortageReason: string }>>({})
+  const [postReceiveTask, setPostReceiveTask] = useState<PostReceiveTask | null>(null)
+  const [postReceiveListOpen, setPostReceiveListOpen] = useState(false)
+  const [postReceiveTaskTick, setPostReceiveTaskTick] = useState(0)
   const [rcvExtraLines, setRcvExtraLines] = useState<Array<{ id: string; productId: string; sku: string; name: string; qty: string; cost: string }>>([])
   const [rcvExtraQuery, setRcvExtraQuery] = useState('')
   const [rcvShippingCost, setRcvShippingCost] = useState('')
@@ -538,6 +551,23 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
   }, [selected?.id, selected?.supplierId, selected?.status])
 
   const debtReductionChannels = useMemo(() => loadDebtReductionChannels(), [debtChannelsTick])
+
+  // Live-refresh post-receive task list when storage changes
+  useEffect(() => {
+    const sync = () => setPostReceiveTaskTick((n) => n + 1)
+    window.addEventListener(POST_RECEIVE_TASK_CHANGED_EVENT, sync)
+    return () => window.removeEventListener(POST_RECEIVE_TASK_CHANGED_EVENT, sync)
+  }, [])
+
+  const pendingTasks = useMemo(() => {
+    void postReceiveTaskTick
+    return pendingPostReceiveTasks()
+  }, [postReceiveTaskTick])
+
+  const allRecentTasks = useMemo(() => {
+    void postReceiveTaskTick
+    return loadPostReceiveTasks().slice(0, 20)
+  }, [postReceiveTaskTick])
 
   const payableDuePreview = useMemo(() => {
     if (!selected || selected.paymentMode !== 'payable') return null
@@ -905,6 +935,44 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
       return
     }
 
+    // Soft guard: warn (not block) if any product is missing sell price or storage location
+    // After save, the «หลังรับของ» modal lists the same issues for fix-up — so warn-and-confirm here
+    {
+      const allHits = [
+        ...lines.map((h) => ({ lineId: h.lineId, qty: h.qty, sku: selected.lines.find((l) => l.lineId === h.lineId)?.sku ?? '', name: selected.lines.find((l) => l.lineId === h.lineId)?.name ?? '' })),
+        ...rcvExtraLines.map((ex) => ({ lineId: '', qty: Number.parseFloat(ex.qty.replace(/,/g, '')) || 0, sku: ex.sku, name: ex.name })),
+      ]
+      type GuardIssue = { sku: string; name: string; missingSellPrice: boolean; missingLocation: boolean }
+      const issues: GuardIssue[] = []
+      const seen = new Set<string>()
+      for (const h of allHits) {
+        if (h.qty <= 0) continue
+        const key = h.sku.trim().toLowerCase()
+        if (!key || seen.has(key)) continue
+        seen.add(key)
+        const master = getProductMasterBySku(h.sku)
+        if (!master) continue
+        const missingSellPrice = !master.sellPrice || master.sellPrice <= 0
+        const missingLocation = productStorageLocations(master).length === 0
+        if (missingSellPrice || missingLocation) {
+          issues.push({ sku: h.sku, name: h.name || master.name, missingSellPrice, missingLocation })
+        }
+      }
+      if (issues.length > 0) {
+        const head = issues.slice(0, 10).map((g) => {
+          const flags: string[] = []
+          if (g.missingSellPrice) flags.push('ราคาขาย')
+          if (g.missingLocation) flags.push('ที่เก็บ')
+          return `• ${g.sku} ${g.name} — ขาด ${flags.join(' + ')}`
+        }).join('\n')
+        const more = issues.length > 10 ? `\n… และอีก ${issues.length - 10} รายการ` : ''
+        const proceed = window.confirm(
+          `⚠ มีสินค้า ${issues.length} รายการที่ยังไม่ได้ตั้งข้อมูล:\n\n${head}${more}\n\nรับเข้าก่อนได้ — หลังบันทึกจะมีกล่อง «หลังรับของ» ให้ตั้งราคาขาย/ที่เก็บ\n\nกด OK เพื่อรับเข้าต่อ หรือ Cancel เพื่อกลับไปแก้ก่อน`,
+        )
+        if (!proceed) return
+      }
+    }
+
     // Auto-inject receive bonus lines from product rules (e.g. ซื้อ 6+1L แถม 1L ฟรี)
     const bonusLineIds = new Set<string>()
     for (const hit of lines) {
@@ -1071,6 +1139,55 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
     const wasFirstReceive = selected.receiveBatches.length === 0
     if (autoClose) setFilterStatus('closed')
     else if (wasFirstReceive) setFilterStatus('receiving')
+
+    // Build post-receive worklist (label print, putaway, price review)
+    {
+      const settings = loadPostReceiveSettings()
+      const skuMap = new Map<string, PostReceiveSku>()
+      for (const hit of allReceiveLines) {
+        if (hit.qty <= 0) continue
+        const poLine = allPoLines.find((x) => x.lineId === hit.lineId)
+        if (!poLine) continue
+        const master = getProductMasterBySku(poLine.sku)
+        if (!master) continue
+        const key = poLine.sku.trim().toLowerCase()
+        const existing = skuMap.get(key)
+        if (existing) {
+          existing.qty += hit.qty
+          // weighted-average for unitCost across multiple hits of same SKU
+          const totalQty = existing.qty
+          existing.unitCost = ((existing.unitCost * (totalQty - hit.qty)) + (hit.unitCost * hit.qty)) / totalQty
+          continue
+        }
+        // Auto-decide labelQueued based on settings rule
+        const shouldQueue = shouldAutoQueueLabel(settings.autoLabelRule, master)
+        skuMap.set(key, {
+          sku: poLine.sku,
+          productId: master.id,
+          name: master.name,
+          qty: hit.qty,
+          unitCost: hit.unitCost,
+          sellPriceAtReceive: master.sellPrice ?? 0,
+          currentLocation: primaryStorageLocation(master),
+          labelQueued: !shouldQueue,
+          storedAway: false,
+          priceReviewed: false,
+        })
+      }
+      const skus = [...skuMap.values()]
+      if (skus.length > 0) {
+        const task: PostReceiveTask = {
+          batchId,
+          poId: selected.id,
+          poNo: selected.poNo,
+          supplierName: selected.supplierName || '—',
+          receivedAt: now,
+          skus,
+        }
+        upsertPostReceiveTask(task)
+        setPostReceiveTask(task)
+      }
+    }
   }
 
   const undoReceiveBatch = (batchId: string) => {
@@ -1221,7 +1338,93 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="relative flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setPostReceiveListOpen((v) => !v)}
+            className={clsx(
+              'inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-semibold',
+              pendingTasks.length > 0
+                ? 'border-violet-300 bg-violet-50 text-violet-800 hover:bg-violet-100'
+                : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50',
+            )}
+            title="งานหลังรับของที่ค้างอยู่"
+          >
+            <ClipboardList className="size-4" aria-hidden />
+            หลังรับของ
+            {pendingTasks.length > 0 ? (
+              <span className="inline-flex min-w-[18px] items-center justify-center rounded-full bg-violet-600 px-1.5 py-0 text-[10px] font-bold text-white">
+                {pendingTasks.length}
+              </span>
+            ) : null}
+          </button>
+          {postReceiveListOpen ? (
+            <div
+              className="absolute right-0 top-full z-30 mt-1 w-[28rem] max-w-[calc(100vw-2rem)] rounded-xl border border-slate-200 bg-white p-2 shadow-xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="mb-1.5 flex items-center justify-between gap-2 px-1.5">
+                <p className="text-xs font-semibold text-slate-800">
+                  งานหลังรับของ — ค้าง {pendingTasks.length} · ทั้งหมด {allRecentTasks.length}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setPostReceiveListOpen(false)}
+                  className="rounded p-0.5 text-slate-400 hover:text-slate-700"
+                >
+                  <X className="size-3.5" />
+                </button>
+              </div>
+              {allRecentTasks.length === 0 ? (
+                <p className="px-2 py-3 text-center text-xs text-slate-500">ไม่มีงานหลังรับของ</p>
+              ) : (
+                <ul className="max-h-80 overflow-y-auto">
+                  {allRecentTasks.map((t) => {
+                    const done = !!t.completedAt
+                    const labels = t.skus.filter((s) => s.labelQueued).length
+                    const stored = t.skus.filter((s) => s.storedAway).length
+                    const priced = t.skus.filter((s) => s.priceReviewed).length
+                    return (
+                      <li key={t.batchId}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPostReceiveTask(t)
+                            setPostReceiveListOpen(false)
+                          }}
+                          className={clsx(
+                            'block w-full rounded-lg px-2.5 py-2 text-left hover:bg-slate-50',
+                            done ? 'opacity-60' : '',
+                          )}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-semibold text-slate-800">{t.poNo}</span>
+                            <span className={clsx('text-[10px] font-semibold', done ? 'text-emerald-700' : 'text-amber-700')}>
+                              {done ? '✓ เสร็จ' : 'ค้างอยู่'}
+                            </span>
+                          </div>
+                          <p className="mt-0.5 text-[11px] text-slate-600 truncate">
+                            {t.supplierName} · {t.skus.length} SKU · {new Date(t.receivedAt).toLocaleString('th-TH', { hour12: false })}
+                          </p>
+                          <div className="mt-1 flex flex-wrap gap-1 text-[10px]">
+                            <span className={clsx('rounded-full px-1.5', labels === t.skus.length ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800')}>
+                              ป้าย {labels}/{t.skus.length}
+                            </span>
+                            <span className={clsx('rounded-full px-1.5', stored === t.skus.length ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800')}>
+                              จัดเก็บ {stored}/{t.skus.length}
+                            </span>
+                            <span className={clsx('rounded-full px-1.5', priced === t.skus.length ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800')}>
+                              ราคา {priced}/{t.skus.length}
+                            </span>
+                          </div>
+                        </button>
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
+            </div>
+          ) : null}
           <button
             type="button"
             onClick={() => {
@@ -3618,8 +3821,43 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
                                   const cur = d[l.lineId] ?? { qty: '', cost: '', shortage: '', shortageReason: '' }
                                   return { ...d, [l.lineId]: { ...cur, cost: e.target.value } }
                                 })}
-                                className="w-24 rounded border border-slate-200 px-2 py-1 text-right text-sm"
+                                className={clsx(
+                                  'w-24 rounded border px-2 py-1 text-right text-sm',
+                                  (() => {
+                                    const entered = Number.parseFloat((draftRow.cost ?? '').replace(/,/g, '')) || 0
+                                    const baseline = lineMaster?.avgCost && lineMaster.avgCost > 0
+                                      ? lineMaster.avgCost
+                                      : lineMaster?.lastCost ?? 0
+                                    if (entered > 0 && baseline > 0 && (entered - baseline) / baseline > 0.15) {
+                                      return 'border-orange-400 bg-orange-50'
+                                    }
+                                    return 'border-slate-200'
+                                  })(),
+                                )}
                               />
+                              {(() => {
+                                const entered = Number.parseFloat((draftRow.cost ?? '').replace(/,/g, '')) || 0
+                                const baseline = lineMaster?.avgCost && lineMaster.avgCost > 0
+                                  ? lineMaster.avgCost
+                                  : lineMaster?.lastCost ?? 0
+                                if (!(entered > 0 && baseline > 0)) return null
+                                const pct = ((entered - baseline) / baseline) * 100
+                                if (pct > 15) {
+                                  return (
+                                    <span className="text-[9px] font-semibold text-orange-700">
+                                      ⚠ ขึ้น {pct.toFixed(0)}% จาก ฿{baseline.toLocaleString('th-TH', { maximumFractionDigits: 2 })}
+                                    </span>
+                                  )
+                                }
+                                if (pct < -15) {
+                                  return (
+                                    <span className="text-[9px] font-semibold text-emerald-700">
+                                      ↓ ลด {Math.abs(pct).toFixed(0)}% จาก ฿{baseline.toLocaleString('th-TH', { maximumFractionDigits: 2 })}
+                                    </span>
+                                  )
+                                }
+                                return null
+                              })()}
                             </div>
                             <div className="flex flex-col gap-0.5">
                               <span className="text-[10px] text-rose-500">ขาด/เสียหาย</span>
@@ -3947,14 +4185,65 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
                         </div>
                       ))}
                     </div>
-                    {/* Total row when multiple bills */}
-                    {rcvInvoiceRows.length > 1 && (() => {
+                    {/* Total row + reconciliation: invoice grand total vs entered line totals */}
+                    {(() => {
                       const grandTotal = rcvInvoiceRows.reduce((s, r) => s + (Number(r.totalBaht) || 0), 0)
-                      return grandTotal > 0 ? (
-                        <p className="mt-2 text-right text-xs font-semibold text-amber-800">
-                          รวมทุกใบ ฿{grandTotal.toLocaleString('th-TH', { minimumFractionDigits: 2 })}
-                        </p>
-                      ) : null
+                      const linesSubtotal = selected.lines.reduce((s, l) => {
+                        const d = receiveDraft[l.lineId]
+                        if (!d) return s
+                        const q = Number.parseFloat((d.qty ?? '').replace(/,/g, '')) || 0
+                        const c = Number.parseFloat((d.cost ?? '').replace(/,/g, '')) || 0
+                        return s + q * c
+                      }, 0)
+                      const extrasSubtotal = rcvExtraLines.reduce((s, ex) => {
+                        const q = Number.parseFloat(ex.qty.replace(/,/g, '')) || 0
+                        const c = Number.parseFloat(ex.cost.replace(/,/g, '')) || 0
+                        return s + q * c
+                      }, 0)
+                      const subtotal = linesSubtotal + extrasSubtotal
+                      const mode = selected.vatMode ?? 'excluded'
+                      const rate = selected.vatRatePercent ?? 0
+                      const withVat = mode === 'excluded' && rate > 0 ? subtotal * (1 + rate / 100) : subtotal
+                      const shipping = Number.parseFloat((rcvShippingCost ?? '').replace(/,/g, '')) || 0
+                      const entered = withVat + shipping
+                      const showGrand = rcvInvoiceRows.length > 1 && grandTotal > 0
+                      const showRecon = grandTotal > 0 && entered > 0
+                      if (!showGrand && !showRecon) return null
+                      const diff = grandTotal - entered
+                      const absDiff = Math.abs(diff)
+                      const tone = absDiff < 1 ? 'emerald' : absDiff < 100 ? 'amber' : 'rose'
+                      const toneCls =
+                        tone === 'emerald'
+                          ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                          : tone === 'amber'
+                            ? 'border-amber-200 bg-amber-50 text-amber-900'
+                            : 'border-rose-200 bg-rose-50 text-rose-900'
+                      return (
+                        <div className="mt-2 space-y-1.5">
+                          {showGrand ? (
+                            <p className="text-right text-xs font-semibold text-amber-800">
+                              รวมทุกใบ ฿{grandTotal.toLocaleString('th-TH', { minimumFractionDigits: 2 })}
+                            </p>
+                          ) : null}
+                          {showRecon ? (
+                            <div className={clsx('rounded-lg border px-2.5 py-1.5 text-[11px]', toneCls)}>
+                              <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+                                <span>
+                                  ใบกำกับ <strong>฿{grandTotal.toLocaleString('th-TH', { minimumFractionDigits: 2 })}</strong>
+                                  {' · '}ที่กรอก <strong>฿{entered.toLocaleString('th-TH', { minimumFractionDigits: 2 })}</strong>
+                                  {mode === 'excluded' && rate > 0 ? <span className="text-[10px] opacity-70"> (รวม VAT {rate}%)</span> : null}
+                                  {shipping > 0 ? <span className="text-[10px] opacity-70"> +ค่าส่ง</span> : null}
+                                </span>
+                                <span className="font-semibold tabular-nums">
+                                  {tone === 'emerald'
+                                    ? '✓ ตรงกัน'
+                                    : `${diff > 0 ? '+' : ''}฿${diff.toLocaleString('th-TH', { minimumFractionDigits: 2 })} ${tone === 'rose' ? '(ตรวจสอบก่อน)' : ''}`}
+                                </span>
+                              </div>
+                            </div>
+                          ) : null}
+                        </div>
+                      )
                     })()}
                     <button
                       type="button"
@@ -4903,8 +5192,41 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
                               return { ...d, [l.lineId]: { ...cur, cost: e.target.value } }
                             })
                           }
-                          className="mt-0.5 block w-28 rounded border border-slate-200 px-2 py-1 text-sm"
+                          className={clsx(
+                            'mt-0.5 block w-28 rounded border px-2 py-1 text-sm',
+                            (() => {
+                              const m = getProductMasterBySku(l.sku)
+                              const entered = Number.parseFloat((draftRow.cost ?? '').replace(/,/g, '')) || 0
+                              const baseline = m?.avgCost && m.avgCost > 0 ? m.avgCost : m?.lastCost ?? 0
+                              if (entered > 0 && baseline > 0 && (entered - baseline) / baseline > 0.15) {
+                                return 'border-orange-400 bg-orange-50'
+                              }
+                              return 'border-slate-200'
+                            })(),
+                          )}
                         />
+                        {(() => {
+                          const m = getProductMasterBySku(l.sku)
+                          const entered = Number.parseFloat((draftRow.cost ?? '').replace(/,/g, '')) || 0
+                          const baseline = m?.avgCost && m.avgCost > 0 ? m.avgCost : m?.lastCost ?? 0
+                          if (!(entered > 0 && baseline > 0)) return null
+                          const pct = ((entered - baseline) / baseline) * 100
+                          if (pct > 15) {
+                            return (
+                              <span className="mt-0.5 block text-[10px] font-semibold text-orange-700">
+                                ⚠ ขึ้น {pct.toFixed(0)}% จาก ฿{baseline.toLocaleString('th-TH', { maximumFractionDigits: 2 })}
+                              </span>
+                            )
+                          }
+                          if (pct < -15) {
+                            return (
+                              <span className="mt-0.5 block text-[10px] font-semibold text-emerald-700">
+                                ↓ ลด {Math.abs(pct).toFixed(0)}% จาก ฿{baseline.toLocaleString('th-TH', { maximumFractionDigits: 2 })}
+                              </span>
+                            )
+                          }
+                          return null
+                        })()}
                       </label>
                       <label className="text-[11px] text-rose-700">
                         ขาด/เสียหาย
@@ -4965,6 +5287,13 @@ export function PurchaseOrdersWorkspacePage({ className }: PurchaseOrdersWorkspa
           copyDone={copyDone}
           onCopy={() => printPo('copy')}
           onClose={() => setPreviewOpen(false)}
+        />
+      )}
+
+      {postReceiveTask && (
+        <PostReceiveWorklistModal
+          task={postReceiveTask}
+          onClose={() => setPostReceiveTask(null)}
         />
       )}
     </div>

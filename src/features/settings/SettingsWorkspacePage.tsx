@@ -7,16 +7,17 @@ import { StoreProfilePanel } from '@/features/settings/components/StoreProfilePa
 import { UsersManagementPanel } from '@/features/settings/components/UsersManagementPanel'
 import { CustomerTiersPanel } from '@/features/settings/components/CustomerTiersPanel'
 import { CompanyBranchesPanel } from '@/features/settings/components/CompanyBranchesPanel'
+import { PostReceivePanel } from '@/features/settings/components/PostReceivePanel'
 import { DashboardLayoutSettingsForm } from '@/features/main/components/DashboardLayoutSettingsForm'
 import { clsx } from 'clsx'
-import { Building2, ChevronDown, Cloud, Database, GitBranch, HardDrive, KeyRound, Monitor, Settings, SlidersHorizontal, UserCog, Users, Layers } from 'lucide-react'
+import { Building2, ChevronDown, Cloud, Database, GitBranch, HardDrive, KeyRound, Monitor, Settings, SlidersHorizontal, Truck, UserCog, Users, Layers } from 'lucide-react'
 import { useEffect, useState } from 'react'
 
 type SettingsWorkspacePageProps = {
   className?: string
 }
 
-type SettingsSection = 'store' | 'desktop' | 'datafile' | 'hub' | 'staff' | 'permissions' | 'dashboard' | 'customerTiers' | 'companyBranches' | 'backup'
+type SettingsSection = 'store' | 'desktop' | 'datafile' | 'hub' | 'staff' | 'permissions' | 'dashboard' | 'customerTiers' | 'companyBranches' | 'backup' | 'postReceive'
 
 const SECTION_HEADINGS: Record<
   SettingsSection,
@@ -62,6 +63,10 @@ const SECTION_HEADINGS: Record<
   backup: {
     title: 'สำรองข้อมูล',
     description: 'ส่งออกและนำเข้าข้อมูลทั้งหมดในเครื่อง — ใช้สำรองหรือย้ายข้อมูลระหว่างเครื่อง',
+  },
+  postReceive: {
+    title: 'ซื้อ / รับของ',
+    description: 'กฎหลังรับของ — เช่น ตัดสินใจว่า SKU ไหนต้องเข้าคิวพิมพ์ป้ายอัตโนมัติ',
   },
 }
 
@@ -226,6 +231,20 @@ export function SettingsWorkspacePage({ className }: SettingsWorkspacePageProps)
             สำรองข้อมูล
           </button>
 
+          <button
+            type="button"
+            onClick={() => setSection('postReceive')}
+            className={clsx(
+              'flex min-h-10 w-full min-w-0 items-center gap-2 rounded-xl px-3 py-2.5 text-left text-sm font-medium transition touch-manipulation md:min-h-11',
+              section === 'postReceive'
+                ? 'bg-white text-slate-900 shadow-sm ring-1 ring-slate-200/80'
+                : 'text-slate-600 hover:bg-white/80',
+            )}
+          >
+            <Truck className="size-4 shrink-0 opacity-80" aria-hidden />
+            ซื้อ / รับของ
+          </button>
+
           <div className="mt-1 border-t border-slate-200/80 pt-3 md:mt-2" />
 
           <div className="flex min-w-0 flex-col gap-1">
@@ -320,6 +339,7 @@ export function SettingsWorkspacePage({ className }: SettingsWorkspacePageProps)
             {section === 'customerTiers' && <CustomerTiersPanel />}
             {section === 'companyBranches' && <CompanyBranchesPanel />}
             {section === 'backup' && <DataBackupPanel />}
+            {section === 'postReceive' && <PostReceivePanel />}
           </div>
         </div>
       </div>
